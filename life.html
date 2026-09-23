@@ -1,0 +1,368 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Layered Life Glitch</title>
+<style>
+  :root { --bg:#0c0c0c; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#ff2fd0; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; min-width:0; }
+  canvas { max-width:100%; max-height:calc(100vh - 40px); image-rendering: pixelated; cursor: crosshair; }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=number], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #layers { margin-top:10px; color:var(--dim); white-space:pre; font-size:11px; line-height:1.5; }
+  #layers b { color:var(--fg); font-weight:normal; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) { body { flex-direction:column; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv" width="1200" height="1000"></canvas></div>
+<div id="panel">
+  <h1>Layered life · glitch</h1>
+  <div class="btns">
+    <button id="bNew" title="N">new scene</button>
+    <button id="bSeed" title="R">reseed</button>
+    <button id="bPause" title="Space">pause</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div id="controls"></div>
+  <div id="layers"></div>
+  <div class="hint">
+    Каждая полоса — стопка слоёв клеточных автоматов (Life-like, B/S) с разным размером клетки,
+    своим правилом и стилем. Слой может «подкармливаться» соседним: живая клетка нижнего слоя
+    считается лишним соседом.<br><br>
+    Мышью — рисовать шум по всем слоям.<br>
+    N — новая сцена · R — пересеять · Space — пауза · . — шаг · S — PNG
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const hash = a => { a |= 0; a = Math.imul(a ^ a >>> 16, 0x7feb352d); a = Math.imul(a ^ a >>> 15, 0x846ca68b);
+  a ^= a >>> 16; return (a >>> 0) / 4294967296; };
+let R = Math.random;
+const pick = arr => arr[R() * arr.length | 0];
+const wpick = arr => { let s = 0; for (const [, w] of arr) s += w; let t = R() * s;
+  for (const [v, w] of arr) if ((t -= w) <= 0) return v; return arr[0][0]; };
+const rint = (a, b) => a + (R() * (b - a + 1) | 0);
+
+// ---------- rules ----------
+const RULES = [
+  ['Life', 'B3/S23', 0.6], ['HighLife', 'B36/S23', 0.6], ['2x2', 'B36/S125', 3], ['Maze', 'B3/S12345', 2],
+  ['Mazectric', 'B3/S1234', 2], ['Coral', 'B3/S45678', 2], ['Stains', 'B3678/S235678', 3],
+  ['Anneal', 'B4678/S35678', 3], ['Day&Night', 'B3678/S34678', 2], ['Move', 'B368/S245', 1],
+  ['Amoeba', 'B357/S1358', 2], ['Serviettes', 'B234/S', 0.4], ['Gnarl', 'B1/S1', 0.3],
+];
+function parseRule(str) {
+  const b = new Uint8Array(10), s = new Uint8Array(10);
+  const m = str.toUpperCase().match(/B(\d*)\/S(\d*)/);
+  if (m) { for (const c of m[1]) b[+c] = 1; for (const c of m[2]) s[+c] = 1; }
+  return { b, s };
+}
+
+// ---------- colours & fills ----------
+const BG = '#e7e7e7';
+const NEON = ['#ff1fe0', '#00eaff', '#7b3cff', '#ffec00', '#1dff7a', '#ff4f9a', '#1a5cff', '#ff8a00', '#b3ff00'];
+const GREYS = ['#9e9e9e', '#bdbdbd', '#5c5c5c', '#d2d2d2'];
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+ctx.imageSmoothingEnabled = false;
+
+const patCache = new Map();
+function pattern(kind, s, a, b) {
+  const key = [kind, s, a, b].join();
+  if (patCache.has(key)) return patCache.get(key);
+  const c = document.createElement('canvas'), g = c.getContext('2d');
+  if (kind === 'checker') { c.width = c.height = s * 2; g.fillStyle = a; g.fillRect(0, 0, s * 2, s * 2);
+    g.fillStyle = b; g.fillRect(0, 0, s, s); g.fillRect(s, s, s, s); }
+  else if (kind === 'hlines') { c.width = 1; c.height = s * 2; g.fillStyle = a; g.fillRect(0, 0, 1, s * 2);
+    g.fillStyle = b; g.fillRect(0, 0, 1, s); }
+  else if (kind === 'vbars') { c.width = s * 2; c.height = 1; g.fillStyle = a; g.fillRect(0, 0, s * 2, 1);
+    g.fillStyle = b; g.fillRect(0, 0, s, 1); }
+  else if (kind === 'dots') { c.width = c.height = s; g.fillStyle = a; g.fillRect(0, 0, s, s);
+    g.fillStyle = b; g.fillRect(0, 0, Math.max(1, s >> 1), Math.max(1, s >> 1)); }
+  const p = ctx.createPattern(c, 'repeat'); patCache.set(key, p); return p;
+}
+
+// style pool: [factory, weight]; factory(layer) -> style
+function stylePool(mode, kind) {
+  const mono = [
+    [L => ({ t: 'solid', c: '#000' }), 4],
+    [L => ({ t: 'solid', c: '#fff' }), 2],
+    [L => ({ t: 'pat', p: pattern('checker', L.ch, '#fff', '#000') }), 4],
+    [L => ({ t: 'pat', p: pattern('checker', Math.max(2, L.ch >> 1), '#000', '#fff') }), 2],
+    [L => ({ t: 'pat', p: pattern('hlines', Math.max(1, L.ch >> 2), '#fff', '#000') }), 2],
+    [L => ({ t: 'pat', p: pattern('vbars', rint(2, 8), '#fff', '#000') }), 1.5],
+    [L => ({ t: 'solid', c: pick(GREYS) }), 1.5],
+    [L => ({ t: 'pat', p: pattern('checker', L.ch >> 1 || 2, '#d6d6d6', '#f4f4f4') }), 1],
+    [L => ({ t: 'pat', p: pattern('dots', rint(3, 5), '#fff', '#000') }), 0.7],
+  ];
+  const neon = [
+    [L => ({ t: 'solid', c: pick(NEON) }), 3],
+    [L => ({ t: 'grad', a: pick(NEON), b: pick(NEON) }), 2],
+    [L => ({ t: 'grad', a: pick(NEON), b: '#ffffff' }), 1.5],
+    [L => ({ t: 'grad', a: '#000000', b: pick(NEON) }), 1],
+    [L => ({ t: 'fade', a: pick(NEON) }), 1.5],
+    [L => ({ t: 'spectrum' }), 0.8],
+    [L => ({ t: 'pat', p: pattern('checker', L.ch, pick(NEON), '#000') }), 1],
+    [L => ({ t: 'pat', p: pattern('hlines', Math.max(1, L.ch >> 2), pick(NEON), '#fff') }), 1],
+  ];
+  let pool = mode === 'mono' ? mono : mode === 'neon' ? neon.concat(mono.slice(0, 3)) : mono.concat(neon);
+  if (kind === 'line') pool = pool.filter(([f]) => { const s = f({ ch: 4 }); return s.t !== 'pat'; });
+  return pool;
+}
+
+// ---------- params ----------
+const P = { seed: 1, bands: 5, mode: 'mixed', fps: 12, glitch: 0.5, ghost: 6, density: 0.35, feed: 0.6, inject: 0.3 };
+const CONTROLS = [
+  ['seed', 'number', 0, 1e6, 1, true], ['bands', 'range', 1, 8, 1, true], ['mode', 'select', ['mixed', 'mono', 'neon'], 0, 0, true],
+  ['fps', 'range', 1, 60, 1], ['glitch', 'range', 0, 1, 0.01], ['ghost', 'range', 0, 30, 1],
+  ['density', 'range', 0.05, 0.9, 0.01, true], ['feed', 'range', 0, 1, 0.05, true], ['inject', 'range', 0, 1, 0.01],
+];
+
+// ---------- scene ----------
+let layers = [], frame = 0;
+const CW = cv.width, CH = cv.height, MX = CW * 0.05, MY = CH * 0.08;
+
+function makeScene() {
+  R = mulberry(P.seed);
+  layers = []; frame = 0;
+  const nb = P.bands, slot = (CH - 2 * MY) / nb;
+  for (let bi = 0; bi < nb; bi++) {
+    const y0 = MY + bi * slot + slot * R() * 0.08, bh = slot * (0.72 + R() * 0.2);
+    const nl = rint(1, 3), bandLayers = [];
+    for (let li = 0; li < nl; li++) {
+      const kind = wpick([['coarse', 3.5], ['mid', 3], ['fine', 1.5], ['line', 1.5]]);
+      const [cw, ch] = {
+        coarse: () => [pick([24, 32, 40, 48]), pick([16, 20, 24, 28])],
+        mid:    () => [pick([10, 12, 16, 20]), pick([6, 8, 10, 12])],
+        fine:   () => [pick([6, 8, 12]), pick([3, 4, 5])],
+        line:   () => [pick([16, 24, 40, 64]), pick([2, 3, 4])],
+      }[kind]();
+      const W = Math.floor((CW - 2 * MX) / cw), H = Math.max(3, Math.floor(bh / ch));
+      const oy = Math.round(y0 + (bh - H * ch) * R());
+      const [rname, rstr] = wpick(RULES.map(r => [r, r[2]]));
+      // ragged horizontal extent per row (random walk)
+      const x0 = new Int16Array(H), x1 = new Int16Array(H);
+      let a = R() * W * 0.3, b = W - R() * W * 0.3;
+      for (let y = 0; y < H; y++) {
+        a = Math.max(0, Math.min(W * .45, a + (R() - .5) * W * .12)); b = Math.max(W * .55, Math.min(W, b + (R() - .5) * W * .12));
+        x0[y] = a | 0; x1[y] = b | 0;
+      }
+      const pool = stylePool(P.mode, kind);
+      const L = { kind, cw, ch, W, H, ox: Math.round(MX), oy, rname, rule: parseRule(rstr), rstr, x0, x1,
+        a: new Uint8Array(W * H), age: new Uint16Array(W * H), dead: new Uint8Array(W * H).fill(255),
+        shift: new Float32Array(H), period: { coarse: rint(3, 6), mid: rint(2, 3), fine: rint(1, 2), line: 1 }[kind],
+        rx: rint(1, 4), epoch: 0, feed: null, styles: [] };
+      L.styles = Array.from({ length: rint(3, 5) }, () => wpick(pool)(L));
+      L.flash = P.mode !== 'mono' && R() < .5 ? { t: 'solid', c: pick(NEON) } : null;
+      L.old = R() < .6 ? { t: 'solid', c: '#000' } : L.styles[0];
+      L.ghostStyle = R() < .5 ? { t: 'solid', c: pick(['#cfcfcf', '#d9d9d9', '#bcbcbc']) }
+        : { t: 'pat', p: pattern('checker', Math.max(2, ch >> 1), '#d0d0d0', '#efefef') };
+      if (bandLayers.length && R() < P.feed) L.feed = pick(bandLayers);
+      seedLayer(L, P.density);
+      bandLayers.push(L); layers.push(L);
+    }
+  }
+  showLayers();
+}
+
+function inMask(L, x, y) { return x >= L.x0[y] && x < L.x1[y]; }
+function seedLayer(L, d, rect) {
+  const [ax, ay, bx, by] = rect || [0, 0, L.W, L.H];
+  for (let y = Math.max(0, ay); y < Math.min(L.H, by); y++) for (let x = Math.max(0, ax); x < Math.min(L.W, bx); x++)
+    if (inMask(L, x, y) && Math.random() < d) { const i = y * L.W + x; L.a[i] = 1; L.age[i] = 0; }
+}
+function sample(F, px, py) {
+  const x = Math.floor((px - F.ox) / F.cw), y = Math.floor((py - F.oy) / F.ch);
+  return x >= 0 && y >= 0 && x < F.W && y < F.H ? F.a[y * F.W + x] : 0;
+}
+
+// ---------- simulation ----------
+function stepLayer(L) {
+  const { W, H, a, age, dead, rule: { b, s } } = L;
+  const n = new Uint8Array(W * H);
+  let pop = 0, area = 0;
+  for (let y = 0; y < H; y++) {
+    const ym = y > 0 ? (y - 1) * W : -1, yp = y < H - 1 ? (y + 1) * W : -1, yc = y * W;
+    for (let x = x0Of(L, y); x < L.x1[y]; x++) {
+      area++;
+      const xm = (x - 1 + W) % W, xp = (x + 1) % W;
+      let c = a[yc + xm] + a[yc + xp];
+      if (ym >= 0) c += a[ym + xm] + a[ym + x] + a[ym + xp];
+      if (yp >= 0) c += a[yp + xm] + a[yp + x] + a[yp + xp];
+      if (L.feed) c += sample(L.feed, L.ox + (x + .5) * L.cw, L.oy + (y + .5) * L.ch);
+      const i = yc + x;
+      if (a[i] ? s[c] : b[c]) { n[i] = 1; pop++; }
+    }
+  }
+  for (let i = 0; i < W * H; i++) {
+    if (n[i]) { age[i] = a[i] ? Math.min(age[i] + 1, 60000) : 0; dead[i] = 0; }
+    else if (a[i]) dead[i] = 1; else if (dead[i] < 255) dead[i]++;
+  }
+  L.a = n;
+  // keep it alive: dying layers get re-injected with a noise block
+  const starving = pop < area * 0.12;
+  if ((starving && Math.random() < .5) || Math.random() < P.inject * 0.06) {
+    const w = rint(4, Math.max(5, L.W / (starving ? 1.5 : 3) | 0)), h = rint(2, Math.max(3, L.H));
+    const x = rint(0, L.W - w), y = rint(0, Math.max(0, L.H - h));
+    seedLayer(L, .45, [x, y, x + w, y + h]);
+  }
+}
+const x0Of = (L, y) => L.x0[y];
+
+function glitchStep() {
+  const g = P.glitch;
+  for (const L of layers) {
+    for (let y = 0; y < L.H; y++) if (L.shift[y] && Math.random() < .12) L.shift[y] = 0;
+    if (Math.random() < g * 0.08) {
+      const y = rint(0, L.H - 1), h = rint(1, Math.max(1, L.H / 3 | 0));
+      const dx = (Math.random() * 2 - 1) * L.cw * rint(1, 8) * g;
+      for (let k = y; k < Math.min(L.H, y + h); k++) L.shift[k] = Math.round(dx);
+    }
+    if (Math.random() < g * 0.01) L.epoch++;
+  }
+}
+
+// ---------- render ----------
+function fillFor(st, x0, x1, y, h) {
+  switch (st.t) {
+    case 'solid': return st.c;
+    case 'pat': return st.p;
+    case 'grad': case 'fade': case 'spectrum': {
+      const gr = ctx.createLinearGradient(x0, 0, x1, 0);
+      if (st.t === 'grad') { gr.addColorStop(0, st.a); gr.addColorStop(1, st.b); }
+      else if (st.t === 'fade') { gr.addColorStop(0, st.a); gr.addColorStop(1, st.a + '00'); }
+      else for (let k = 0; k <= 6; k++) gr.addColorStop(k / 6, `hsl(${k * 50},100%,55%)`);
+      return gr;
+    }
+  }
+}
+
+function styleOf(L, x, y, i) {
+  if (!L.a[i]) return L.dead[i] <= P.ghost ? L.ghostStyle : null;
+  const ag = L.age[i];
+  if (ag < 1 && L.flash) return L.flash;
+  if (ag > 40) return L.old;
+  return L.styles[hash((x / L.rx | 0) * 7919 + y * 104729 + L.epoch * 31 + L.oy) * L.styles.length | 0];
+}
+
+function render() {
+  ctx.fillStyle = BG; ctx.fillRect(0, 0, CW, CH);
+  for (const L of layers) {
+    for (let y = 0; y < L.H; y++) {
+      const py = L.oy + y * L.ch, sh = L.shift[y];
+      let run = null, rx = 0;
+      const flush = xe => {
+        if (!run) return;
+        const x0 = L.ox + rx * L.cw + sh, x1 = L.ox + xe * L.cw + sh;
+        ctx.fillStyle = fillFor(run, x0, x1, py, L.ch);
+        ctx.fillRect(x0, py, x1 - x0, L.ch);
+      };
+      for (let x = 0; x <= L.W; x++) {
+        const st = x < L.W ? styleOf(L, x, y, y * L.W + x) : null;
+        if (st !== run) { flush(x); run = st; rx = x; }
+      }
+    }
+  }
+  // tearing: copy horizontal strips of the finished frame sideways
+  const g = P.glitch;
+  for (let k = 0; k < 4; k++) if (Math.random() < g * 0.25) {
+    const y = rint(MY | 0, CH - MY | 0), h = rint(2, 30), dx = Math.round((Math.random() * 2 - 1) * 140 * g);
+    ctx.drawImage(cv, 0, y, CW, h, dx, y, CW, h);
+  }
+  // rare 1px scan line accent
+  if (Math.random() < g * 0.15) {
+    const y = rint(MY | 0, CH - MY | 0), x = rint(MX | 0, CW / 2 | 0);
+    ctx.fillStyle = pick(NEON); ctx.fillRect(x, y, rint(60, 400), rint(1, 3));
+  }
+}
+
+// ---------- loop ----------
+let paused = false, last = 0;
+function tick() {
+  frame++;
+  for (const L of layers) if (frame % L.period === 0) stepLayer(L);
+  glitchStep(); render();
+}
+function loop(t) {
+  if (!paused && t - last >= 1000 / P.fps) { last = t; tick(); }
+  requestAnimationFrame(loop);
+}
+
+// ---------- UI ----------
+const $ = id => document.getElementById(id);
+function buildControls() {
+  const box = $('controls');
+  for (const [key, type, a, b, step, rebuild] of CONTROLS) {
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = key;
+    const out = document.createElement('output');
+    let inp;
+    if (type === 'select') { inp = document.createElement('select'); a.forEach(o => inp.add(new Option(o, o))); }
+    else { inp = document.createElement('input'); inp.type = type; Object.assign(inp, { min: a, max: b, step }); }
+    inp.id = 'c_' + key; inp.value = P[key];
+    if (type === 'range') out.textContent = P[key];
+    inp.addEventListener(type === 'range' ? 'input' : 'change', () => {
+      P[key] = type === 'select' ? inp.value : +inp.value;
+      if (type === 'range') out.textContent = P[key];
+      if (rebuild) { makeScene(); render(); }
+    });
+    row.append(lab, inp, out); box.append(row);
+  }
+}
+function syncControls() { for (const [key] of CONTROLS) $('c_' + key).value = P[key]; }
+function showLayers() {
+  $('layers').innerHTML = layers.map((L, i) =>
+    `<b>${String(i).padStart(2)}</b> ${L.rname.padEnd(10)} ${L.rstr.padEnd(13)} ${L.cw}×${L.ch}` +
+    (L.feed ? ` ←${layers.indexOf(L.feed)}` : '')).join('\n');
+}
+function newScene() { P.seed = Math.random() * 1e6 | 0; syncControls(); makeScene(); render(); }
+function reseed() { for (const L of layers) { L.a.fill(0); seedLayer(L, P.density); } render(); }
+function save() { const a = document.createElement('a'); a.download = `life-glitch-${P.seed}-${frame}.png`;
+  a.href = cv.toDataURL('image/png'); a.click(); }
+function togglePause() { paused = !paused; $('bPause').textContent = paused ? 'play' : 'pause'; }
+
+$('bNew').onclick = newScene; $('bSeed').onclick = reseed; $('bSave').onclick = save; $('bPause').onclick = togglePause;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'number') return;
+  if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+  else if (e.key === 'n') newScene(); else if (e.key === 'r') reseed();
+  else if (e.key === 's') save(); else if (e.key === '.') tick();
+});
+
+// paint noise into every layer under the cursor
+let painting = false;
+function paint(e) {
+  const r = cv.getBoundingClientRect(), px = (e.clientX - r.left) * CW / r.width, py = (e.clientY - r.top) * CH / r.height;
+  for (const L of layers) {
+    const x = Math.floor((px - L.ox) / L.cw), y = Math.floor((py - L.oy) / L.ch), rad = Math.max(1, 40 / L.cw | 0);
+    if (y >= -1 && y <= L.H) seedLayer(L, .6, [x - rad, y - 1, x + rad + 1, y + 2]);
+  }
+  if (paused) render();
+}
+cv.addEventListener('pointerdown', e => { painting = true; paint(e); });
+addEventListener('pointerup', () => painting = false);
+cv.addEventListener('pointermove', e => painting && paint(e));
+
+buildControls();
+P.seed = Math.random() * 1e6 | 0; syncControls();
+makeScene(); render();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

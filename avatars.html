@@ -1,0 +1,370 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pixel Heads</title>
+<style>
+  :root { --bg:#0c0c0c; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#3434e6; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; min-width:0; }
+  canvas { max-width:100%; max-height:calc(100vh - 40px); image-rendering: pixelated; cursor:pointer; }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; color:var(--fg); }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg);
+    border:1px solid #333; padding:4px 6px; font:inherit; }
+  input[type=color] { width:100%; height:24px; background:none; border:1px solid #333; padding:0; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) { body { flex-direction:column; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Pixel Heads</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div id="controls"></div>
+  <div class="hint">
+    Space — новый набор<br>
+    клик по аватарке — перегенерировать её<br>
+    shift+клик — скачать одну аватарку<br>
+    S — сохранить весь лист
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+
+// ---------- color (OKLab) ----------
+const s2l = c => { c /= 255; return c <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4; };
+const l2s = c => { c = c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055;
+  return Math.round(Math.max(0, Math.min(1, c)) * 255); };
+function rgb2lab([r, g, b]) {
+  r = s2l(r); g = s2l(g); b = s2l(b);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+function lab2rgb([L, a, b]) {
+  let l = L + 0.3963377774 * a + 0.2158037573 * b;
+  let m = L - 0.1055613458 * a - 0.0638541728 * b;
+  let s = L - 0.0894841775 * a - 1.2914855480 * b;
+  l = l ** 3; m = m ** 3; s = s ** 3;
+  return [l2s( 4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+          l2s(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+          l2s(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)];
+}
+const hex2rgb = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const hex2lab = h => rgb2lab(hex2rgb(h));
+const lch = (L, C, h) => [L, C * Math.cos(h * Math.PI / 180), C * Math.sin(h * Math.PI / 180)];
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const clamp01 = t => Math.max(0, Math.min(1, t));
+function ramp(P, t) {
+  t = clamp01(t) * (P.length - 1);
+  const i = Math.min(P.length - 2, Math.floor(t));
+  return P.length === 1 ? P[0] : mix(P[i], P[i + 1], t - i);
+}
+
+// swatches sampled from the reference style
+const SWATCHES = ['#3131e0','#4a3fd0','#6e62d8','#b3aaf0','#ff9ad8','#ff4f8b','#ff1f1f','#ff5a2a',
+  '#ff8c1a','#ffb52e','#ffd23f','#fff0b0','#a8e28c','#b8e8c8','#1f9a4a','#7fbf8a','#16a3a3',
+  '#1a8fd8','#9ec5e8','#ffc9a3','#ff8f7a','#8a4a18','#2a120c','#1e0f2a','#e6a8f0','#5ec2b0'].map(hex2lab);
+
+// ---------- generator ----------
+const G = 15;
+const WHITE = [255, 255, 255], BLACK = [0, 0, 0];
+
+function makePalette(R, n, o) {
+  const pick = a => a[Math.floor(R() * a.length)];
+  let P;
+  const kind = R();
+  if (kind < 0.55) { // curated swatches
+    const pool = SWATCHES.slice(); P = [];
+    for (let i = 0; i < n; i++) P.push(pool.splice(Math.floor(R() * pool.length), 1)[0]);
+    if (R() < 0.7) P.sort((a, b) => Math.atan2(a[2], a[1]) - Math.atan2(b[2], b[1]));
+  } else { // hue walk in OKLCH
+    const pastel = R() < 0.2;
+    let h = R() * 360, L = pastel ? 0.88 : 0.62 + R() * 0.2;
+    const step = (R() < 0.5 ? 1 : -1) * (18 + R() * 45);
+    P = [];
+    for (let i = 0; i < n; i++) {
+      const C = pastel ? 0.05 + R() * 0.05 : 0.16 + R() * 0.06 - Math.max(0, L - 0.8) * 0.6;
+      P.push(lch(L, C, h));
+      h += step + (R() - 0.5) * 20;
+      L = pastel ? 0.84 + R() * 0.1 : Math.max(0.5, Math.min(0.92, L + (R() - 0.5) * 0.25));
+    }
+  }
+  // dark "shadow" stop in the middle, like the orange→brown→violet heads
+  if (R() < o.dark) P.splice(1 + Math.floor(R() * (P.length - 1)), 0, pick([hex2lab('#2a120c'), hex2lab('#1e0f2a'), hex2lab('#3a2418')]));
+  if (R() < 0.5) P.reverse();
+  return P;
+}
+
+function genAvatar(seed, o) {
+  const R = mulberry32(hashStr(seed));
+  const ri = (a, b) => a + Math.floor(R() * (b - a + 1));
+  const ch = p => R() < p;
+  const pick = a => a[Math.floor(R() * a.length)];
+  const m = Array.from({ length: G }, () => new Array(G).fill(0));
+  const set = (x, y, v = 1) => { if (x >= 0 && y >= 0 && x < G && y < G) m[y][x] = v; };
+
+  // --- silhouette (built facing right, mirrored later) ---
+  const headW = ri(6, 9);
+  const eyeY = ri(5, 7);
+  const top = Math.max(1, eyeY - ri(3, 5));
+  const bottomY = G - 1 - ri(0, 2);
+  const x0 = Math.max(2, Math.min(G - 2 - headW, Math.floor((G - headW) / 2) + ri(-1, 1)));
+  const x1 = x0 + headW - 1;
+  const topStyle = o.top === 'auto' ? pick(['flat', 'flat', 'spikes', 'dome', 'peak', 'ragged']) : o.top;
+  const botStyle = o.body === 'auto' ? pick(['neck', 'neck', 'neck', 'round', 'shoulders']) : o.body;
+
+  const maxAdd = eyeY - top - 1;
+  const phase = ri(0, 1), peakC = ri(1, headW - 2), peakK = pick([0.5, 1, 1]);
+  let prev = ri(0, 1);
+  const colTop = [];
+  for (let c = 0; c < headW; c++) {
+    const edge = Math.min(c, headW - 1 - c);
+    let add = 0;
+    if (topStyle === 'flat') add = edge === 0 && ch(0.5) ? 1 : 0;
+    else if (topStyle === 'spikes') add = (c + phase) % 2;
+    else if (topStyle === 'dome') add = edge === 0 ? ri(1, 2) : edge === 1 ? ri(0, 1) : 0;
+    else if (topStyle === 'peak') add = Math.round(Math.abs(c - peakC) * peakK);
+    else if (topStyle === 'ragged') { prev = Math.max(0, Math.min(2, prev + ri(-1, 1))); add = prev; }
+    colTop.push(top + Math.min(add, maxAdd));
+  }
+  // spikes read better one row higher
+  if (topStyle === 'spikes' && top > 1) for (let c = 0; c < headW; c++) colTop[c]--;
+
+  const colBot = [];
+  const neckW = ri(2, headW - 2), chinY = eyeY + ri(2, 3), step = pick([1, 1, 2, 3]);
+  const cx = (headW - 1) / 2 - ri(0, 1), rk = ri(2, 4);
+  for (let c = 0; c < headW; c++) {
+    if (botStyle === 'round') {
+      const d = (c - cx) / (headW / 2);
+      colBot.push(Math.max(eyeY + 2, bottomY - 1 - Math.floor(d * d * rk)));
+    } else if (c < neckW) colBot.push(bottomY - (c === 0 && ch(0.3) ? 1 : 0));
+    else colBot.push(Math.max(chinY, bottomY - (c - neckW + 1) * step));
+  }
+  for (let c = 0; c < headW; c++) for (let y = colTop[c]; y <= colBot[c]; y++) set(x0 + c, y);
+
+  // shoulders: wide flat base
+  if (botStyle === 'shoulders') {
+    const rows = ri(1, 3), l = x0 - ri(0, 2), r = x1 + ri(1, 3);
+    for (let y = bottomY - rows + 1; y <= bottomY; y++) for (let x = l; x <= r; x++) set(x, y);
+    if (ch(0.5)) set(r + 1, bottomY - rows + 1);
+  }
+  // round heads bulge at the eye line
+  if (botStyle === 'round') for (let y = eyeY - 1; y <= eyeY + 2; y++) { set(x0 - 1, y); if (y > eyeY - 1) set(x1 + 1, y); }
+
+  // --- extras ---
+  if (ch(o.extras)) { // back of head bulge
+    const a = eyeY - ri(0, 2), b = eyeY + ri(0, 2);
+    for (let y = a; y <= b; y++) set(x0 - 1, y);
+    if (ch(0.3)) set(x0 - 2, eyeY + ri(0, 1));
+  }
+  if (ch(o.extras * 0.6)) { // nose / ear sticking out
+    const y = eyeY + pick([-1, 0, 1]), len = ri(1, 2);
+    for (let i = 1; i <= len; i++) set(x1 + i, y);
+  }
+  if (ch(o.extras * 0.4)) { // nose on the back side too (the "bird" look)
+    const y = eyeY + pick([-1, 0]), len = ri(1, 3);
+    for (let i = 1; i <= len; i++) set(x0 - i, y);
+  }
+  if (ch(o.extras * 0.4)) { // stray pixels
+    const n = ri(1, 3);
+    for (let i = 0; i < n; i++) {
+      const y = ri(top, bottomY), side = ch(0.5);
+      const x = side ? x1 + ri(2, 3) : x0 - ri(2, 3);
+      set(x, y);
+    }
+  }
+  if (ch(o.extras * 0.4)) { // hair tufts
+    const n = ri(1, 3);
+    for (let i = 0; i < n; i++) { const c = ri(0, headW - 1); set(x0 + c, colTop[c] - 1); }
+  }
+
+  // --- eyes ---
+  const xr = x1 - (headW >= 7 ? ri(0, 1) : 0);
+  const lookRight = ch(0.5);
+  const eyes = [];
+  for (const ex of [xr - 4, xr - 1]) {
+    eyes.push([ex, eyeY, lookRight ? WHITE : BLACK], [ex + 1, eyeY, lookRight ? BLACK : WHITE]);
+    set(ex, eyeY); set(ex + 1, eyeY);
+  }
+  set(xr - 2, eyeY);
+
+  // --- mirror + centre ---
+  const flip = o.face === 'auto' ? ch(0.4) : o.face === 'left';
+  let minX = G, maxX = -1, minY = G, maxY = -1;
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) if (m[y][x]) {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x); minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+  }
+  const dx = Math.floor((G - 1 - maxX - minX) / 2), dy = Math.floor((G - 1 - maxY - minY) / 2);
+  const tx = x => { const nx = x + dx; return flip ? G - 1 - nx : nx; };
+  const W = maxX - minX, H = maxY - minY;
+
+  // --- colour ---
+  const P = makePalette(R, o.pal || ri(3, 5), o);
+  const n = P.length;
+  const mode = o.mode === 'auto' ? pick(['stripes', 'stripes', 'bands', 'gradient', 'gradient', 'mosaic']) : o.mode;
+  const out = Array.from({ length: G }, () => new Array(G).fill(null));
+
+  const discrete = ch(0.5), sw = ch(0.75) ? 1 : 2;
+  const perm = P.map((_, i) => i).sort(() => R() - 0.5);
+  const vShift = (R() - 0.5) * 0.3, vTint = P[ri(0, n - 1)], vTintAmt = ch(0.4) ? R() * 0.4 : 0;
+  const slope = pick([0, 0, 0.34, -0.34, 0.5, -0.5, 1, -1]);
+  const ang = pick([Math.PI / 2, Math.PI / 2, 0, R() * Math.PI * 2]);
+  const ca = Math.cos(ang), sa = Math.sin(ang), sec = P[ri(0, n - 1)], secAmt = R() * 0.5;
+  const colNoise = Array.from({ length: G }, () => (R() - 0.5) * 0.3);
+
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+    if (!m[y][x]) continue;
+    const u = (x - minX) / Math.max(1, W), v = (y - minY) / Math.max(1, H);
+    let c;
+    if (mode === 'stripes') {
+      const k = Math.floor((x - minX) / sw), nk = Math.floor(W / sw);
+      const base = discrete ? P[perm[k % n]] : ramp(P, nk ? k / nk : 0);
+      c = mix(base, vTint, v * vTintAmt);
+      c = [c[0] + vShift * (v - 0.5), c[1], c[2]];
+    } else if (mode === 'bands') {
+      const row = (y - minY) + (x - minX) * slope;
+      const span = H + Math.abs(slope) * W;
+      const t = (slope < 0 ? row + Math.abs(slope) * W : row) / span;
+      c = discrete ? P[Math.min(n - 1, Math.floor(t * n))] : ramp(P, t);
+      c = [c[0] + (u - 0.5) * vShift, c[1], c[2]];
+    } else if (mode === 'gradient') {
+      const t = ((u - 0.5) * ca + (v - 0.5) * sa) / (Math.abs(ca) + Math.abs(sa)) + 0.5;
+      const s = ((u - 0.5) * -sa + (v - 0.5) * ca) / (Math.abs(ca) + Math.abs(sa)) + 0.5;
+      c = mix(ramp(P, t), sec, s * secAmt);
+    } else { // mosaic
+      c = ch(0.18) ? P[ri(0, n - 1)] : ramp(P, u * 0.6 + v * 0.4 + colNoise[x] + (R() - 0.5) * 0.15);
+    }
+    if (o.jitter) c = [c[0] + (R() - 0.5) * o.jitter * 0.1, c[1] + (R() - 0.5) * o.jitter * 0.03, c[2] + (R() - 0.5) * o.jitter * 0.03];
+    out[y + dy][tx(x)] = lab2rgb(c);
+  }
+  for (const [x, y, col] of eyes) out[y + dy][tx(x)] = flip ? (col === WHITE ? BLACK : WHITE) : col;
+  return out;
+}
+
+// ---------- ui ----------
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const P = { grid: 3, cell: 20, gap: 3, pal: 0, dark: 0.2, jitter: 0.3, extras: 0.5,
+  mode: 'auto', top: 'auto', body: 'auto', face: 'auto', bg: '#fbf5e6', line: '#ece4d2' };
+const defs = [
+  ['grid', 'сетка', 1, 10, 1], ['cell', 'пиксель', 4, 48, 1], ['gap', 'зазор', 0, 20, 1],
+  ['pal', 'цветов (0=авто)', 0, 7, 1], ['dark', 'тёмн. полоса', 0, 1, 0.05],
+  ['jitter', 'шум', 0, 1, 0.05], ['extras', 'детали', 0, 1, 0.05],
+];
+const selects = [
+  ['mode', 'заливка', ['auto', 'stripes', 'bands', 'gradient', 'mosaic']],
+  ['top', 'макушка', ['auto', 'flat', 'spikes', 'dome', 'peak', 'ragged']],
+  ['body', 'низ', ['auto', 'neck', 'round', 'shoulders']],
+  ['face', 'взгляд', ['auto', 'right', 'left']],
+];
+const box = document.getElementById('controls');
+for (const [k, label, min, max, step] of defs) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${P[k]}"><output>${P[k]}</output>`;
+  const inp = row.querySelector('input'), out = row.querySelector('output');
+  inp.oninput = () => { P[k] = +inp.value; out.textContent = inp.value; render(); };
+  box.appendChild(row);
+}
+for (const [k, label, opts] of selects) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><select>${opts.map(v => `<option>${v}</option>`).join('')}</select><span></span>`;
+  const sel = row.querySelector('select'); sel.value = P[k];
+  sel.onchange = () => { P[k] = sel.value; render(); };
+  box.appendChild(row);
+}
+for (const [k, label] of [['bg', 'фон'], ['line', 'линии']]) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="color" value="${P[k]}"><span></span>`;
+  const inp = row.querySelector('input');
+  inp.oninput = () => { P[k] = inp.value; render(); };
+  box.appendChild(row);
+}
+
+const seedInp = document.getElementById('seed');
+let seed = randSeed(), overrides = {};
+seedInp.value = seed;
+seedInp.onchange = () => { seed = seedInp.value; overrides = {}; render(); };
+const tileSeed = i => overrides[i] ?? `${seed}:${i}`;
+
+function drawAvatar(c, grid, ox, oy, cell) {
+  c.fillStyle = P.bg; c.fillRect(ox, oy, G * cell, G * cell);
+  for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
+    const col = grid[y][x]; if (!col) continue;
+    c.fillStyle = `rgb(${col[0]},${col[1]},${col[2]})`;
+    c.fillRect(ox + x * cell, oy + y * cell, cell, cell);
+  }
+}
+
+function render() {
+  const tile = G * P.cell, n = P.grid;
+  cv.width = cv.height = n * tile + (n - 1) * P.gap;
+  ctx.fillStyle = P.line; ctx.fillRect(0, 0, cv.width, cv.height);
+  for (let i = 0; i < n * n; i++) {
+    const ox = (i % n) * (tile + P.gap), oy = Math.floor(i / n) * (tile + P.gap);
+    drawAvatar(ctx, genAvatar(tileSeed(i), P), ox, oy, P.cell);
+  }
+}
+
+function download(canvas, name) {
+  const a = document.createElement('a'); a.download = name; a.href = canvas.toDataURL('image/png'); a.click();
+}
+function newSet() { seed = randSeed(); seedInp.value = seed; overrides = {}; render(); }
+
+cv.addEventListener('click', e => {
+  const r = cv.getBoundingClientRect();
+  const px = (e.clientX - r.left) * cv.width / r.width, py = (e.clientY - r.top) * cv.height / r.height;
+  const step = G * P.cell + P.gap;
+  const col = Math.floor(px / step), row = Math.floor(py / step);
+  if (col >= P.grid || row >= P.grid) return;
+  const i = row * P.grid + col;
+  if (e.shiftKey) {
+    const c = document.createElement('canvas'), cell = Math.max(P.cell, 32);
+    c.width = c.height = G * cell;
+    drawAvatar(c.getContext('2d'), genAvatar(tileSeed(i), P), 0, 0, cell);
+    download(c, `head-${tileSeed(i).replace(/[^\w-]/g, '_')}.png`);
+  } else { overrides[i] = randSeed(); render(); }
+});
+document.getElementById('bNew').onclick = newSet;
+document.getElementById('bDice').onclick = newSet;
+document.getElementById('bSave').onclick = () => download(cv, `heads-${seed}.png`);
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.code === 'Space') { e.preventDefault(); newSet(); }
+  else if (e.code === 'KeyR') newSet();
+  else if (e.code === 'KeyS') download(cv, `heads-${seed}.png`);
+});
+render();
+</script>
+</body>
+</html>

@@ -1,0 +1,789 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Glyph Portraits</title>
+<style>
+  :root { --bg:#0c0c0c; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#f2288f; }
+  * { box-sizing: border-box; }
+  [hidden] { display:none !important; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; min-width:0; position:relative; }
+  canvas { display:block; cursor:pointer; box-shadow: 0 0 0 1px #1e1e1e; }
+  #drop { position:absolute; inset:12px; border:1px dashed var(--acc); color:var(--acc); display:none;
+    align-items:center; justify-content:center; background:rgba(0,0,0,.65); pointer-events:none; letter-spacing:.08em; }
+  body.dragging #drop { display:flex; }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; color:var(--fg); }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg);
+    border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #photoName { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas><div id="drop">отпусти фото — будет портрет</div></div>
+<div id="panel">
+  <h1>Glyph Portraits</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bAuto" title="A">auto</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div id="controls"></div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <div class="btns"><button id="bPhoto" title="F">фото…</button></div>
+  <div class="row" id="photoRow" hidden><label>фото</label><span id="photoName"></span><button id="bNoPhoto" title="Esc">✕</button></div>
+  <div class="hint">
+    Space / клик — новый портрет<br>
+    A — автосмена<br>
+    S — сохранить PNG (2×)<br>
+    F или перетащить файл — портрет из фото<br>
+    Esc — вернуть генератор
+  </div>
+</div>
+<input type="file" id="file" accept="image/*" hidden>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+function makeRng(seed) {
+  const n = mulberry32(hashStr(seed));
+  const r = () => n();
+  r.range = (a, b) => a + (b - a) * n();
+  r.int = (a, b) => a + Math.floor(n() * (b - a + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => {
+    let s = 0; for (const w of ws) s += w;
+    let v = n() * s;
+    for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i];
+    return items[items.length - 1];
+  };
+  return r;
+}
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+
+// ---------- params ----------
+const P = { cols: 24, glyphs: 1, color: 1, glitch: 1, contrast: 1, format: 'a' };
+const CTRL = [
+  ['cols',     'колонки',  12, 44, 1],
+  ['glyphs',   'глифы',    0, 2.5, 0.05],
+  ['color',    'цвет',     0, 2.5, 0.05],
+  ['glitch',   'глитч',    0, 2.5, 0.05],
+  ['contrast', 'контраст', 0.4, 2, 0.05],
+];
+const FORMATS = { a: ['A · 1:√2', Math.SQRT1_2], p34: ['3:4', 3 / 4], p45: ['4:5', 4 / 5], sq: ['1:1', 1], st: ['9:16', 9 / 16] };
+
+// design units: one character cell is CW×CH, patterns live on half-cells (UW×HH)
+const CW = 30, CH = 64, UW = CW / 2, HH = CH / 2, GAPY = 3;
+const SW = 4, GAP = 4;                      // glyph stroke and double-line gap
+const C = { white: '#f4f4f0', gray: '#9b9b9b', magenta: '#f2288f', yellow: '#ffe417',
+            cyan: '#23dff2', red: '#ff2d22', blue: '#2b2bff' };
+const REG_BG = 0, REG_HAIR = 1, REG_FACE = 2, REG_NECK = 3, REG_BODY = 4;
+
+// ---------- dot screens ----------
+// [step x, step y, dot, staggered rows, inverted (black dots on light)]
+const PATS = [
+  [9,6,2,1,0], [8,5,2,1,0], [7,5,2,1,0], [6,6,2,0,0], [6,4,2,1,0], [5,5,2,0,0], [5,4,2,1,0], [6,6,3,0,0],
+  [4,4,2,0,0], [4,3,2,1,0], [5,5,3,0,0], [6,4,3,1,0], [3,3,2,0,0], [4,4,3,0,0],
+  [4,3,2,1,1], [4,4,2,0,1], [6,6,3,0,1], [5,4,2,1,1], [6,4,2,1,1], [5,5,2,0,1], [7,5,2,1,1],
+  [6,6,2,0,1], [8,5,2,1,1], [9,6,2,1,1],
+].map(([sx, sy, d, st, inv]) => ({ sx, sy, d, st, inv, cov: inv ? 1 - d * d / (sx * sy) : d * d / (sx * sy) }));
+const BINS = [0.05, 0.13, 0.22, 0.34, 0.5, 0.7, 0.82, 0.975];
+const binOf = t => { let b = 0; while (b < BINS.length && t >= BINS[b]) b++; return b; };
+
+const tiles = new Map();
+function tileFor(p, s, color) {
+  const X = Math.max(2, Math.round(p.sx * s)), Y = Math.max(2, Math.round(p.sy * s));
+  const D = Math.max(1, Math.min(Math.round(p.d * s), X - 1, Y - 1));
+  const key = `${X}|${Y}|${D}|${p.st}|${p.inv}|${color}`;
+  let t = tiles.get(key);
+  if (!t) {
+    if (tiles.size > 600) tiles.clear();
+    const c = document.createElement('canvas'); c.width = X; c.height = p.st ? 2 * Y : Y;
+    const g = c.getContext('2d');
+    g.fillStyle = p.inv ? color : '#000'; g.fillRect(0, 0, c.width, c.height);
+    g.fillStyle = p.inv ? '#000' : color;
+    g.fillRect(0, 0, D, D);
+    if (p.st) { const o = X >> 1; g.fillRect(o, Y, D, D); if (o + D > X) g.fillRect(o - X, Y, D, D); }
+    t = { c, X, Y, ox: (X - D) >> 1, oy: (Y - D) >> 1 };
+    tiles.set(key, t);
+  }
+  return t;
+}
+
+// ---------- glyphs ----------
+// box glyph from its arms: 0 none, 1 single, 2 double (up, down, left, right)
+const B = (u, d, l, r) => {
+  const s = [];
+  if (u) s.push([.5, 0, .5, .5, u]); if (d) s.push([.5, .5, .5, 1, d]);
+  if (l) s.push([0, .5, .5, .5, l]); if (r) s.push([.5, .5, 1, .5, r]);
+  return { seg: s };
+};
+const line = (c, pts) => { c.beginPath(); pts.forEach(([x, y], i) => i ? c.lineTo(x, y) : c.moveTo(x, y)); c.stroke(); };
+const PG = path => ({ path });
+const GL = {
+  '║': B(2,2,0,0), '═': B(0,0,2,2), '╬': B(2,2,2,2), '╠': B(2,2,0,2), '╣': B(2,2,2,0),
+  '╦': B(0,2,2,2), '╩': B(2,0,2,2), '╔': B(0,2,0,2), '╗': B(0,2,2,0), '╚': B(2,0,0,2), '╝': B(2,0,2,0),
+  '╟': B(2,2,0,1), '╢': B(2,2,1,0), '╫': B(2,2,1,1), '╪': B(1,1,2,2), '╤': B(0,1,2,2), '╧': B(1,0,2,2),
+  '╓': B(0,2,0,1), '╖': B(0,2,1,0), '╙': B(2,0,0,1), '╜': B(2,0,1,0),
+  '╒': B(0,1,0,2), '╕': B(0,1,2,0), '╘': B(1,0,0,2), '╛': B(1,0,2,0),
+  '│': B(1,1,0,0), '─': B(0,0,1,1), '┼': B(1,1,1,1), '├': B(1,1,0,1), '┤': B(1,1,1,0),
+  '┬': B(0,1,1,1), '┴': B(1,0,1,1), '┐': B(0,1,1,0), '┌': B(0,1,0,1), '└': B(1,0,0,1), '┘': B(1,0,1,0),
+  'H':  { w: 2, seg: [[.22,.05,.22,.95,2], [.78,.05,.78,.95,2], [.22,.5,.78,.5,2]] },
+  'L2': { seg: [[.34,.22,.34,.8,2], [.34,.8,1,.8,2]] },
+  '¬':  { seg: [[.12,.32,.72,.32,1], [.72,.32,.72,.56,1]] },
+  '⌐':  { seg: [[.28,.32,.88,.32,1], [.28,.32,.28,.56,1]] },
+  'ᒪ':  { seg: [[.3,.34,.3,.68,1], [.3,.68,.8,.68,1]] },
+  '[':  { seg: [[.35,.18,.35,.82,1], [.35,.18,.75,.18,1], [.35,.82,.75,.82,1]] },
+  ']':  { seg: [[.65,.18,.65,.82,1], [.25,.18,.65,.18,1], [.25,.82,.65,.82,1]] },
+  'Ч':  { seg: [[.28,.3,.28,.55,1], [.28,.55,.72,.55,1], [.72,.3,.72,.78,1]] },
+  '≈': PG((c, x, y, w, h) => {
+    for (const fy of [.42, .56]) {
+      const pts = [];
+      for (let i = 0; i <= 16; i++) { const t = i / 16; pts.push([x + w * (.1 + .8 * t), y + h * fy - Math.sin(t * Math.PI * 2) * h * .03]); }
+      line(c, pts);
+    }
+  }),
+  '»': PG((c, x, y, w, h) => {
+    line(c, [[x + w * .14, y + h * .4], [x + w * .44, y + h * .5], [x + w * .14, y + h * .6]]);
+    line(c, [[x + w * .5, y + h * .4], [x + w * .8, y + h * .5], [x + w * .5, y + h * .6]]);
+  }),
+  '\\': PG((c, x, y, w, h) => line(c, [[x + w * .22, y + h * .3], [x + w * .78, y + h * .72]])),
+  '/':  PG((c, x, y, w, h) => line(c, [[x + w * .78, y + h * .3], [x + w * .22, y + h * .72]])),
+  '^':  PG((c, x, y, w, h) => line(c, [[x + w * .18, y + h * .38], [x + w * .5, y + h * .22], [x + w * .82, y + h * .38]])),
+  ':':  PG((c, x, y, w, h, sw) => {
+    const q = Math.round(sw * 1.2), qx = Math.round(x + w * .5 - q / 2);
+    c.fillRect(qx, Math.round(y + h * .36), q, q); c.fillRect(qx, Math.round(y + h * .6), q, q);
+  }),
+  "'":  PG((c, x, y, w, h, sw) => c.fillRect(Math.round(x + w * .5 - sw / 2), Math.round(y + h * .26), sw, Math.round(h * .16))),
+  '"':  PG((c, x, y, w, h, sw) => {
+    for (const fx of [.34, .66]) c.fillRect(Math.round(x + w * fx - sw / 2), Math.round(y + h * .26), sw, Math.round(h * .14));
+  }),
+  '∩': PG((c, x, y, w, h) => {
+    const r = w * .26, cx = x + w * .5, cy = y + h * .48;
+    c.beginPath(); c.moveTo(cx - r, y + h * .8); c.lineTo(cx - r, cy); c.arc(cx, cy, r, Math.PI, 0); c.lineTo(cx + r, y + h * .8); c.stroke();
+  }),
+  '⌂': PG((c, x, y, w, h) => {
+    c.beginPath(); c.moveTo(x + w * .24, y + h * .78); c.lineTo(x + w * .24, y + h * .5); c.lineTo(x + w * .5, y + h * .34);
+    c.lineTo(x + w * .76, y + h * .5); c.lineTo(x + w * .76, y + h * .78); c.closePath(); c.stroke();
+  }),
+  '•': PG((c, x, y, w, h, sw) => {
+    const r = sw * 1.1, cx = x + w * .5, cy = y + h * .28;
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.fill();
+    c.lineWidth = Math.max(1, sw * .7);
+    c.beginPath(); c.moveTo(cx - r * .3, cy + r * .8); c.quadraticCurveTo(cx - r * 1.2, cy + r * 2.2, cx + r * .6, cy + r * 2.6); c.stroke();
+  }),
+  'δ': PG((c, x, y, w, h) => {
+    const cx = x + w * .5, cy = y + h * .6, r = w * .22;
+    c.beginPath(); c.arc(cx, cy, r, 0, Math.PI * 2); c.stroke();
+    line(c, [[cx + r * .3, cy - r], [cx - r * .6, y + h * .3], [cx + r * .9, y + h * .24]]);
+  }),
+  'ʅ': PG((c, x, y, w, h) => {
+    c.beginPath(); c.moveTo(x + w * .42, y + h * .12); c.lineTo(x + w * .42, y + h * .66);
+    c.quadraticCurveTo(x + w * .42, y + h * .84, x + w * .72, y + h * .84); c.stroke();
+  }),
+};
+const FAM = {
+  vert:   ['║','╟','╢','╠','╣','│','├','┤','╫','╓','╖','╙','╜','║','╟'],
+  hor:    ['═','╦','╩','╤','╧','─','╪','┬','┴','═'],
+  cross:  ['╬','╫','╪','┼','H','╬','╠','╣'],
+  corner: ['╔','╗','╚','╝','┐','┌','└','┘','╒','╕','╘','╛','¬','⌐','ᒪ','L2'],
+  punct:  ['≈','»','\\','/','^',':',"'",'"','[',']','∩','⌂','•','ʅ','Ч','δ'],
+  eye:    ['╫','╬','╟','╢','H','╠','╣','╫','╬'],
+  brow:   ['═','─','╤','╦','¬','⌐','═'],
+  nose:   ['║','╟','╢','│','┘','└','⌂','ʅ'],
+  mouth:  ['≈','═','»','╧','╩','─','≈','\\'],
+  lens:   ['╬','╫','╪','H'],
+  bridge: ['═','─'],
+};
+
+// Double lines are drawn as a solid bar with the gap carved back out, so joints come out
+// like real box-drawing characters. Endpoints touching another segment become joints.
+function drawSegs(c, segs, bx, by, bw, bh, sw, gap) {
+  const S = segs.map(([ax, ay, ex, ey, t]) => {
+    const x0 = bx + Math.round(ax * bw), y0 = by + Math.round(ay * bh);
+    const x1 = bx + Math.round(ex * bw), y1 = by + Math.round(ey * bh);
+    const v = x0 === x1;
+    return v ? { v, t, c: x0, a0: Math.min(y0, y1), a1: Math.max(y0, y1), p0: [x0, Math.min(y0, y1)], p1: [x0, Math.max(y0, y1)] }
+             : { v, t, c: y0, a0: Math.min(x0, x1), a1: Math.max(x0, x1), p0: [Math.min(x0, x1), y0], p1: [Math.max(x0, x1), y0] };
+  });
+  const has = (s, [x, y]) => s.v ? Math.abs(x - s.c) <= 1 && y >= s.a0 - 1 && y <= s.a1 + 1
+                                 : Math.abs(y - s.c) <= 1 && x >= s.a0 - 1 && x <= s.a1 + 1;
+  const joint = (self, pt) => {
+    let j = 0;
+    for (const o of S) if (o !== self && has(o, pt)) j = Math.max(j, o.t);
+    return j;
+  };
+  for (const s of S) { s.j0 = joint(s, s.p0); s.j1 = joint(s, s.p1); }
+  const hl = gap >> 1, hs = sw >> 1;
+  const R = (s, a0, a1, lo, hi) => s.v ? c.fillRect(s.c + lo, a0, hi - lo, a1 - a0) : c.fillRect(a0, s.c + lo, a1 - a0, hi - lo);
+  for (const s of S) if (s.t === 2) {
+    const e0 = s.j0 === 2 ? hl + sw : s.j0 === 1 ? hs : 0;
+    const e1 = s.j1 === 2 ? gap - hl + sw : s.j1 === 1 ? sw - hs : 0;
+    R(s, s.a0 - e0, s.a1 + e1, -hl - sw, gap - hl + sw);
+  }
+  for (const s of S) if (s.t === 1) R(s, s.a0 - (s.j0 ? hs : 0), s.a1 + (s.j1 ? sw - hs : 0), -hs, sw - hs);
+  c.fillStyle = '#000';
+  for (const s of S) if (s.t === 2) {
+    const e0 = s.j0 === 2 ? hl : s.j0 === 1 ? -(sw - hs) : 2;
+    const e1 = s.j1 === 2 ? gap - hl : s.j1 === 1 ? -hs : 2;
+    R(s, s.a0 - e0, s.a1 + e1, -hl, gap - hl);
+  }
+}
+
+// ---------- figure ----------
+function superE(x, y, p, jaw) {
+  if (y > 0) { x /= Math.max(0.05, 1 - jaw * y * y); p = 2; }
+  return Math.pow(Math.abs(x), p) + Math.pow(Math.abs(y), p) < 1;
+}
+
+function makeFigure(rng, Ar) {
+  const f = {};
+  f.cx = Ar / 2 + rng.range(-0.05, 0.05);
+  f.hrx = rng.range(0.17, 0.235);
+  f.hry = rng.range(0.2, 0.27);
+  f.hy = rng.range(0.07, 0.13) + f.hry;
+  f.pow = rng.range(2.1, 3.0);
+  f.jaw = rng.range(0.15, 0.4);
+  f.turn = rng.range(-0.35, 0.35);
+  f.light = rng.chance(0.5) ? 1 : -1;
+  f.lightAmt = rng.range(0.08, 0.2);
+  f.skin = rng.range(0.26, 0.4);
+  f.hair = rng.wpick(['long', 'bob', 'short', 'big', 'bald'], [4, 3, 3, 2, 0.6]);
+  f.hairTone = rng.chance(0.9) ? 0 : rng.range(0.06, 0.12);
+  f.sheen = rng.chance(0.5) ? rng.range(0.05, 0.12) : 0;
+  f.pad = rng.range(0.012, 0.04);
+  f.flare = rng.range(0, 0.25);
+  f.ph = rng() * 6.28;
+  f.hairEnd = f.hair === 'long' ? rng.range(0.72, 1.05) : f.hair === 'bob' ? f.hy + f.hry * rng.range(0.6, 1.0) : 0;
+  // face
+  f.fcx = f.cx + f.turn * f.hrx * 0.35;
+  f.frx = f.hrx * (f.hair === 'short' || f.hair === 'bald' ? 0.92 : 0.8);
+  f.fry = f.hry * 0.9;
+  f.fcy = f.hy + f.hry * 0.1;
+  f.nx = f.fcx + f.turn * f.frx * 0.2;
+  f.eyeY = f.fcy - f.fry * rng.range(0.02, 0.18);
+  f.eyeDX = f.frx * rng.range(0.36, 0.5);
+  f.eyeRX = f.frx * rng.range(0.16, 0.24);
+  f.eyeRY = f.fry * rng.range(0.06, 0.1);
+  f.browY = f.eyeY - f.fry * rng.range(0.14, 0.22);
+  f.noseY = f.fcy + f.fry * rng.range(0.25, 0.38);
+  f.mouthY = f.fcy + f.fry * rng.range(0.5, 0.62);
+  f.mouthRX = f.frx * rng.range(0.25, 0.42);
+  f.mouthRY = f.fry * 0.06;
+  f.bangs = f.hair !== 'bald' && rng.chance(0.35);
+  f.fringe = f.bangs ? f.browY - rng.range(0.005, 0.03) : f.hy - f.hry * rng.range(0.25, 0.55);
+  f.fringeWave = rng.range(0, f.bangs ? 0.012 : 0.04);
+  f.fringeFreq = rng.range(8, 30);
+  f.part = rng.range(-1, 1);
+  f.glasses = rng.chance(0.18);
+  // neck & body
+  f.nw = f.hrx * rng.range(0.38, 0.52);
+  f.yS = f.hy + f.hry + rng.range(0.03, 0.1);
+  f.shW = rng.range(0.3, 0.46);
+  f.cloth = rng.pick([0.02, 0.06, 0.12, 0.2, 0.3]);
+  f.stripe = rng.chance(0.25) ? rng.int(2, 4) : 0;
+  f.collar = rng.pick(['v', 'round', 'high']);
+  f.collarD = rng.range(0.04, 0.12);
+  return f;
+}
+
+const eyeX = (f, s) => f.nx + s * f.eyeDX * (1 - s * f.turn * 0.25);
+const hairline = (f, x) => f.hair === 'bald' ? -1
+  : f.fringe + f.part * 0.05 * (x - f.cx) / f.hrx + f.fringeWave * Math.sin((x - f.cx) * f.fringeFreq + f.ph);
+
+function faceTone(f, x, y) {
+  const dx = (x - f.fcx) / f.frx, dy = (y - f.fcy) / f.fry;
+  let t = f.skin + f.light * dx * f.lightAmt - dy * 0.06;
+  t -= 0.12 * sstep(0.5, 1.05, dx * dx + dy * dy);
+  if (f.hair !== 'bald') t -= 0.12 * (1 - sstep(0, 0.05, y - hairline(f, x)));
+  for (const s of [-1, 1]) {
+    const ex = eyeX(f, s);
+    const ed = ((x - ex) / f.eyeRX) ** 2 + ((y - f.eyeY) / f.eyeRY) ** 2;
+    if (ed < 1) t -= 0.36;
+    else {
+      const sd = ((x - ex) / (f.eyeRX * 1.6)) ** 2 + ((y - f.eyeY + f.eyeRY * 0.5) / (f.eyeRY * 3)) ** 2;
+      if (sd < 1) t -= 0.14 * (1 - sd);
+    }
+    if (((x - ex) / (f.eyeRX * 1.25)) ** 2 + ((y - f.browY) / (f.eyeRY * 0.7)) ** 2 < 1) t -= 0.26;
+  }
+  if (y > f.eyeY && y < f.noseY && (x - f.nx) * -f.light > 0 && Math.abs(x - f.nx) < f.frx * 0.14)
+    t -= 0.14 * sstep(f.eyeY, f.noseY, y);
+  if (((x - f.nx) / (f.frx * 0.22)) ** 2 + ((y - f.noseY) / (f.fry * 0.05)) ** 2 < 1) t -= 0.2;
+  if (((x - f.nx) / f.mouthRX) ** 2 + ((y - f.mouthY) / f.mouthRY) ** 2 < 1) t -= 0.3;
+  return Math.min(t, 0.5);
+}
+
+// → [region, tone]; bg tone is filled in later from the stripe model
+function sampleFigure(f, x, y) {
+  const hx = (x - f.cx) / f.hrx, hy = (y - f.hy) / f.hry;
+  const inHead = superE(hx, hy, f.pow, f.jaw);
+  const inFace = superE((x - f.fcx) / f.frx, (y - f.fcy) / f.fry, 2.2, f.jaw * 1.2);
+  const hl = hairline(f, x);
+  if (inFace && y >= hl) return [REG_FACE, faceTone(f, x, y)];
+
+  const nx = lerp(f.fcx, f.cx, 0.5);
+  const skin = () => f.skin * 0.75 - 0.18 * (1 - sstep(f.fcy + f.fry, f.fcy + f.fry + 0.06, y)) + f.light * ((x - nx) / f.nw) * 0.08;
+  const neckW = f.nw * (1 + 0.35 * sstep(f.yS - 0.05, f.yS + 0.06, y));
+  const inNeck = y > f.hy && y < f.yS + 0.06 && Math.abs(x - nx) < neckW;
+  if (inNeck && !(f.collar === 'high' && y > f.yS - 0.05)) return [REG_NECK, skin()];
+
+  let inHair = false;
+  if (f.hair !== 'bald') {
+    const px = (x - f.cx) / (f.hrx + f.pad), py = (y - f.hy + f.pad * 0.5) / (f.hry + f.pad);
+    if (f.hair === 'short') inHair = py < 0.2 && superE(px, py, f.pow, 0) && y < f.hy + f.hry * 0.05;
+    else if (f.hair === 'big') inHair = ((x - f.cx) / (f.hrx * 1.3 + f.pad)) ** 2 + ((y - f.hy + 0.03) / (f.hry * 1.12 + f.pad)) ** 2 < 1;
+    else {
+      const k = clamp((y - f.hy) / Math.max(0.01, f.hairEnd - f.hy));
+      const hw = (f.hrx + f.pad) * (1 + f.flare * k);
+      const end = f.hairEnd + 0.025 * Math.sin(x * 57 + f.ph);
+      inHair = (py < 0 && superE(px, py, f.pow, 0)) || (y >= f.hy && y < end && Math.abs(x - f.cx) < hw);
+    }
+  }
+  const hairT = () => f.hairTone + f.sheen * clamp(f.light * (x - f.cx) / f.hrx) * (0.5 + 0.5 * Math.sin(y * 90 + f.ph));
+  if (inHair) return [REG_HAIR, hairT()];
+  if (inHead) return y < hl ? [REG_HAIR, hairT()] : [REG_FACE, f.skin * 0.7 + f.light * hx * 0.1];
+
+  if (y > f.yS - 0.04) {
+    const bw = lerp(f.nw * 1.3, f.shW, sstep(f.yS - 0.04, f.yS + 0.1, y)) + 0.06 * Math.max(0, y - f.yS);
+    if (Math.abs(x - f.cx) < bw) {
+      if (f.collar === 'v' && y - f.yS < f.collarD * (1 - Math.abs(x - nx) / (f.nw * 1.7))) return [REG_NECK, skin()];
+      if (f.collar === 'round' && ((x - nx) / (f.nw * 1.5)) ** 2 + ((y - f.yS + 0.02) / f.collarD) ** 2 < 1) return [REG_NECK, skin()];
+      let t = f.cloth + f.light * ((x - f.cx) / f.shW) * 0.1 - 0.1 * (1 - sstep(f.yS - 0.04, f.yS + 0.04, y));
+      if (f.stripe && Math.floor(y / f.stripeY) % f.stripe === 0) t += 0.3;
+      return [REG_BODY, t];
+    }
+  }
+  return [REG_BG, 0];
+}
+
+function makeBg(rng, rows, NU) {
+  const bg = { base: rng.range(0.72, 0.9), rowJ: [], halfJ: [], segs: [] };
+  for (let r = 0; r < rows; r++) {
+    bg.rowJ.push(rng.range(-0.1, 0.08) + (rng.chance(0.05) ? -0.2 : 0));
+    const segs = [{ u: 0, off: 0 }];
+    for (let k = rng.int(0, 3); k > 0; k--) segs.push({ u: rng.int(1, NU - 1), off: rng.range(-0.12, 0.1) });
+    bg.segs.push(segs.sort((a, b) => a.u - b.u));
+    bg.halfJ.push(rng.range(-0.04, 0.04), rng.range(-0.04, 0.04));
+  }
+  return bg;
+}
+function bgTone(bg, hr, u) {
+  const r = hr >> 1;
+  let off = 0;
+  for (const s of bg.segs[r]) if (u >= s.u) off = s.off;
+  return bg.base + bg.rowJ[r] + bg.halfJ[hr] + off;
+}
+
+function photoField(img, DW, DH, NU, NR, shift, tone, reg) {
+  const k = 5, cw = Math.round(DW / k), ch = Math.round(DH / k);
+  const cnv = document.createElement('canvas'); cnv.width = cw; cnv.height = ch;
+  const g = cnv.getContext('2d', { willReadFrequently: true });
+  const iw = img.naturalWidth, ih = img.naturalHeight, sc = Math.max(cw / iw, ch / ih);
+  g.drawImage(img, (cw - iw * sc) / 2, (ch - ih * sc) * 0.35, iw * sc, ih * sc);
+  const d = g.getImageData(0, 0, cw, ch).data, L = new Float32Array(cw * ch);
+  for (let i = 0; i < L.length; i++) L[i] = (0.2126 * d[4 * i] + 0.7152 * d[4 * i + 1] + 0.0722 * d[4 * i + 2]) / 255;
+  const srt = Float32Array.from(L).sort();
+  const lo = srt[Math.floor(L.length * 0.02)], hi = srt[Math.floor(L.length * 0.98)];
+  for (let hr = 0; hr < NR; hr++) {
+    const y0 = Math.floor(hr * HH / k), y1 = Math.max(y0 + 1, Math.floor((hr + 1) * HH / k));
+    for (let u = 0; u < NU; u++) {
+      const uu = clamp(u - shift[hr], 0, NU - 1);
+      const x0 = Math.floor(uu * UW / k), x1 = Math.max(x0 + 1, Math.floor((uu + 1) * UW / k));
+      let s = 0, n = 0;
+      for (let y = y0; y < y1 && y < ch; y++) for (let x = x0; x < x1 && x < cw; x++) { s += L[y * cw + x]; n++; }
+      const t = 0.02 + 0.9 * clamp((s / Math.max(1, n) - lo) / Math.max(0.05, hi - lo));
+      tone[hr * NU + u] = t; reg[hr * NU + u] = t > 0.72 ? REG_BG : REG_FACE;
+    }
+  }
+}
+
+// ---------- scene ----------
+function buildScene(seed, photo) {
+  const rng = makeRng(seed + (photo ? ':photo' : ''));
+  const cols = P.cols, rows = Math.max(4, Math.round(cols * CW / (FORMATS[P.format][1] * CH)));
+  const DW = cols * CW, DH = rows * CH, NU = cols * 2, NR = rows * 2, Ar = DW / DH;
+  const tone = new Float32Array(NU * NR), reg = new Uint8Array(NU * NR);
+
+  // horizontal tearing: some rows slide sideways by a few half-cells
+  const shift = new Int16Array(NR);
+  for (let r = 0; r < rows; r++) if (rng.chance(0.14 * P.glitch)) {
+    const d = rng.int(1, 3) * (rng.chance(0.5) ? 1 : -1), which = rng.int(0, 2);
+    if (which !== 2) shift[2 * r] = d;
+    if (which !== 1) shift[2 * r + 1] = d;
+  }
+
+  let fig = null;
+  if (photo) photoField(photo.img, DW, DH, NU, NR, shift, tone, reg);
+  else {
+    fig = makeFigure(rng, Ar);
+    fig.stripeY = HH / DH;
+    const bg = makeBg(rng, rows, NU);
+    for (let hr = 0; hr < NR; hr++) for (let u = 0; u < NU; u++) {
+      const x = (u - shift[hr] + 0.5) * UW / DH;
+      let t = 0, n = 0, rg0 = -1;
+      for (const oy of [0.3, 0.7]) {
+        const [rg, tt] = sampleFigure(fig, x, (hr + oy) * HH / DH);
+        if (rg0 < 0) rg0 = rg;
+        if (rg === rg0) { t += rg === REG_BG ? bgTone(bg, hr, u) : tt; n++; }
+      }
+      tone[hr * NU + u] = t / n; reg[hr * NU + u] = rg0;
+    }
+    // black contour where the figure meets the background
+    for (let hr = 0; hr < NR; hr++) for (let u = 0; u < NU; u++) {
+      const i = hr * NU + u;
+      if (reg[i] !== REG_BG && ((u > 0 && reg[i - 1] === REG_BG) || (u < NU - 1 && reg[i + 1] === REG_BG) || (hr > 0 && reg[i - NU] === REG_BG))) tone[i] = 0;
+    }
+  }
+  for (let i = 0; i < tone.length; i++) tone[i] = clamp(0.5 + (tone[i] - 0.5) * P.contrast);
+  // halves of a character row that are close in tone share one full-height block
+  for (let r = 0; r < rows; r++) for (let u = 0; u < NU; u++) {
+    const a = 2 * r * NU + u, b = a + NU;
+    if (reg[a] === reg[b] && Math.abs(binOf(tone[a]) - binOf(tone[b])) <= 1) tone[a] = tone[b] = (tone[a] + tone[b]) / 2;
+  }
+
+  // ---- runs of equal screen along each half-row
+  const runs = [];
+  for (let hr = 0; hr < NR; hr++) {
+    const o = hr * NU, b = new Int8Array(NU);
+    for (let u = 0; u < NU; u++) b[u] = binOf(tone[o + u]);
+    for (let u = 1; u < NU - 1; u++)
+      if (b[u] !== b[u - 1] && b[u] !== b[u + 1] && reg[o + u - 1] === reg[o + u] && reg[o + u + 1] === reg[o + u]) {
+        const nb = Math.abs(b[u - 1] - b[u]) <= Math.abs(b[u + 1] - b[u]) ? b[u - 1] : b[u + 1];
+        if (Math.abs(nb - b[u]) <= 1) b[u] = nb;
+      }
+    const list = [];
+    for (let s = 0, u = 1; u <= NU; u++) {
+      const split = u < NU && u - s >= 2 && rng.chance((reg[o + s] === REG_BG ? 0.1 : 0.05) * (0.4 + 0.6 * P.glitch));
+      if (u === NU || b[u] !== b[s] || reg[o + u] !== reg[o + s] || split) {
+        let t = 0; for (let k = s; k < u; k++) t += tone[o + k];
+        list.push({ u0: s, u1: u, bin: b[s], reg: reg[o + s], t: t / (u - s) });
+        s = u;
+      }
+    }
+    runs.push(list);
+  }
+
+  const blocks = [];
+  const pickPattern = t => {
+    if (rng.chance(0.16)) t = clamp(t + rng.range(-0.08, 0.08));
+    if (t < BINS[0]) return null;
+    if (t >= 0.975) return 'solid';
+    const near = PATS.filter(p => Math.abs(p.cov - t) < 0.045);
+    if (near.length) return rng.pick(near);
+    let best = PATS[0];
+    for (const p of PATS) if (Math.abs(p.cov - t) < Math.abs(best.cov - t)) best = p;
+    return best;
+  };
+  const blockColor = (rg, inv) => {
+    if (rg === REG_BG) {
+      if (inv && rng.chance(0.035 * P.color)) return rng.wpick([C.yellow, C.cyan, C.magenta], [3, 1, 1]);
+      return rng.pick(['#ffffff', '#efefef', '#e0e0e0', '#cdcdcd']);
+    }
+    if (!inv && rng.chance(0.05 * P.color)) return rng.wpick([C.yellow, C.magenta, C.cyan], [3, 2, 1.5]);
+    return rng.chance(0.7) ? '#ffffff' : '#d9d9d9';
+  };
+  const jitter = () => rng.chance(0.25 * P.glitch) ? rng() : 0;
+  const mkBlock = (q, y0, y1) => {
+    if (q.bin === 0) return;
+    const pat = pickPattern(q.t);
+    if (!pat) return;
+    const x0 = q.u0 * UW, x1 = q.u1 * UW;
+    if (pat === 'solid') blocks.push({ solid: true, color: q.reg === REG_BG ? '#e4e4e4' : C.white, x0, x1, y0, y1 });
+    else blocks.push({ pat, color: blockColor(q.reg, pat.inv), x0, x1, y0, y1, jx: jitter(), jy: jitter() });
+  };
+  const key = q => `${q.u0}:${q.u1}:${q.bin}:${q.reg}`;
+  for (let r = 0; r < rows; r++) {
+    const lower = new Map(runs[2 * r + 1].map(q => [key(q), q]));
+    const top = r * CH + GAPY, mid = r * CH + HH, bot = (r + 1) * CH;
+    for (const q of runs[2 * r]) {
+      const m = lower.get(key(q));
+      if (m) { m.merged = true; mkBlock({ ...q, t: (q.t + m.t) / 2 }, top, bot); }
+      else mkBlock(q, top, mid);
+    }
+    for (const q of runs[2 * r + 1]) if (!q.merged) mkBlock(q, mid, bot);
+  }
+
+  // ---- glitch overlays: stray screen strips, often in colour
+  const dark = PATS.filter(p => !p.inv);
+  for (let k = Math.round(rng.range(0, 4) * P.glitch); k > 0; k--) {
+    const hr = rng.int(0, NR - 1), u = rng.int(0, NU - 3), w = rng.int(2, 7);
+    const y0 = hr * HH + (hr % 2 ? 0 : GAPY);
+    blocks.push({ pat: rng.pick(dark), color: rng.wpick([C.yellow, C.magenta, C.cyan, '#ffffff'], [P.color, P.color, P.color, 1.5]),
+                  x0: u * UW, x1: Math.min(NU, u + w) * UW, y0, y1: (hr + 1) * HH, jx: rng(), jy: rng() });
+  }
+  // ---- solid slabs
+  for (let k = rng.int(0, 3) + Math.round(rng.range(0, 2.5) * P.glitch); k > 0; k--) {
+    const r = rng.int(Math.floor(rows * 0.55), rows - 1), u = rng.int(0, NU - 2), w = rng.pick([1, 2, 2, 3, 4, 5]);
+    const part = rng.int(0, 2);
+    const y0 = part === 2 ? r * CH + HH : r * CH + GAPY, y1 = part === 1 ? r * CH + HH : (r + 1) * CH;
+    blocks.push({ solid: true, color: rng.wpick([C.white, '#bdbdbd', C.yellow, C.cyan], [6, 1, 1.5 * P.color, P.color]),
+                  x0: u * UW, x1: Math.min(NU, u + w) * UW, y0, y1 });
+  }
+  // ---- thin colour bars sitting on the silhouette edge
+  for (let k = Math.round(rng.range(0.3, 2.6) * P.color); k > 0; k--) {
+    for (let tries = 0; tries < 30; tries++) {
+      const r = rng.int(0, rows - 1), o = 2 * r * NU, edges = [];
+      for (let u = 0; u < NU - 1; u++) {
+        const a = photo ? tone[o + u] > 0.5 : reg[o + u] === REG_BG, b = photo ? tone[o + u + 1] > 0.5 : reg[o + u + 1] === REG_BG;
+        if (a !== b) edges.push(a ? u : u + 1);
+      }
+      if (!edges.length) continue;
+      const u = rng.pick(edges);
+      blocks.push({ solid: true, color: rng.wpick([C.yellow, C.cyan, C.magenta, C.white], [3, 2, 1, 1]),
+                    x0: u * UW, x1: (u + 1) * UW, y0: r * CH + GAPY, y1: (r + 1) * CH });
+      break;
+    }
+  }
+
+  // ---- glyph layer
+  const N = cols * rows;
+  const cellFg = new Uint8Array(N), cellMix = new Uint8Array(N), cellReg = new Uint8Array(N), cellT = new Float32Array(N);
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const hist = [0, 0, 0, 0, 0];
+    let t = 0;
+    for (const hr of [2 * r, 2 * r + 1]) for (const u of [2 * c, 2 * c + 1]) { hist[reg[hr * NU + u]]++; t += tone[hr * NU + u]; }
+    const i = r * cols + c, fgN = 4 - hist[0];
+    cellT[i] = t / 4;
+    let best = 0;
+    for (let k = 1; k < 5; k++) if (hist[k] > hist[best] || (best === 0 && hist[k] >= 2)) best = k;
+    cellReg[i] = best;
+    if (photo) cellFg[i] = cellT[i] < 0.5 ? 1 : 0;
+    else { cellFg[i] = fgN >= 2 ? 1 : 0; cellMix[i] = fgN > 0 && fgN < 4 ? 1 : 0; }
+  }
+  const fgAt = (c, r) => c < 0 || c >= cols || r < 0 || r >= rows ? 0 : cellFg[r * cols + c];
+  const tAt = (c, r) => cellT[clamp(r, 0, rows - 1) * cols + clamp(c, 0, cols - 1)];
+
+  // facial features map straight to cells, so eyes/mouth always get their glyphs
+  const feat = new Array(N).fill(null);
+  if (fig) {
+    const addFeat = (x, y, fam, p) => {
+      const hr = Math.floor(y * DH / HH);
+      if (hr < 0 || hr >= NR) return;
+      const c = (Math.floor(x * DH / UW) + shift[hr]) >> 1;
+      if (c >= 0 && c < cols) feat[(hr >> 1) * cols + c] = { fam, p };
+    };
+    const span = (x0, x1, y, fam, p) => { for (let x = x0; x <= x1; x += UW / DH) addFeat(x, y, fam, p); addFeat(x1, y, fam, p); };
+    addFeat(fig.nx, (fig.eyeY + fig.noseY) / 2, 'nose', 0.55);
+    addFeat(fig.nx, fig.noseY, 'nose', 0.6);
+    if (Math.floor(fig.browY * DH / CH) !== Math.floor(fig.eyeY * DH / CH))
+      for (const s of [-1, 1]) span(eyeX(fig, s) - fig.eyeRX, eyeX(fig, s) + fig.eyeRX, fig.browY, 'brow', 0.4);
+    if (fig.glasses) span(eyeX(fig, -1), eyeX(fig, 1), fig.eyeY, 'bridge', 1);
+    for (const s of [-1, 1]) span(eyeX(fig, s) - fig.eyeRX, eyeX(fig, s) + fig.eyeRX, fig.eyeY, fig.glasses ? 'lens' : 'eye', fig.glasses ? 1 : 0.75);
+    span(fig.nx - fig.mouthRX, fig.nx + fig.mouthRX, fig.mouthY, 'mouth', 0.7);
+  }
+
+  const BASEP = [0.025, 0.05, 0.07, 0.06, 0.06];
+  const famFor = rg => [
+    () => rng.wpick(['corner', 'punct', 'vert'], [4, 3, 1]),
+    () => rng.wpick(['vert', 'corner', 'punct', 'cross'], [3, 3, 2, 1]),
+    () => rng.wpick(['cross', 'vert', 'hor', 'punct', 'corner'], [3, 3, 2, 2, 1]),
+    () => rng.wpick(['vert', 'corner', 'punct'], [3, 2, 1]),
+    () => rng.wpick(['vert', 'cross', 'hor', 'corner', 'punct'], [3, 2, 2, 2, 1]),
+  ][rg]();
+  const glyphColor = (fam, strong) => {
+    const ap = (strong ? 0.08 : 0.2) * P.color * (fam === 'punct' ? 1.8 : 1);
+    if (rng.chance(ap)) return rng.wpick([C.magenta, C.yellow, C.cyan, C.red, C.blue], [3, 3, 2, 1.2, 1]);
+    return rng.chance(strong ? 0.1 : 0.25) ? C.gray : C.white;
+  };
+
+  const occ = new Uint8Array(N), glyphs = [];
+  const put = (c, r, ch, color) => {
+    const w = GL[ch].w || 1;
+    if (c + w > cols) return false;
+    for (let k = 0; k < w; k++) if (occ[r * cols + c + k]) return false;
+    for (let k = 0; k < w; k++) occ[r * cols + c + k] = 1;
+    glyphs.push({ c, r, w, ch, color });
+    return true;
+  };
+  for (let r = 0; r < rows; r++) for (let c = 0; c < cols; c++) {
+    const i = r * cols + c;
+    if (occ[i]) continue;
+    let fam, p, strong = false, edge = false;
+    if (feat[i]) { fam = feat[i].fam; p = feat[i].p; strong = true; }
+    else {
+      let eV, eH;
+      if (photo) {
+        const gx = tAt(c + 1, r) - tAt(c - 1, r), gy = tAt(c, r + 1) - tAt(c, r - 1);
+        eV = Math.abs(gx) > 0.28 && Math.abs(gx) >= Math.abs(gy);
+        eH = !eV && Math.abs(gy) > 0.28;
+      } else {
+        const f0 = cellFg[i];
+        eV = cellMix[i] || fgAt(c - 1, r) !== f0 || fgAt(c + 1, r) !== f0;
+        eH = fgAt(c, r - 1) !== f0 || fgAt(c, r + 1) !== f0;
+      }
+      if (eV) { fam = rng.chance(0.75) ? 'vert' : 'corner'; p = 0.32; strong = edge = true; }
+      else if (eH) { fam = rng.wpick(['corner', 'punct', 'hor'], [5, 2, 2]); p = 0.22; strong = true; }
+      else { p = BASEP[cellReg[i]]; fam = famFor(cellReg[i]); }
+    }
+    if (!rng.chance(Math.min(1, p * P.glyphs))) continue;
+    let ch = rng.pick(FAM[fam]);
+    const color = glyphColor(fam, strong);
+    if (!put(c, r, ch, color)) { ch = rng.pick(FAM.vert); if (!put(c, r, ch, color)) continue; }
+    // edge glyphs like to stack down the silhouette
+    if (edge && fam === 'vert' && rng.chance(0.4))
+      for (let rr = r + 1; rr < Math.min(rows, r + 4); rr++) {
+        if (!fgAt(c, rr) && !cellMix[rr * cols + c]) break;
+        if (!put(c, rr, ch, color) || !rng.chance(0.55)) break;
+      }
+    // and interior ones to form short "words"
+    if (!edge && !feat[i] && rng.chance(0.22)) {
+      let cc = c + (GL[ch].w || 1), col = color;
+      for (let k = 0; k < 3 && cc < cols && fgAt(cc, r) === cellFg[i]; k++) {
+        const nch = rng.chance(0.4) ? ch : rng.pick(FAM[fam]);
+        if (!rng.chance(0.75)) col = glyphColor(fam, false);
+        if (!put(cc, r, nch, col)) break;
+        cc += GL[nch].w || 1;
+        if (!rng.chance(0.5)) break;
+      }
+    }
+  }
+  return { DW, DH, cols, rows, blocks, glyphs, fig };
+}
+
+// ---------- render ----------
+function render(ctx, sc, s) {
+  const X = v => Math.round(v * s);
+  ctx.fillStyle = '#000'; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  for (const b of sc.blocks) {
+    const x0 = X(b.x0), y0 = X(b.y0), w = X(b.x1) - x0, h = X(b.y1) - y0;
+    if (w <= 0 || h <= 0) continue;
+    if (b.solid) { ctx.fillStyle = b.color; ctx.fillRect(x0, y0, w, h); continue; }
+    const t = tileFor(b.pat, s, b.color), pat = ctx.createPattern(t.c, 'repeat');
+    pat.setTransform(new DOMMatrix([1, 0, 0, 1, x0 + t.ox + Math.round(b.jx * t.X), y0 + t.oy + Math.round(b.jy * t.Y)]));
+    ctx.fillStyle = pat; ctx.fillRect(x0, y0, w, h);
+  }
+  const sw = Math.max(1, Math.round(SW * s)), gap = Math.max(1, Math.round(GAP * s)), gy = Math.round(GAPY * s);
+  for (const g of sc.glyphs) {
+    const x0 = X(g.c * CW), x1 = X((g.c + g.w) * CW), y0 = X(g.r * CH), y1 = X((g.r + 1) * CH);
+    ctx.fillStyle = '#000'; ctx.fillRect(x0, y0, x1 - x0, y1 - y0);
+    const d = GL[g.ch], by = y0 + gy, bw = x1 - x0, bh = y1 - by;
+    ctx.save();
+    ctx.beginPath(); ctx.rect(x0, by, bw, bh); ctx.clip();
+    ctx.fillStyle = ctx.strokeStyle = g.color;
+    ctx.lineWidth = sw; ctx.lineCap = 'butt'; ctx.lineJoin = 'miter';
+    if (d.seg) drawSegs(ctx, d.seg, x0, by, bw, bh, sw, gap);
+    else d.path(ctx, x0, by, bw, bh, sw);
+    ctx.restore();
+  }
+}
+
+// ---------- ui ----------
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const stage = document.getElementById('stage');
+const seedInp = document.getElementById('seed');
+let seed = randSeed(), scene = null, photo = null, auto = null;
+
+function regen() { scene = buildScene(seed, photo); draw(); }
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const aw = (stage.clientWidth - 40) * dpr, ah = (stage.clientHeight - 40) * dpr;
+  const s = Math.max(0.3, Math.min(aw / scene.DW, ah / scene.DH));
+  cv.width = Math.round(scene.DW * s); cv.height = Math.round(scene.DH * s);
+  cv.style.width = cv.width / dpr + 'px'; cv.style.height = cv.height / dpr + 'px';
+  render(ctx, scene, s);
+}
+function newPortrait() { seed = randSeed(); seedInp.value = seed; regen(); }
+function save() {
+  const c = document.createElement('canvas');
+  c.width = scene.DW * 2; c.height = scene.DH * 2;
+  render(c.getContext('2d'), scene, 2);
+  const a = document.createElement('a');
+  a.download = `portrait-${seed.replace(/[^\w-]/g, '_')}${photo ? '-photo' : ''}.png`;
+  a.href = c.toDataURL('image/png'); a.click();
+}
+function toggleAuto() {
+  if (auto) { clearInterval(auto); auto = null; } else auto = setInterval(newPortrait, 2200);
+  document.getElementById('bAuto').classList.toggle('on', !!auto);
+}
+function loadPhoto(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file), img = new Image();
+  img.onload = () => {
+    if (photo) URL.revokeObjectURL(photo.url);
+    photo = { img, url, name: file.name };
+    document.getElementById('photoRow').hidden = false;
+    document.getElementById('photoName').textContent = file.name;
+    regen();
+  };
+  img.src = url;
+}
+function dropPhoto() {
+  if (!photo) return;
+  URL.revokeObjectURL(photo.url); photo = null;
+  document.getElementById('photoRow').hidden = true;
+  regen();
+}
+
+const box = document.getElementById('controls');
+for (const [k, label, min, max, step] of CTRL) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${P[k]}"><output>${P[k]}</output>`;
+  const inp = row.querySelector('input'), out = row.querySelector('output');
+  inp.oninput = () => { P[k] = +inp.value; out.textContent = P[k]; regen(); };
+  box.appendChild(row);
+}
+const fmt = document.getElementById('format');
+for (const [k, [label]] of Object.entries(FORMATS)) fmt.add(new Option(label, k, false, k === P.format));
+fmt.onchange = () => { P.format = fmt.value; regen(); };
+
+seedInp.value = seed;
+seedInp.onchange = () => { seed = seedInp.value; regen(); };
+const fileInp = document.getElementById('file');
+fileInp.onchange = () => { loadPhoto(fileInp.files[0]); fileInp.value = ''; };
+document.getElementById('bNew').onclick = newPortrait;
+document.getElementById('bDice').onclick = newPortrait;
+document.getElementById('bAuto').onclick = toggleAuto;
+document.getElementById('bSave').onclick = save;
+document.getElementById('bPhoto').onclick = () => fileInp.click();
+document.getElementById('bNoPhoto').onclick = dropPhoto;
+cv.addEventListener('click', newPortrait);
+
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('dragging'); loadPhoto(e.dataTransfer.files[0]); });
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.code === 'Space') { e.preventDefault(); newPortrait(); }
+  else if (e.code === 'KeyR') newPortrait();
+  else if (e.code === 'KeyS') save();
+  else if (e.code === 'KeyA') toggleAuto();
+  else if (e.code === 'KeyF') fileInp.click();
+  else if (e.code === 'Escape') dropPhoto();
+});
+let rt;
+addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(draw, 80); });
+regen();
+</script>
+</body>
+</html>

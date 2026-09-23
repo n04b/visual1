@@ -1,0 +1,492 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turmite Glitch</title>
+<style>
+  :root { --bg:#0c0c0c; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#ff3b1f; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; min-width:0; }
+  canvas { max-width:100%; max-height:calc(100vh - 40px); image-rendering: pixelated; box-shadow:0 0 0 1px #222; }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; color:var(--fg); }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], input[type=number], select { width:100%; background:#0c0c0c; color:var(--fg);
+    border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:8px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) { body { flex-direction:column; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Turmite · glitch</h1>
+  <div class="row"><label>preset</label><select id="preset"></select><span></span></div>
+  <div class="btns">
+    <button id="bRand" title="Space">random</button>
+    <button id="bSeed" title="N">new seed</button>
+    <button id="bChaos" title="C">chaos</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    rule: строка из L R N U (лево / право / прямо / разворот) — по символу на цвет клетки.
+    Через запятую — разные правила для разных муравьёв. «random» — случайное.<br><br>
+    Space — random · N — seed · C — chaos · S — save
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const hash = a => { a |= 0; a = Math.imul(a ^ a >>> 16, 0x7feb352d); a = Math.imul(a ^ a >>> 15, 0x846ca68b);
+  a ^= a >>> 16; return (a >>> 0) / 4294967296; };
+const hex2rgb = h => { h = h.replace('#', ''); if (h.length === 3) h = [...h].map(c => c + c).join('');
+  const n = parseInt(h, 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const pack = ([r, g, b]) => (0xff000000 | b << 16 | g << 8 | r) >>> 0;
+const lum = ([r, g, b]) => (0.299 * r + 0.587 * g + 0.114 * b) / 255;
+const mix = (a, b, t) => a.map((v, i) => Math.round(v + (b[i] - v) * t));
+
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+const TURN = { L: -1, R: 1, N: 0, U: 2 };
+const GOOD_RULES = ['RL', 'LLRR', 'RLR', 'RLLR', 'LRRL', 'RRLL', 'LRRRRRLLR', 'LLRRRLRLRLLR',
+  'RRLLLRLLLRRR', 'RRLRR', 'RLLLLRRRLLL', 'LRRRRLLLRRR', 'RRRLLLRRRLL', 'LLRRRLRRRRR', 'RRLLLRRRLL',
+  'RLRNRLL', 'LRNRL', 'RRNLL', 'LRRRRRLLRRL', 'RLLRRRLLLR'];
+
+const PAT = { solid: 0, checker: 1, fine: 2, hstripes: 3, vstripes: 4, dots: 5, diag: 6, square: 7,
+  outline: 8, spiral: 9, grid: 10, vgrad: 11, hgrad: 12 };
+const SPIRAL = [
+  1,1,1,1,1,1,1,
+  0,0,0,0,0,0,1,
+  1,1,1,1,1,0,1,
+  1,0,0,0,1,0,1,
+  1,0,1,1,1,0,1,
+  1,0,0,0,0,0,1,
+  1,1,1,1,1,1,1];
+const BOX = '╟╢╫╪╬║═│┤├┐└┘┌┼╗╝╚╔╠╣┬┴▌▐▀▄≈»«[:]\'^⌐¬ʃ⌂∩ЧЦ';
+const TEXT = 'the ant does not know where it is going it only knows the colour under its feet ' +
+  'and every step rewrites the floor so the map is made by walking and the walking is made by the map ';
+
+// ---------- presets ----------
+const PRESETS = {
+  bauhaus: { colorBy: 'ant', W: 80, H: 80, cw: 8, ch: 8, bg: '#141111',
+    palette: ['#f1e6d3', '#d9121f', '#1d4fb8', '#f2b21a', '#137a3a', '#e79bb1', '#8c1f2c', '#0b0b0b'],
+    rule: 'LRRRRRLLR', ants: 14, spawn: 'scatter', steps: 3000, turmite: 1, smooth: 1,
+    sx: 1, sy: 8, drip: 0.97, dripX: 0, glitch: 0, grain: 0.22,
+    patterns: ['checker', 'checker', 'fine'], patProb: 0.12, bgPatterns: [], bgPatProb: 0,
+    glyph: null, glyphProb: 0, bgGlyphProb: 0, trails: false },
+
+  nebula: { colorBy: 'ant', walkers: 40, W: 114, H: 136, cw: 8, ch: 8, bg: '#000000',
+    palette: ['#23519e', '#df1a10', '#f4b52a', '#157a3f', '#ffffff', '#23519e', '#df1a10'],
+    rule: 'LLRR,RLLR,LRRRRRLLR,RL', ants: 22, spawn: 'cluster', steps: 3000, turmite: 1,
+    sx: 1, sy: 1, drip: 0, dripX: 0, glitch: 0, grain: 0,
+    patterns: ['spiral', 'square', 'outline', 'fine', 'checker', 'square'], patProb: 0.3, smooth: 2,
+    bgPatterns: ['square', 'fine', 'dots'], bgPatProb: 0.18,
+    glyph: null, glyphProb: 0, bgGlyphProb: 0, trails: true },
+
+  telex: { colorBy: 'state', W: 96, H: 24, cw: 12, ch: 28, bg: '#000000',
+    palette: ['#0a1fff', '#ff1a00', '#00e5ff', '#cfcfcf', '#2a2a2a', '#0a1fff'],
+    rule: 'RRLL', ants: 6, spawn: 'scatter', steps: 350, turmite: 1,
+    sx: 7, sy: 1, drip: 0, dripX: 0.35, glitch: 0, grain: 0,
+    patterns: [], patProb: 0, bgPatterns: [], bgPatProb: 0,
+    glyph: 'text', glyphProb: 0.45, bgGlyphProb: 0.8, trails: false },
+
+  testcard: { colorBy: 'state', W: 24, H: 36, cw: 32, ch: 32, bg: '#060606',
+    palette: ['#00ff00', '#ff00ff', '#ffff00', '#00ffff', '#e81c0c', '#1010ff', '#ff8800', '#ffffff',
+      '#8a8a8a', '#3a3a3a', '#6a00ff', '#ff5ec4', '#c9c9c9', '#050505'],
+    rule: 'LLRRRLRLRLLR', ants: 24, spawn: 'scatter', steps: 2500, turmite: 1, smooth: 1,
+    sx: 2, sy: 3, drip: 0.5, dripX: 0.3, glitch: 0, grain: 0.06,
+    patterns: ['hstripes', 'vstripes', 'checker', 'grid', 'vgrad', 'diag', 'fine', 'hstripes'], patProb: 0.3,
+    bgPatterns: ['checker', 'hstripes', 'diag'], bgPatProb: 0.25,
+    glyph: null, glyphProb: 0, bgGlyphProb: 0, trails: false },
+
+  glitch: { colorBy: 'state', W: 200, H: 100, cw: 5, ch: 5, bg: '#e7e7e7',
+    palette: ['#000000', '#000000', '#ffffff', '#ffffff', '#9a9a9a', '#4a4a4a', '#ff2fd0', '#00e0ff',
+      '#7b3cff', '#ffe600', '#2bff88', '#1a3cff'],
+    rule: 'RRLLLRLLLRRR', ants: 10, spawn: 'rows', steps: 500, turmite: 1,
+    sx: 9, sy: 1, drip: 0, dripX: 0.5, glitch: 10, grain: 0,
+    patterns: ['checker', 'hstripes', 'vstripes', 'hgrad', 'fine', 'checker'], patProb: 0.35,
+    bgPatterns: [], bgPatProb: 0,
+    glyph: null, glyphProb: 0, bgGlyphProb: 0, trails: false },
+
+  terminal: { colorBy: 'state', W: 36, H: 50, cw: 20, ch: 20, bg: '#000000',
+    palette: ['#ffffff', '#ffffff', '#bdbdbd'],
+    inks: ['#ffffff', '#ffffff', '#ffffff', '#ffe600', '#ff2fa0', '#00e5ff', '#ff2020', '#2030ff', '#9a9a9a'],
+    rule: 'RRLL', ants: 7, spawn: 'center', steps: 900, turmite: 1,
+    sx: 5, sy: 1, drip: 0, dripX: 0.6, glitch: 0, grain: 0,
+    patterns: ['dots', 'dots', 'dots', 'fine'], patProb: 0.75, patOnBg: true,
+    bgPatterns: ['dots'], bgPatProb: 0.3,
+    glyph: 'box', glyphProb: 0.35, bgGlyphProb: 0.3, trails: false },
+};
+
+// ---------- params / UI ----------
+const CONTROLS = [
+  ['seed', 'number'], ['rule', 'text'],
+  ['ants', 'range', 1, 60, 1], ['steps', 'range', 100, 40000, 100], ['turmite', 'range', 1, 4, 1],
+  ['W', 'range', 16, 300, 1], ['H', 'range', 16, 300, 1], ['cw', 'range', 2, 32, 1], ['ch', 'range', 2, 40, 1],
+  ['sx', 'range', 1, 16, 1], ['sy', 'range', 1, 16, 1],
+  ['drip', 'range', 0, 1, 0.01], ['dripX', 'range', 0, 1, 0.01], ['glitch', 'range', 0, 40, 1],
+  ['patProb', 'range', 0, 1, 0.01], ['glyphProb', 'range', 0, 1, 0.01], ['grain', 'range', 0, 0.6, 0.01],
+  ['spawn', 'select', ['scatter', 'cluster', 'center', 'rows']], ['colorBy', 'select', ['state', 'ant']],
+  ['smooth', 'range', 0, 4, 1], ['walkers', 'range', 0, 200, 1], ['trails', 'checkbox'],
+];
+let P = {};
+const $ = id => document.getElementById(id);
+const presetSel = $('preset');
+Object.keys(PRESETS).forEach(k => presetSel.add(new Option(k, k)));
+
+function buildControls() {
+  const box = $('controls'); box.innerHTML = '';
+  for (const [key, type, a, b, step] of CONTROLS) {
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = key;
+    let inp, out = document.createElement('output');
+    if (type === 'select') { inp = document.createElement('select'); a.forEach(o => inp.add(new Option(o, o))); }
+    else { inp = document.createElement('input'); inp.type = type;
+      if (type === 'range') Object.assign(inp, { min: a, max: b, step }); }
+    inp.id = 'c_' + key;
+    const ev = type === 'range' ? 'input' : 'change';
+    inp.addEventListener(ev, () => {
+      const v = type === 'checkbox' ? inp.checked : type === 'range' || type === 'number' ? +inp.value : inp.value;
+      P[key] = v; if (type === 'range') out.textContent = v;
+      scheduleRestart();
+    });
+    row.append(lab, inp, out); box.append(row);
+  }
+}
+function syncControls() {
+  for (const [key, type] of CONTROLS) {
+    const inp = $('c_' + key); if (!inp) continue;
+    if (type === 'checkbox') inp.checked = !!P[key]; else inp.value = P[key];
+    if (type === 'range') inp.nextSibling.textContent = P[key];
+  }
+}
+let restartTimer;
+function scheduleRestart() { clearTimeout(restartTimer); restartTimer = setTimeout(start, 120); }
+
+function loadPreset(name, seed) {
+  P = JSON.parse(JSON.stringify(PRESETS[name]));
+  P.preset = name; P.seed = seed ?? (Math.random() * 1e6 | 0);
+  P.walkers ??= 0; P.smooth ??= 0; P.colorBy ??= 'state';
+  syncControls(); start();
+}
+
+// ---------- simulation ----------
+let walkers, walkRng, grid, visits, owner, entry, exitD, trailAnt, ants, N, stepsDone, total, running = false;
+
+function parseRules(r) {
+  const words = String(P.rule || 'random').toUpperCase().split(/[\s,]+/).filter(Boolean);
+  const out = words.map(w => w === 'RANDOM' ? GOOD_RULES[r() * GOOD_RULES.length | 0]
+    : [...w].filter(c => c in TURN).join('')).filter(w => w.length >= 2);
+  return out.length ? out : ['RL'];
+}
+
+function makeTable(rule, m, k, r) {
+  // table[antState*k + cellState] = [write, turn, next]
+  const t = [];
+  if (m === 1) for (let c = 0; c < k; c++) t.push([(c + 1) % k, TURN[rule[c % rule.length]], 0]);
+  else for (let s = 0; s < m; s++) for (let c = 0; c < k; c++)
+    t.push([r() * k | 0, [-1, 1, -1, 1, 0, 2][r() * 6 | 0], r() * m | 0]);
+  return t;
+}
+
+function start() {
+  const r = mulberry(P.seed);
+  const { W, H } = P;
+  const rules = parseRules(r);
+  N = Math.max(2, ...rules.map(s => s.length));
+  grid = new Uint8Array(W * H); visits = new Uint16Array(W * H);
+  entry = new Int8Array(W * H).fill(-1); exitD = new Int8Array(W * H).fill(-1);
+  trailAnt = new Uint8Array(W * H); owner = new Uint8Array(W * H);
+
+  const centers = Array.from({ length: 1 + (r() * 4 | 0) }, () => [r() * W, r() * H]);
+  ants = [];
+  for (let a = 0; a < P.ants; a++) {
+    let x, y;
+    if (P.spawn === 'cluster') { const c = centers[a % centers.length];
+      x = c[0] + (r() - .5) * W * .5; y = c[1] + (r() - .5) * H * .5; }
+    else if (P.spawn === 'center') { x = W / 2 + (r() - .5) * W * .3; y = H / 2 + (r() - .5) * H * .3; }
+    else if (P.spawn === 'rows') { const rows = 5; x = r() * W; y = ((a % rows) + .5) / rows * H; }
+    else { x = r() * W; y = r() * H; }
+    const rule = rules[a % rules.length];
+    ants.push({ x: ((x | 0) % W + W) % W, y: ((y | 0) % H + H) % H, d: r() * 4 | 0, s: 0,
+      k: rule.length, m: P.turmite, table: makeTable(rule, P.turmite, rule.length, r) });
+  }
+  if (P.turmite > 1) N = Math.max(N, ...ants.map(a => a.k));
+  // walkers: persistent random walks that don't write states, only leave line trails
+  walkers = Array.from({ length: P.walkers || 0 }, () =>
+    ({ x: r() * W | 0, y: r() * H | 0, d: r() * 4 | 0, id: r() * 255 | 0, life: 0 }));
+  walkRng = mulberry(P.seed ^ 0x3a1c);
+
+  buildStyles(); buildBands(); resize();
+  stepsDone = 0; total = P.steps * P.ants;
+  $('status').textContent = 'rules: ' + rules.join(', ');
+  if (!running) { running = true; requestAnimationFrame(frame); }
+}
+
+function stepAnt(a, id) {
+  const { W, H } = P;
+  const i = a.y * W + a.x;
+  const c = grid[i] % a.k;
+  const [w, t, ns] = a.table[a.s * a.k + c];
+  grid[i] = w; visits[i]++; owner[i] = id; a.s = ns;
+  a.d = (a.d + t + 4) & 3;
+  exitD[i] = a.d;
+  const len = a.d & 1 ? P.sx : P.sy;
+  for (let s = 1; s <= len; s++) {
+    a.x = (a.x + DX[a.d] + W) % W; a.y = (a.y + DY[a.d] + H) % H;
+    const j = a.y * W + a.x;
+    entry[j] = a.d; trailAnt[j] = id;
+    if (s < len) { grid[j] = w; visits[j]++; owner[j] = id; exitD[j] = a.d; }
+  }
+}
+
+function stepWalker(w) {
+  const { W, H } = P, r = walkRng;
+  if (++w.life > 20 + r() * 60) { w.x = r() * W | 0; w.y = r() * H | 0; w.life = 0; w.id = r() * 255 | 0; }
+  const i = w.y * W + w.x;
+  if (r() < .35) w.d = (w.d + (r() < .5 ? 1 : 3)) & 3;
+  exitD[i] = w.d;
+  w.x = (w.x + DX[w.d] + W) % W; w.y = (w.y + DY[w.d] + H) % H;
+  const j = w.y * W + w.x; entry[j] = w.d; trailAnt[j] = w.id;
+}
+
+function frame() {
+  const perFrame = Math.max(1500, Math.ceil(total / 100));
+  const target = Math.min(total, stepsDone + perFrame);
+  const n = ants.length;
+  const wk = walkers.length ? Math.ceil(walkers.length * 60 / Math.max(1, total / perFrame)) : 0;
+  while (stepsDone < target) { stepAnt(ants[stepsDone % n], stepsDone % n); stepsDone++; }
+  for (let q = 0; q < wk; q++) stepWalker(walkers[q % walkers.length]);
+  render();
+  $('status').textContent = $('status').textContent.split(' · ')[0] + ` · ${Math.round(stepsDone / total * 100)}%`;
+  if (stepsDone < total) requestAnimationFrame(frame); else running = false;
+}
+
+// ---------- styles ----------
+let styles, bands, antColors;
+function buildStyles() {
+  const r = mulberry(P.seed ^ 0x51ed);
+  const pick = arr => arr[r() * arr.length | 0];
+  const pal = P.palette.map(hex2rgb);
+  const inks = (P.inks || []).map(hex2rgb);
+  const bg = hex2rgb(P.bg);
+  const shuffled = pal.slice().sort(() => r() - .5);
+  const base = [bg]; for (let s = 1; s < N; s++) base.push(shuffled[(s - 1) % shuffled.length]);
+  const inkFor = c => inks.length ? pick(inks) : lum(c) > .55 ? [0, 0, 0] : [255, 255, 255];
+  const other = c => { for (let t = 0; t < 8; t++) { const o = pick(pal); if (o.join() !== c.join()) return o; } return inkFor(c); };
+
+  // colorBy 'ant': every ant owns a colour (plus a rare alt colour), states pick texture
+  const byAnt = P.colorBy === 'ant', G = byAnt ? ants.length : 1;
+  const antBase = ants.map((_, a) => shuffled[a % shuffled.length]);
+  styles = [];
+  for (let a = 0; a < G; a++) for (let s = 0; s < N; s++) {
+    const col = !byAnt || s === 0 ? base[s] : r() < .8 ? antBase[a] : other(antBase[a]);
+    for (let h = 0; h < 4; h++) {
+    const st = { pat: 0, bg: col, fg: col, glyph: false };
+    if (s === 0) {
+      if (h > 0 && P.bgPatterns.length && r() < P.bgPatProb) { st.pat = PAT[pick(P.bgPatterns)]; st.fg = other(bg); }
+      st.glyph = h > 0 && r() < P.bgGlyphProb;
+    } else {
+      if (P.patterns.length && r() < P.patProb) {
+        st.pat = PAT[pick(P.patterns)]; st.fg = other(col);
+        if (P.patOnBg) { st.fg = col; st.bg = bg; }
+      }
+      st.glyph = r() < P.glyphProb;
+    }
+    st.ink = inkFor(st.pat ? st.bg : st.fg);
+    st.bgP = pack(st.bg); st.fgP = pack(st.fg);
+    st.grad = Array.from({ length: 6 }, (_, q) => pack(mix(st.bg, st.fg, q / 5)));
+    st.inkCss = `rgb(${st.ink})`;
+    styles.push(st);
+  } }
+  antColors = antBase.map(c => `rgb(${c})`);
+}
+
+function buildBands() {
+  const r = mulberry(P.seed ^ 0xba5d);
+  bands = new Int32Array(P.H);
+  let cur = 0;
+  for (let y = 0; y < P.H; y++) {
+    if (r() < .22) cur = r() < .45 ? 0 : Math.round((r() * 2 - 1) * P.glitch) * P.cw + (r() < .3 ? r() * P.cw | 0 : 0);
+    bands[y] = P.glitch ? cur : 0;
+  }
+}
+
+// ---------- render ----------
+const cv = $('cv'), ctx = cv.getContext('2d');
+let img, buf, noise;
+function resize() {
+  const w = P.W * P.cw, h = P.H * P.ch;
+  if (cv.width !== w || cv.height !== h || !img) {
+    cv.width = w; cv.height = h;
+    img = ctx.createImageData(w, h); buf = new Uint32Array(img.data.buffer);
+    noise = document.createElement('canvas'); noise.width = w; noise.height = h;
+    const nc = noise.getContext('2d'), nd = nc.createImageData(w, h);
+    for (let i = 0; i < w * h; i++) { const v = Math.random() * 255; nd.data.set([v, v, v, 255], i * 4); }
+    nc.putImageData(nd, 0, 0);
+  }
+}
+
+const heatOf = v => v === 0 ? 0 : v < 3 ? 1 : v < 12 ? 2 : 3;
+
+function render() {
+  const { W, H, cw, ch, seed } = P;
+  const CW = W * cw, CH = H * ch;
+  // drip / smear: extra CA pass on a copy — color runs down / right into empty cells
+  let g = grid, v = visits, o = owner;
+  // smooth: majority-vote CA passes (3x3), fuses speckle into solid blobs
+  for (let pass = 0; pass < (P.smooth || 0); pass++) {
+    const g2 = g.slice(), v2 = v.slice(), o2 = o.slice(), cnt = new Uint8Array(256);
+    const key = P.colorBy === 'ant' ? o : g;
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      cnt.fill(0); let best = 0, bi = -1;
+      for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+        const j = ((y + dy + H) % H) * W + (x + dx + W) % W, c = ++cnt[g[j] ? key[j] + 1 : 0];
+        if (c > best) { best = c; bi = j; }
+      }
+      const i = y * W + x;
+      if (best >= 5 && (g[bi] !== g[i] || o[bi] !== o[i])) { g2[i] = g[bi]; o2[i] = o[bi]; v2[i] = Math.max(v[i], 1); }
+    }
+    g = g2; v = v2; o = o2;
+  }
+  if (P.drip > 0 || P.dripX > 0) {
+    g = g.slice(); v = v.slice(); o = o.slice();
+    if (P.drip > 0) for (let y = 1; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (g[i] === 0 && g[i - W] !== 0 && hash(i * 31 + seed) < P.drip) { g[i] = g[i - W]; v[i] = v[i - W]; o[i] = o[i - W]; }
+    }
+    if (P.dripX > 0) for (let y = 0; y < H; y++) for (let x = 1; x < W; x++) {
+      const i = y * W + x;
+      if (g[i] === 0 && g[i - 1] !== 0 && hash(i * 17 + seed + 7) < P.dripX) { g[i] = g[i - 1]; v[i] = v[i - 1]; o[i] = o[i - 1]; }
+    }
+  }
+  const sIdx = new Uint16Array(W * H);
+  const byAnt = P.colorBy === 'ant';
+  for (let i = 0; i < W * H; i++) sIdx[i] = ((byAnt ? o[i] * N : 0) + g[i]) * 4 + heatOf(v[i]);
+
+  const u = Math.max(1, Math.round(cw / 4)), dp = Math.max(3, Math.round(cw / 5));
+  const m = Math.max(1, cw * .2 | 0), th = Math.max(1, cw / 8 | 0), gu = Math.max(3, cw / 3 | 0);
+  let p = 0;
+  for (let py = 0; py < CH; py++) {
+    const cy = py / ch | 0, ly = py - cy * ch, shift = bands[cy], row = cy * W;
+    for (let px = 0; px < CW; px++, p++) {
+      let gx = px - shift; gx = ((gx % CW) + CW) % CW;
+      const cx = gx / cw | 0, lx = gx - cx * cw;
+      const st = styles[sIdx[row + cx]];
+      let on;
+      switch (st.pat) {
+        case 0: buf[p] = st.bgP; continue;
+        case 1: on = ((gx / u | 0) + (py / u | 0)) & 1; break;
+        case 2: on = (gx + py) & 1; break;
+        case 3: on = (py / u | 0) & 1; break;
+        case 4: on = (gx / u | 0) & 1; break;
+        case 5: on = gx % dp === 0 && py % dp === 0; break;
+        case 6: on = ((gx + py) / (u * 2) | 0) & 1; break;
+        case 7: on = lx >= m && lx < cw - m && ly >= m && ly < ch - m; break;
+        case 8: on = lx >= m && lx < cw - m && ly >= m && ly < ch - m &&
+          (lx < m + th || lx >= cw - m - th || ly < m + th || ly >= ch - m - th); break;
+        case 9: on = SPIRAL[(ly * 7 / ch | 0) * 7 + (lx * 7 / cw | 0)]; break;
+        case 10: on = lx % gu === 0 || ly % gu === 0; break;
+        case 11: buf[p] = st.grad[ly * 6 / ch | 0]; continue;
+        case 12: buf[p] = st.grad[lx * 6 / cw | 0]; continue;
+      }
+      buf[p] = on ? st.fgP : st.bgP;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+
+  // overlay: ant trails (squiggles through empty cells)
+  if (P.trails) {
+    ctx.lineWidth = Math.max(1, cw / 5 | 0); ctx.lineCap = 'round';
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x;
+      if (g[i] !== 0 || entry[i] < 0 || exitD[i] < 0) continue;
+      const ox = x * cw + bands[y] + cw / 2, oy = y * ch + ch / 2;
+      const e = entry[i], o = exitD[i], j1 = hash(i + seed) - .5, j2 = hash(i * 3 + seed) - .5;
+      ctx.strokeStyle = antColors[trailAnt[i] % antColors.length];
+      ctx.beginPath();
+      ctx.moveTo(ox - DX[e] * cw / 2, oy - DY[e] * ch / 2);
+      ctx.quadraticCurveTo(ox + j1 * cw * .9, oy + j2 * ch * .9, ox + DX[o] * cw / 2, oy + DY[o] * ch / 2);
+      ctx.stroke();
+    }
+  }
+
+  // overlay: glyphs (text stream or box-drawing chars)
+  if (P.glyph) {
+    ctx.font = `${Math.round(Math.min(ch * .9, cw * 1.6))}px ui-monospace, Menlo, monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+      const i = y * W + x; if (v[i] === 0) continue;
+      const st = styles[sIdx[i]]; if (!st.glyph) continue;
+      const chr = P.glyph === 'text' ? TEXT[i % TEXT.length] : BOX[hash(i * 7 + seed) * BOX.length | 0];
+      if (chr === ' ') continue;
+      ctx.fillStyle = st.inkCss;
+      ctx.fillText(chr, x * cw + bands[y] + cw / 2, y * ch + ch / 2 + 1);
+    }
+  }
+
+  if (P.grain > 0) {
+    ctx.save(); ctx.globalAlpha = P.grain; ctx.globalCompositeOperation = 'overlay';
+    ctx.drawImage(noise, 0, 0); ctx.restore();
+  }
+}
+
+// ---------- actions ----------
+function randomize() {
+  P.seed = Math.random() * 1e6 | 0;
+  const r = mulberry(P.seed);
+  const n = 1 + (r() * 3 | 0);
+  P.rule = Array.from({ length: n }, () => GOOD_RULES[r() * GOOD_RULES.length | 0]).join(',');
+  syncControls(); start();
+}
+function chaos() {
+  randomize();
+  const r = Math.random;
+  Object.assign(P, {
+    ants: 1 + (r() * 30 | 0), sx: 1 + (r() * (r() < .5 ? 2 : 10) | 0), sy: 1 + (r() * (r() < .5 ? 2 : 8) | 0),
+    drip: r() < .5 ? 0 : r(), dripX: r() < .5 ? 0 : r(), glitch: r() < .6 ? 0 : r() * 20 | 0,
+    patProb: r() * .7, turmite: r() < .75 ? 1 : 2 + (r() * 2 | 0),
+    spawn: ['scatter', 'cluster', 'center', 'rows'][r() * 4 | 0], colorBy: r() < .5 ? 'ant' : 'state',
+  });
+  const donor = PRESETS[Object.keys(PRESETS)[r() * 6 | 0]];
+  P.palette = donor.palette; P.bg = donor.bg; P.inks = donor.inks;
+  syncControls(); start();
+}
+function save() {
+  const a = document.createElement('a');
+  a.download = `turmite-${P.preset}-${P.seed}.png`; a.href = cv.toDataURL('image/png'); a.click();
+}
+
+presetSel.onchange = () => loadPreset(presetSel.value);
+$('bRand').onclick = randomize;
+$('bSeed').onclick = () => { P.seed = Math.random() * 1e6 | 0; syncControls(); start(); };
+$('bChaos').onclick = chaos;
+$('bSave').onclick = save;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.code === 'Space') { e.preventDefault(); randomize(); }
+  else if (e.key === 'n') $('bSeed').click();
+  else if (e.key === 'c') chaos();
+  else if (e.key === 's') save();
+});
+
+buildControls();
+presetSel.value = 'nebula';
+loadPreset('nebula');
+</script>
+</body>
+</html>

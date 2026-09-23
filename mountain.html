@@ -1,0 +1,838 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Contour Mountain</title>
+<style>
+  :root { --bg:#0e0e0e; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#f0583a; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; }
+  canvas { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:grab; }
+  canvas.place { cursor:crosshair; }
+  #panel { width:300px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:16px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; color:var(--fg); }
+  .pair { display:grid; grid-template-columns: 1fr 1fr; gap:6px; margin:5px 0; }
+  .search { display:grid; grid-template-columns: 1fr auto; gap:6px; margin:5px 0; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], input[type=number], select { width:100%; background:#0c0c0c; color:var(--fg);
+    border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); background:#2a1a16; }
+  .tools { display:grid; grid-template-columns: repeat(4, 1fr); gap:6px; margin:6px 0; }
+  .tools button { display:flex; flex-direction:column; align-items:center; gap:3px; padding:6px 2px; font-size:10px; }
+  .tools canvas { position:static; width:26px; height:26px; cursor:inherit; }
+  #mlist { margin:6px 0; }
+  .mi { display:grid; grid-template-columns: 18px 1fr 22px; gap:6px; align-items:center; padding:3px 4px; border:1px solid transparent; }
+  .mi.sel { border-color:#444; background:#1d1d1d; }
+  .mi .dot { width:14px; height:14px; border-radius:50%; border:1px solid #000; cursor:pointer; }
+  .mi input { padding:2px 4px; }
+  .mi button { padding:2px; flex:none; }
+  #status { color:var(--dim); margin-top:8px; min-height:1.4em; }
+  #status.err { color:var(--acc); }
+  .hint { color:#555; margin-top:12px; }
+  label.chk { display:flex; gap:6px; align-items:center; color:var(--dim); margin:5px 0; }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Contour · mountain</h1>
+
+  <h2>Место</h2>
+  <div class="search"><input type="text" id="q" placeholder="Эльбрус, Matterhorn…"><button id="bFind">найти</button></div>
+  <div class="row"><label>пресет</label><select id="preset"></select><span></span></div>
+  <div class="pair"><input type="number" id="lat" step="0.0001" placeholder="lat"><input type="number" id="lon" step="0.0001" placeholder="lon"></div>
+  <div class="row"><label>радиус км</label><input type="range" id="radius" min="1" max="40" step="0.5"><output id="oRadius"></output></div>
+  <label class="chk"><input type="checkbox" id="sea"> обрезать ниже уровня моря</label>
+  <div class="btns">
+    <button id="bLoad">загрузить</button>
+    <button id="bProc" title="процедурная гора">случайная</button>
+  </div>
+
+  <h2>Рельеф</h2>
+  <div id="relief"></div>
+
+  <h2>Вид</h2>
+  <div id="view"></div>
+  <label class="chk"><input type="checkbox" id="compass" checked> компас</label>
+
+  <h2>Инструмент</h2>
+  <div class="tools" id="tools"></div>
+  <div class="row"><label>подпись</label><input type="text" id="label" value="S" maxlength="24"><span></span></div>
+  <div class="row"><label>шток</label><input type="range" id="stem" min="20" max="200" step="1" value="90"><output id="oStem"></output></div>
+  <div class="btns">
+    <button id="bRouteNew">новый маршрут</button>
+    <button id="bRouteUndo">← точка</button>
+    <button id="bRouteClear">стереть маршруты</button>
+  </div>
+
+  <h2>Метки</h2>
+  <div id="mlist"></div>
+  <div class="btns">
+    <button id="bClearM">удалить все метки</button>
+    <button id="bPng">save png</button>
+  </div>
+
+  <div id="status"></div>
+  <div class="hint">
+    Высоты — AWS Terrarium (Mapzen), поиск — OSM Nominatim.<br><br>
+    Тащить — вращать · Shift+тащить — сдвиг · колесо — масштаб.<br>
+    Клик с инструментом — поставить метку / точку маршрута.<br>
+    Метку можно перетащить за шляпку. Del — удалить выбранную.
+  </div>
+</div>
+
+<script>
+// ---------- constants ----------
+const TERRARIUM = 'https://s3.amazonaws.com/elevation-tiles-prod/terrarium/';
+const EARTH = 40075016.686;
+const PRESETS = [
+  ['Фудзи', 35.3606, 138.7274, 9],
+  ['Эльбрус', 43.3499, 42.4453, 7],
+  ['Маттерхорн', 45.9763, 7.6586, 4.5],
+  ['Эверест', 27.9881, 86.9250, 8],
+  ['Килиманджаро', -3.0674, 37.3556, 16],
+  ['Сент-Хеленс', 46.1914, -122.1956, 6],
+  ['Казбек', 42.6975, 44.5183, 6],
+  ['Везувий', 40.8215, 14.4260, 3.5],
+  ['Тейде', 28.2723, -16.6425, 9],
+  ['Ключевская сопка', 56.0560, 160.6420, 14],
+];
+const TYPES = {
+  flag:   { name: 'вершина', bg: '#f2f2f2', fg: '#161616', stem: '#8a8a8a', r: 17 },
+  camp:   { name: 'лагерь',  bg: '#9ec3cf', fg: '#253a41', stem: '#71878e', r: 17 },
+  signal: { name: 'сигнал',  bg: '#f0583a', fg: '#ffffff', stem: '#8a4a36', r: 17 },
+  poi:    { name: 'точка',   bg: '#c9e08a', fg: '#34401a', stem: '#6f7a50', r: 17 },
+  letter: { name: 'буква',   bg: '#f2f2f2', fg: '#161616', stem: '#8a8a8a', r: 11 },
+};
+const TOOLS = ['flag', 'camp', 'signal', 'poi', 'letter', 'route', 'none'];
+const TERRAIN = '#151515';
+
+// ---------- state ----------
+const S = {
+  name: 'Фудзи', lat: 35.3606, lon: 138.7274, radiusKm: 9, sea: false,
+  grid: 170, levels: 38, exag: 0.9, smooth: 2, edge: 0.18, width: 1.1,
+  az: -0.5, el: 0.62, zoom: 1, panX: 0, panY: 0, compass: true,
+  tool: 'flag', stem: 90, label: 'S',
+  markers: [], routes: [[]], active: 0,
+  procSeed: 0,
+};
+try { Object.assign(S, JSON.parse(localStorage.getItem('contour-mountain') || '{}')); } catch (e) {}
+if (S.exag > 2) S.exag = 0.9;
+const save = () => { try { localStorage.setItem('contour-mountain', JSON.stringify(S)); } catch (e) {} };
+
+let source = null;          // { kind:'tiles', data, w, h, px, py, mpp } | { kind:'proc', seed }
+let N = 0, Z = null, xs = null, zmax = 1;
+let levels = [];            // [{ t, polys: Float32Array, plen: Int32Array, segs: Float32Array }]
+let routeSamples = [];      // per route: [{x,y,h,b}]
+let selected = null;
+
+const $ = id => document.getElementById(id);
+const cv = $('cv'), ctx = cv.getContext('2d');
+const status = (msg, err) => { $('status').textContent = msg; $('status').className = err ? 'err' : ''; };
+
+// ---------- data: tiles ----------
+function loadImg(url) {
+  return new Promise((res, rej) => {
+    const im = new Image(); im.crossOrigin = 'anonymous';
+    im.onload = () => res(im); im.onerror = () => rej(new Error('tile ' + url));
+    im.src = url;
+  });
+}
+
+async function fetchTiles(lat, lon, rKm) {
+  const rM = rKm * 1000, latR = lat * Math.PI / 180;
+  const want = 2 * rM / 600; // ~600 px across diameter
+  const z = Math.max(1, Math.min(15, Math.ceil(Math.log2(EARTH * Math.cos(latR) / (256 * want)))));
+  const n = 2 ** z, world = 256 * n;
+  const px = (lon + 180) / 360 * world;
+  const py = (1 - Math.log(Math.tan(latR) + 1 / Math.cos(latR)) / Math.PI) / 2 * world;
+  const mpp = EARTH * Math.cos(latR) / world;
+  const half = rM / mpp + 2;
+  const tx0 = Math.floor((px - half) / 256), tx1 = Math.floor((px + half) / 256);
+  const ty0 = Math.max(0, Math.floor((py - half) / 256)), ty1 = Math.min(n - 1, Math.floor((py + half) / 256));
+  const w = (tx1 - tx0 + 1) * 256, h = (ty1 - ty0 + 1) * 256;
+  const oc = document.createElement('canvas'); oc.width = w; oc.height = h;
+  const octx = oc.getContext('2d', { willReadFrequently: true });
+  const jobs = [];
+  for (let ty = ty0; ty <= ty1; ty++) for (let tx = tx0; tx <= tx1; tx++) {
+    const wx = ((tx % n) + n) % n;
+    jobs.push(loadImg(`${TERRARIUM}${z}/${wx}/${ty}.png`).then(im => octx.drawImage(im, (tx - tx0) * 256, (ty - ty0) * 256)));
+  }
+  status(`загрузка ${jobs.length} тайлов (z${z})…`);
+  await Promise.all(jobs);
+  const rgba = octx.getImageData(0, 0, w, h).data;
+  const data = new Float32Array(w * h);
+  for (let i = 0; i < w * h; i++) data[i] = rgba[i * 4] * 256 + rgba[i * 4 + 1] + rgba[i * 4 + 2] / 256 - 32768;
+  return { kind: 'tiles', data, w, h, px: px - tx0 * 256, py: py - ty0 * 256, mpp, rM, z };
+}
+
+function sampleTiles(src, n) {
+  const out = new Float32Array(n * n);
+  const { data, w, h } = src;
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const x = -1 + 2 * i / (n - 1), y = 1 - 2 * j / (n - 1);
+    let u = src.px + x * src.rM / src.mpp - 0.5, v = src.py - y * src.rM / src.mpp - 0.5;
+    u = Math.max(0, Math.min(w - 1.001, u)); v = Math.max(0, Math.min(h - 1.001, v));
+    const iu = u | 0, iv = v | 0, fu = u - iu, fv = v - iv, k = iv * w + iu;
+    out[j * n + i] = (data[k] * (1 - fu) + data[k + 1] * fu) * (1 - fv) + (data[k + w] * (1 - fu) + data[k + w + 1] * fu) * fv;
+  }
+  return out;
+}
+
+// ---------- data: procedural ----------
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+
+function procedural(seed, n) {
+  const rnd = mulberry(seed);
+  const G = 64, lat = new Float32Array(G * G).map(() => rnd());
+  const noise = (x, y) => {
+    x = ((x % G) + G) % G; y = ((y % G) + G) % G;
+    const ix = x | 0, iy = y | 0, fx = x - ix, fy = y - iy;
+    const sx = fx * fx * (3 - 2 * fx), sy = fy * fy * (3 - 2 * fy);
+    const a = lat[iy * G + ix], b = lat[iy * G + (ix + 1) % G], c = lat[((iy + 1) % G) * G + ix], d = lat[((iy + 1) % G) * G + (ix + 1) % G];
+    return (a + (b - a) * sx) + ((c + (d - c) * sx) - (a + (b - a) * sx)) * sy;
+  };
+  const peaks = [];
+  const np = 1 + (rnd() * 3 | 0);
+  for (let p = 0; p < np; p++) peaks.push({ x: (rnd() - .5) * .7, y: (rnd() - .5) * .7, h: p ? .4 + rnd() * .5 : 1, s: .25 + rnd() * .25 });
+  const ox = rnd() * 50, oy = rnd() * 50;
+  const out = new Float32Array(n * n);
+  for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
+    const x = -1 + 2 * i / (n - 1), y = 1 - 2 * j / (n - 1);
+    let base = 0;
+    for (const p of peaks) { const dx = x - p.x, dy = y - p.y; base = Math.max(base, p.h * Math.exp(-(dx * dx + dy * dy) / (2 * p.s * p.s))); }
+    let f = 0, amp = .5, fr = 3;
+    for (let o = 0; o < 5; o++) { const r = 1 - Math.abs(noise(ox + x * fr, oy + y * fr) * 2 - 1); f += r * r * amp; amp *= .5; fr *= 2.1; }
+    out[j * n + i] = (base * (0.75 + 0.5 * f) + f * 0.12) * 3200;
+  }
+  return out;
+}
+
+// ---------- heightfield ----------
+function buildHeights() {
+  N = S.grid | 0;
+  let e = source.kind === 'tiles' ? sampleTiles(source, N) : procedural(source.seed, N);
+  if (S.sea) for (let i = 0; i < e.length; i++) if (e[i] < 0) e[i] = 0;
+  for (let p = 0; p < S.smooth; p++) {
+    const o = new Float32Array(N * N);
+    for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+      let s = 0, c = 0;
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const a = i + di, b = j + dj;
+        if (a >= 0 && b >= 0 && a < N && b < N) { const w = (di || dj) ? ((di && dj) ? 1 : 2) : 4; s += e[b * N + a] * w; c += w; }
+      }
+      o[j * N + i] = s / c;
+    }
+    e = o;
+  }
+  xs = new Float32Array(N); for (let i = 0; i < N; i++) xs[i] = -1 + 2 * i / (N - 1);
+  let mn = Infinity, mx = -Infinity;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const x = xs[i], y = -xs[j];
+    if (x * x + y * y <= 1) { const v = e[j * N + i]; if (v < mn) mn = v; if (v > mx) mx = v; }
+  }
+  S._relief = [mn, mx];
+  Z = new Float32Array(N * N); zmax = 0;
+  const edge = Math.max(1e-4, S.edge);
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const x = xs[i], y = -xs[j], r = Math.hypot(x, y);
+    if (r > 1) { Z[j * N + i] = -1; continue; }
+    let z = (e[j * N + i] - mn) / Math.max(1, mx - mn) * S.exag;
+    if (r > 1 - edge) { const t = (1 - r) / edge; z *= t * t * (3 - 2 * t); }
+    Z[j * N + i] = z; if (z > zmax) zmax = z;
+  }
+  zmax = Math.max(zmax, 1e-3);
+  buildLevels();
+  buildRoutes();
+}
+
+function heightAt(x, y) {
+  if (!Z) return 0;
+  const u = Math.max(0, Math.min(N - 1.001, (x + 1) / 2 * (N - 1)));
+  const v = Math.max(0, Math.min(N - 1.001, (1 - y) / 2 * (N - 1)));
+  const i = u | 0, j = v | 0, fu = u - i, fv = v - j, k = j * N + i;
+  const g = q => Math.max(0, Z[q]);
+  return (g(k) * (1 - fu) + g(k + 1) * fu) * (1 - fv) + (g(k + N) * (1 - fu) + g(k + N + 1) * fu) * fv;
+}
+
+// marching squares: filled region z >= t (for painter slabs) + contour segments
+function march(t) {
+  const polys = [], plen = [], segs = [];
+  const cross = (x1, y1, v1, x2, y2, v2) => {
+    // canonical order so neighbouring cells compute identical points (no seams)
+    if (x1 > x2 || (x1 === x2 && y1 < y2)) { [x1, x2] = [x2, x1]; [y1, y2] = [y2, y1]; [v1, v2] = [v2, v1]; }
+    const f = (t - v1) / (v2 - v1);
+    return [x1 + (x2 - x1) * f, y1 + (y2 - y1) * f];
+  };
+  const quad = (i0, i1, j) => {
+    polys.push(xs[i0], -xs[j], xs[i1], -xs[j], xs[i1], -xs[j + 1], xs[i0], -xs[j + 1]); plen.push(4);
+  };
+  const px = [0, 0, 0, 0], py = [0, 0, 0, 0], pv = [0, 0, 0, 0];
+  for (let j = 0; j < N - 1; j++) {
+    let run = -1;
+    for (let i = 0; i < N - 1; i++) {
+      const k = j * N + i;
+      pv[0] = Z[k]; pv[1] = Z[k + 1]; pv[2] = Z[k + N + 1]; pv[3] = Z[k + N];
+      const inside = (pv[0] >= t) + (pv[1] >= t) + (pv[2] >= t) + (pv[3] >= t);
+      if (inside === 4) { if (run < 0) run = i; continue; }
+      if (run >= 0) { quad(run, i, j); run = -1; }
+      if (inside === 0) continue;
+      px[0] = xs[i]; py[0] = -xs[j]; px[1] = xs[i + 1]; py[1] = -xs[j];
+      px[2] = xs[i + 1]; py[2] = -xs[j + 1]; px[3] = xs[i]; py[3] = -xs[j + 1];
+      let cnt = 0; const cr = [];
+      for (let e = 0; e < 4; e++) {
+        const n = (e + 1) & 3, ie = pv[e] >= t, inn = pv[n] >= t;
+        if (ie) { polys.push(px[e], py[e]); cnt++; }
+        if (ie !== inn) {
+          const p = cross(px[e], py[e], pv[e], px[n], py[n], pv[n]);
+          polys.push(p[0], p[1]); cnt++; cr.push(p[0], p[1], ie ? 1 : 0);
+        }
+      }
+      plen.push(cnt);
+      const m = cr.length / 3;
+      for (let a = 0; a < m; a++) if (cr[a * 3 + 2]) {
+        const b = (a + 1) % m;
+        segs.push(cr[a * 3], cr[a * 3 + 1], cr[b * 3], cr[b * 3 + 1]);
+      }
+    }
+    if (run >= 0) quad(run, N - 1, j);
+  }
+  return { t, polys: new Float32Array(polys), plen: new Int32Array(plen), segs: new Float32Array(segs) };
+}
+
+function buildLevels() {
+  levels = [];
+  for (let k = 1; k < S.levels; k++) levels.push(march(zmax * k / S.levels));
+}
+
+function bucketOf(h) {
+  let lo = 0, hi = levels.length; // count of levels with t <= h
+  while (lo < hi) { const m = (lo + hi) >> 1; if (levels[m].t <= h) lo = m + 1; else hi = m; }
+  return lo;
+}
+
+function buildRoutes() {
+  routeSamples = S.routes.map(pts => {
+    if (pts.length < 2) return [];
+    const out = [];
+    const P = i => pts[Math.max(0, Math.min(pts.length - 1, i))];
+    for (let i = 0; i < pts.length - 1; i++) {
+      const p0 = P(i - 1), p1 = P(i), p2 = P(i + 1), p3 = P(i + 2);
+      const steps = Math.max(4, Math.ceil(Math.hypot(p2[0] - p1[0], p2[1] - p1[1]) / 0.006));
+      for (let s = 0; s < steps + (i === pts.length - 2 ? 1 : 0); s++) {
+        const t = s / steps, t2 = t * t, t3 = t2 * t;
+        const cr = (a, b, c, d) => 0.5 * (2 * b + (-a + c) * t + (2 * a - 5 * b + 4 * c - d) * t2 + (-a + 3 * b - 3 * c + d) * t3);
+        let x = cr(p0[0], p1[0], p2[0], p3[0]), y = cr(p0[1], p1[1], p2[1], p3[1]);
+        const r = Math.hypot(x, y); if (r > 1) { x /= r; y /= r; }
+        const h = heightAt(x, y) + 0.002;
+        out.push({ x, y, h, b: bucketOf(h) });
+      }
+    }
+    return out;
+  });
+}
+
+// ---------- projection ----------
+let P = null;
+function makeProj() {
+  const W = cv.clientWidth, Hh = cv.clientHeight;
+  const sc = Math.min(W, Hh * 1.15) * 0.37 * S.zoom;
+  const c = Math.cos(S.az), s = Math.sin(S.az), se = Math.sin(S.el), ce = Math.cos(S.el);
+  const cx = W / 2 + S.panX, cy = Hh / 2 + zmax * ce * sc * 0.42 + 20 + S.panY;
+  P = { sc, se, ce, c, s, cx, cy, ax: c * sc, bx: -s * sc, ay: -s * se * sc, by: -c * se * sc, zk: -ce * sc };
+}
+const PX = (x, y) => P.ax * x + P.bx * y + P.cx;
+const PY = (x, y, z) => P.ay * x + P.by * y + P.cy + P.zk * z;
+const depth = (x, y, z) => -(x * P.s + y * P.c) * P.ce + z * P.se;
+
+// ---------- render ----------
+let pending = false;
+const requestRender = () => { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; render(); }); } };
+
+function resize() {
+  const dpr = Math.min(2, window.devicePixelRatio || 1);
+  cv.width = Math.round(cv.clientWidth * dpr); cv.height = Math.round(cv.clientHeight * dpr);
+  requestRender();
+}
+
+function render(exportScale) {
+  const dpr = exportScale || (cv.width / cv.clientWidth);
+  const W = cv.clientWidth, Hh = cv.clientHeight;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  ctx.fillStyle = getComputedStyle(document.body).getPropertyValue('--bg') || '#0e0e0e';
+  ctx.fillRect(0, 0, W, Hh);
+  if (!Z) return;
+  makeProj();
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+
+  if (S.compass) drawCompass(dpr);
+
+  // base disk
+  ctx.beginPath();
+  for (let a = 0; a <= 128; a++) {
+    const t = a / 128 * Math.PI * 2, x = Math.cos(t), y = Math.sin(t);
+    a ? ctx.lineTo(PX(x, y), PY(x, y, 0)) : ctx.moveTo(PX(x, y), PY(x, y, 0));
+  }
+  ctx.closePath();
+  ctx.fillStyle = TERRAIN; ctx.fill();
+  ctx.strokeStyle = '#7fa8a4'; ctx.lineWidth = 2; ctx.stroke();
+  drawRoutes(0);
+
+  const L = levels.length;
+  for (let k = 0; k < L; k++) {
+    const lv = levels[k], dz = P.zk * lv.t;
+    const { polys, plen, segs } = lv;
+    ctx.beginPath();
+    let o = 0;
+    for (let p = 0; p < plen.length; p++) {
+      const n = plen[p];
+      ctx.moveTo(P.ax * polys[o] + P.bx * polys[o + 1] + P.cx, P.ay * polys[o] + P.by * polys[o + 1] + P.cy + dz);
+      for (let q = 1; q < n; q++) {
+        const x = polys[o + q * 2], y = polys[o + q * 2 + 1];
+        ctx.lineTo(P.ax * x + P.bx * y + P.cx, P.ay * x + P.by * y + P.cy + dz);
+      }
+      ctx.closePath();
+      o += n * 2;
+    }
+    ctx.fillStyle = TERRAIN; ctx.fill();
+    ctx.beginPath();
+    for (let q = 0; q < segs.length; q += 4) {
+      ctx.moveTo(P.ax * segs[q] + P.bx * segs[q + 1] + P.cx, P.ay * segs[q] + P.by * segs[q + 1] + P.cy + dz);
+      ctx.lineTo(P.ax * segs[q + 2] + P.bx * segs[q + 3] + P.cx, P.ay * segs[q + 2] + P.by * segs[q + 3] + P.cy + dz);
+    }
+    const f = k / Math.max(1, L - 1);
+    ctx.strokeStyle = `rgba(214,214,214,${0.5 + 0.45 * f})`;
+    ctx.lineWidth = S.width;
+    ctx.stroke();
+    drawRoutes(k + 1);
+  }
+
+  // route waypoints while editing
+  if (S.tool === 'route') {
+    S.routes.forEach((pts, ri) => pts.forEach(p => {
+      const h = heightAt(p[0], p[1]);
+      ctx.beginPath(); ctx.arc(PX(p[0], p[1]), PY(p[0], p[1], h), 3.5, 0, Math.PI * 2);
+      ctx.fillStyle = ri === S.active ? '#fff' : '#888'; ctx.fill();
+    }));
+  }
+
+  const ms = S.markers.map(m => ({ m, z: heightAt(m.x, m.y) }))
+    .sort((a, b) => depth(a.m.x, a.m.y, a.z) - depth(b.m.x, b.m.y, b.z));
+  for (const { m, z } of ms) drawMarker(m, z);
+}
+
+function drawRoutes(bucket) {
+  ctx.save();
+  ctx.strokeStyle = '#f4f4f4'; ctx.lineWidth = 2.4; ctx.lineCap = 'butt';
+  for (const smp of routeSamples) {
+    let len = 0, i = 0;
+    while (i < smp.length - 1) {
+      const a = smp[i], b = smp[i + 1];
+      const ax = PX(a.x, a.y), ay = PY(a.x, a.y, a.h), bx = PX(b.x, b.y), by = PY(b.x, b.y, b.h);
+      const d = Math.hypot(bx - ax, by - ay);
+      if (a.b === bucket) {
+        ctx.setLineDash([6, 6]); ctx.lineDashOffset = -len;
+        ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by);
+        let l2 = len + d, j = i + 1;
+        while (j < smp.length - 1 && smp[j].b === bucket) {
+          const c = smp[j + 1], cx = PX(c.x, c.y), cy = PY(c.x, c.y, c.h);
+          const px = PX(smp[j].x, smp[j].y), py = PY(smp[j].x, smp[j].y, smp[j].h);
+          ctx.lineTo(cx, cy); l2 += Math.hypot(cx - px, cy - py); j++;
+        }
+        ctx.stroke();
+        len = l2; i = j;
+      } else { len += d; i++; }
+    }
+  }
+  ctx.restore();
+}
+
+function drawCompass(dpr) {
+  const ring = (r0, r1, a) => {
+    const x0 = Math.cos(a) * r0, y0 = Math.sin(a) * r0, x1 = Math.cos(a) * r1, y1 = Math.sin(a) * r1;
+    ctx.moveTo(PX(x0, y0), PY(x0, y0, 0)); ctx.lineTo(PX(x1, y1), PY(x1, y1, 0));
+  };
+  ctx.beginPath();
+  for (let d = 0; d < 360; d += 3) if (d % 30) ring(1.1, 1.16, d * Math.PI / 180);
+  ctx.strokeStyle = '#6a6a6a'; ctx.lineWidth = 1.2; ctx.stroke();
+  ctx.beginPath();
+  for (let d = 0; d < 360; d += 30) if (d % 90) ring(1.08, 1.22, d * Math.PI / 180);
+  ctx.strokeStyle = '#bdbdbd'; ctx.lineWidth = 1.6; ctx.stroke();
+  // letters lying flat on the ground plane, top facing outward
+  const k = 0.0028;
+  for (const [ch, deg] of [['N', 90], ['E', 0], ['S', 270], ['W', 180]]) {
+    const a = deg * Math.PI / 180, r = 1.3;
+    const px = Math.cos(a) * r, py = Math.sin(a) * r;
+    const tx = Math.sin(a), ty = -Math.cos(a);   // clockwise tangent (reading direction)
+    const ix = -Math.cos(a), iy = -Math.sin(a);  // inward (canvas +y)
+    const A = (P.ax * tx + P.bx * ty) * k, B = (P.ay * tx + P.by * ty) * k;
+    const C = (P.ax * ix + P.bx * iy) * k, D = (P.ay * ix + P.by * iy) * k;
+    ctx.save();
+    ctx.setTransform(A * dpr, B * dpr, C * dpr, D * dpr, PX(px, py) * dpr, PY(px, py, 0) * dpr);
+    ctx.font = '800 44px ui-monospace, Menlo, monospace';
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#e8e8e8'; ctx.fillText(ch, 0, 0);
+    ctx.restore();
+  }
+}
+
+function markerGeom(m, z) {
+  const T = TYPES[m.type] || TYPES.flag;
+  const gx = PX(m.x, m.y), gy = PY(m.x, m.y, z);
+  return { T, gx, gy, hx: gx, hy: gy - m.len, R: T.r };
+}
+
+function drawMarker(m, z) {
+  const { T, gx, gy, hx, hy, R } = markerGeom(m, z);
+  ctx.save();
+  ctx.fillStyle = T.stem;
+  ctx.beginPath(); ctx.ellipse(gx, gy, 5, 5 * P.se, 0, 0, Math.PI * 2); ctx.fill();
+  ctx.strokeStyle = T.stem; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(gx, gy); ctx.lineTo(hx, hy + R); ctx.stroke();
+  if (m === selected) {
+    ctx.beginPath(); ctx.arc(hx, hy, R + 5, 0, Math.PI * 2);
+    ctx.strokeStyle = '#f0583a'; ctx.lineWidth = 1.5; ctx.setLineDash([3, 3]); ctx.stroke(); ctx.setLineDash([]);
+  }
+  ctx.beginPath(); ctx.arc(hx, hy, R, 0, Math.PI * 2);
+  ctx.fillStyle = T.bg; ctx.fill();
+  ctx.strokeStyle = '#0b0b0b'; ctx.lineWidth = 2; ctx.stroke();
+  ctx.translate(hx, hy);
+  drawIcon(ctx, m.type, T, R, m.label);
+  ctx.restore();
+  if (m.label && m.type !== 'letter') {
+    ctx.font = '11px ui-monospace, Menlo, monospace'; ctx.textAlign = 'left'; ctx.textBaseline = 'middle';
+    ctx.fillStyle = '#cfcfcf'; ctx.fillText(m.label, hx + R + 7, hy);
+  }
+}
+
+function drawIcon(c, type, T, R, label) {
+  c.strokeStyle = T.fg; c.fillStyle = T.fg; c.lineWidth = 1.7; c.lineJoin = 'round'; c.lineCap = 'round';
+  c.beginPath();
+  if (type === 'flag') {
+    c.moveTo(-5, 8); c.lineTo(-5, -8);
+    c.moveTo(-5, -8); c.lineTo(6, -7); c.lineTo(3, -3.5); c.lineTo(6, 0); c.lineTo(-5, 0);
+    c.stroke();
+  } else if (type === 'camp') {
+    c.moveTo(-9, 7); c.lineTo(0, -7); c.lineTo(9, 7); c.closePath();
+    c.moveTo(-3, -11); c.lineTo(0, -7); c.lineTo(3, -11);
+    c.moveTo(-3, 7); c.lineTo(0, 1); c.lineTo(3, 7);
+    c.stroke();
+  } else if (type === 'signal') {
+    c.arc(0, 0, 2.4, 0, Math.PI * 2); c.fill();
+    c.beginPath();
+    for (const r of [5.5, 9.5]) {
+      c.moveTo(r * Math.cos(-0.75), r * Math.sin(-0.75)); c.arc(0, 0, r, -0.75, 0.75);
+      c.moveTo(-r * Math.cos(0.75), r * Math.sin(0.75)); c.arc(0, 0, r, Math.PI - 0.75, Math.PI + 0.75);
+    }
+    c.stroke();
+  } else if (type === 'poi') {
+    for (let i = 0; i < 10; i++) {
+      const a = -Math.PI / 2 + i * Math.PI / 5, r = i % 2 ? 3.8 : 9;
+      i ? c.lineTo(Math.cos(a) * r, Math.sin(a) * r) : c.moveTo(Math.cos(a) * r, Math.sin(a) * r);
+    }
+    c.closePath(); c.stroke();
+  } else if (type === 'letter') {
+    const s = (label || '?').slice(0, 2).toUpperCase();
+    c.font = `700 ${s.length > 1 ? 9 : 12}px ui-monospace, Menlo, monospace`;
+    c.textAlign = 'center'; c.textBaseline = 'middle';
+    c.fillText(s, 0, 1);
+  }
+}
+
+// ---------- picking ----------
+function pickGround(mx, my) {
+  let best = null, bd = -Infinity;
+  const cell = 2 / (N - 1) * P.sc, lim = Math.max(3, cell * 0.9) ** 2;
+  for (let j = 0; j < N; j++) for (let i = 0; i < N; i++) {
+    const z = Z[j * N + i]; if (z < 0) continue;
+    const x = xs[i], y = -xs[j];
+    const dx = PX(x, y) - mx, dy = PY(x, y, z) - my;
+    if (dx * dx + dy * dy > lim) continue;
+    const d = depth(x, y, z);
+    if (d > bd) { bd = d; best = [x, y]; }
+  }
+  if (best) return best;
+  // fallback: plane z=0 (for clicks on the flat rim)
+  const det = P.ax * P.by - P.bx * P.ay;
+  const u = mx - P.cx, v = my - P.cy;
+  const x = (u * P.by - P.bx * v) / det, y = (P.ax * v - P.ay * u) / det;
+  return Math.hypot(x, y) <= 1 ? [x, y] : null;
+}
+
+function hitMarker(mx, my) {
+  let hit = null, bd = -Infinity;
+  for (const m of S.markers) {
+    const z = heightAt(m.x, m.y), g = markerGeom(m, z);
+    if (Math.hypot(mx - g.hx, my - g.hy) <= g.R + 3) {
+      const d = depth(m.x, m.y, z); if (d > bd) { bd = d; hit = m; }
+    }
+  }
+  return hit;
+}
+
+// ---------- interaction ----------
+let drag = null;
+cv.addEventListener('pointerdown', e => {
+  if (!Z) return;
+  cv.setPointerCapture(e.pointerId);
+  const m = S.tool !== 'route' && hitMarker(e.offsetX, e.offsetY);
+  drag = { x: e.offsetX, y: e.offsetY, lx: e.offsetX, ly: e.offsetY, moved: false,
+    marker: m || null, pan: e.shiftKey || e.button === 1 || e.button === 2 };
+  if (m) { selected = m; renderList(); requestRender(); }
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.offsetX - drag.lx, dy = e.offsetY - drag.ly;
+  drag.lx = e.offsetX; drag.ly = e.offsetY;
+  if (Math.hypot(e.offsetX - drag.x, e.offsetY - drag.y) > 4) drag.moved = true;
+  if (!drag.moved) return;
+  if (drag.marker) {
+    const p = pickGround(e.offsetX, e.offsetY + drag.marker.len);
+    if (p) { drag.marker.x = p[0]; drag.marker.y = p[1]; }
+  } else if (drag.pan) {
+    S.panX += dx; S.panY += dy;
+  } else {
+    S.az += dx * 0.008;
+    S.el = Math.max(0.12, Math.min(1.45, S.el + dy * 0.005));
+    syncView();
+  }
+  requestRender();
+});
+cv.addEventListener('pointerup', e => {
+  if (!drag) return;
+  const d = drag; drag = null;
+  if (d.moved) { save(); return; }
+  if (d.marker) return;
+  const p = pickGround(e.offsetX, e.offsetY);
+  if (S.tool === 'route') {
+    if (!p) return;
+    S.routes[S.active].push(p);
+    buildRoutes();
+  } else if (S.tool !== 'none' && p) {
+    const m = { type: S.tool, x: p[0], y: p[1], len: S.tool === 'letter' ? Math.round(S.stem * 0.8) : S.stem,
+      label: S.tool === 'letter' ? (S.label || 'S') : (S.label === 'S' ? '' : S.label) };
+    S.markers.push(m); selected = m;
+    if (S.tool === 'letter') bumpLetter();
+  } else {
+    selected = null;
+  }
+  renderList(); save(); requestRender();
+});
+cv.addEventListener('contextmenu', e => e.preventDefault());
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  S.zoom = Math.max(0.3, Math.min(5, S.zoom * Math.exp(-e.deltaY * 0.0015)));
+  syncView(); requestRender(); save();
+}, { passive: false });
+
+function bumpLetter() {
+  // S -> next suggestion so consecutive letter pins don't all say the same
+  const seq = ['S', 'F', 'E', 'A', 'B', 'C', 'D'];
+  const i = seq.indexOf(S.label);
+  if (i >= 0) { S.label = seq[(i + 1) % seq.length]; $('label').value = S.label; }
+}
+
+window.addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+  if ((e.key === 'Delete' || e.key === 'Backspace') && selected) {
+    S.markers = S.markers.filter(m => m !== selected); selected = null;
+    renderList(); save(); requestRender(); e.preventDefault();
+  } else if (e.key === 'Escape') { selected = null; renderList(); requestRender(); }
+  else if ((e.metaKey || e.ctrlKey) && e.key === 'z') { undoRoute(); }
+});
+
+// ---------- UI ----------
+const sliders = {};
+function slider(parent, key, label, min, max, step, onChange, fmt = v => v) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}"><output></output>`;
+  const inp = row.querySelector('input'), out = row.querySelector('output');
+  inp.value = S[key]; out.textContent = fmt(S[key]);
+  inp.addEventListener('input', () => { S[key] = +inp.value; out.textContent = fmt(S[key]); onChange(); save(); });
+  $(parent).appendChild(row);
+  sliders[key] = { inp, out, fmt };
+}
+let rebuildTimer = 0;
+const rebuild = () => { clearTimeout(rebuildTimer); rebuildTimer = setTimeout(() => { if (source) { buildHeights(); requestRender(); } }, 60); };
+const relevel = () => { if (Z) { buildLevels(); buildRoutes(); requestRender(); } };
+const deg = v => Math.round(v * 180 / Math.PI) + '°';
+
+slider('relief', 'grid', 'детали', 60, 280, 10, rebuild);
+slider('relief', 'levels', 'изолинии', 8, 90, 1, relevel);
+slider('relief', 'exag', 'высота', 0.1, 2, 0.01, rebuild, v => (+v).toFixed(2));
+slider('relief', 'smooth', 'сглаживание', 0, 8, 1, rebuild);
+slider('relief', 'edge', 'спад к краю', 0, 0.6, 0.01, rebuild, v => (+v).toFixed(2));
+slider('relief', 'width', 'толщина', 0.4, 3, 0.1, requestRender, v => (+v).toFixed(1));
+slider('view', 'az', 'азимут', -3.1416, 3.1416, 0.01, requestRender, deg);
+slider('view', 'el', 'наклон', 0.12, 1.45, 0.01, requestRender, deg);
+slider('view', 'zoom', 'масштаб', 0.3, 5, 0.01, requestRender, v => (+v).toFixed(2));
+
+function syncView() {
+  S.az = Math.atan2(Math.sin(S.az), Math.cos(S.az));
+  for (const k of ['az', 'el', 'zoom']) { sliders[k].inp.value = S[k]; sliders[k].out.textContent = sliders[k].fmt(S[k]); }
+}
+
+// tools
+for (const t of TOOLS) {
+  const b = document.createElement('button'); b.dataset.tool = t;
+  const ic = document.createElement('canvas'); ic.width = 52; ic.height = 52;
+  const c = ic.getContext('2d'); c.scale(2, 2); c.translate(13, 13);
+  if (TYPES[t]) {
+    const T = TYPES[t];
+    c.beginPath(); c.arc(0, 0, 12, 0, Math.PI * 2); c.fillStyle = T.bg; c.fill();
+    c.scale(0.7, 0.7);
+    drawIcon(c, t, T, T.r, t === 'letter' ? 'S' : '');
+  } else if (t === 'route') {
+    c.strokeStyle = '#eee'; c.lineWidth = 2; c.setLineDash([3, 3]);
+    c.beginPath(); c.moveTo(-10, 9); c.bezierCurveTo(-4, -4, 4, 8, 10, -9); c.stroke();
+  } else {
+    c.strokeStyle = '#888'; c.lineWidth = 1.5;
+    c.beginPath(); c.arc(0, 0, 9, 0.4, Math.PI * 2 - 0.4); c.stroke();
+    c.beginPath(); c.moveTo(9, -5); c.lineTo(9, 0); c.lineTo(4, -1); c.stroke();
+  }
+  b.append(ic, document.createTextNode(TYPES[t] ? TYPES[t].name : t === 'route' ? 'маршрут' : 'вращать'));
+  b.onclick = () => { S.tool = t; syncTools(); save(); requestRender(); };
+  $('tools').appendChild(b);
+}
+function syncTools() {
+  for (const b of $('tools').children) b.classList.toggle('on', b.dataset.tool === S.tool);
+  cv.classList.toggle('place', S.tool !== 'none');
+}
+
+$('label').value = S.label;
+$('label').oninput = () => { S.label = $('label').value; if (selected) { selected.label = S.label; renderList(); requestRender(); } save(); };
+$('stem').value = S.stem; $('oStem').textContent = S.stem;
+$('stem').oninput = () => {
+  S.stem = +$('stem').value; $('oStem').textContent = S.stem;
+  if (selected) { selected.len = S.stem; requestRender(); } save();
+};
+
+function undoRoute() {
+  const r = S.routes[S.active];
+  if (r.length) r.pop(); else if (S.routes.length > 1) { S.routes.splice(S.active, 1); S.active = S.routes.length - 1; }
+  buildRoutes(); save(); requestRender();
+}
+$('bRouteNew').onclick = () => {
+  if (S.routes[S.active].length) { S.routes.push([]); S.active = S.routes.length - 1; }
+  S.tool = 'route'; syncTools(); save(); requestRender();
+};
+$('bRouteUndo').onclick = undoRoute;
+$('bRouteClear').onclick = () => { S.routes = [[]]; S.active = 0; buildRoutes(); save(); requestRender(); };
+$('bClearM').onclick = () => { S.markers = []; selected = null; renderList(); save(); requestRender(); };
+
+function renderList() {
+  const box = $('mlist'); box.innerHTML = '';
+  if (!S.markers.length) { box.innerHTML = '<div style="color:#555">пока нет — выбери инструмент и кликни по горе</div>'; return; }
+  S.markers.forEach((m, i) => {
+    const row = document.createElement('div'); row.className = 'mi' + (m === selected ? ' sel' : '');
+    const T = TYPES[m.type];
+    row.innerHTML = `<span class="dot" style="background:${T.bg}" title="${T.name}"></span><input type="text"><button title="удалить">×</button>`;
+    const inp = row.querySelector('input'); inp.value = m.label; inp.placeholder = T.name;
+    inp.oninput = () => { m.label = inp.value; save(); requestRender(); };
+    inp.onfocus = () => { selected = m; $('stem').value = m.len; $('oStem').textContent = m.len; box.querySelectorAll('.mi').forEach((r, k) => r.classList.toggle('sel', k === i)); requestRender(); };
+    row.querySelector('.dot').onclick = () => {
+      // cycle marker type
+      const ks = Object.keys(TYPES); m.type = ks[(ks.indexOf(m.type) + 1) % ks.length]; renderList(); save(); requestRender();
+    };
+    row.querySelector('button').onclick = () => { S.markers.splice(i, 1); if (selected === m) selected = null; renderList(); save(); requestRender(); };
+    box.appendChild(row);
+  });
+}
+
+// place
+for (const [n] of PRESETS) { const o = document.createElement('option'); o.textContent = n; $('preset').appendChild(o); }
+const opt0 = document.createElement('option'); opt0.textContent = '—'; opt0.value = ''; $('preset').prepend(opt0);
+$('preset').value = PRESETS.some(p => p[0] === S.name) ? S.name : '';
+$('preset').onchange = () => {
+  const p = PRESETS.find(p => p[0] === $('preset').value); if (!p) return;
+  [S.name, S.lat, S.lon, S.radiusKm] = p; syncPlace(); resetMarks(); loadReal();
+};
+function syncPlace() {
+  $('lat').value = S.lat; $('lon').value = S.lon;
+  $('radius').value = S.radiusKm; $('oRadius').textContent = S.radiusKm;
+  $('sea').checked = S.sea;
+}
+$('radius').oninput = () => { S.radiusKm = +$('radius').value; $('oRadius').textContent = S.radiusKm; };
+$('radius').onchange = () => loadReal();
+$('sea').onchange = () => { S.sea = $('sea').checked; save(); rebuild(); };
+$('bLoad').onclick = () => {
+  S.lat = +$('lat').value; S.lon = +$('lon').value; S.name = ''; $('preset').value = ''; loadReal();
+};
+$('bProc').onclick = () => { S.procSeed = (Math.random() * 1e9) | 0; S.name = ''; $('preset').value = ''; resetMarks(); loadProc(); };
+$('bFind').onclick = find;
+$('q').addEventListener('keydown', e => { if (e.key === 'Enter') find(); });
+$('bPng').onclick = exportPng;
+$('compass').checked = S.compass;
+$('compass').onchange = () => { S.compass = $('compass').checked; save(); requestRender(); };
+
+function resetMarks() { S.markers = []; S.routes = [[]]; S.active = 0; selected = null; renderList(); }
+
+async function find() {
+  const q = $('q').value.trim(); if (!q) return;
+  // "lat, lon" typed directly
+  const m = q.match(/^\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)\s*$/);
+  if (m) { S.lat = +m[1]; S.lon = +m[2]; S.name = q; syncPlace(); resetMarks(); return loadReal(); }
+  status('поиск…');
+  try {
+    const r = await fetch('https://nominatim.openstreetmap.org/search?format=json&limit=1&q=' + encodeURIComponent(q));
+    const j = await r.json();
+    if (!j.length) return status('ничего не найдено', true);
+    S.lat = +(+j[0].lat).toFixed(5); S.lon = +(+j[0].lon).toFixed(5); S.name = j[0].display_name.split(',')[0];
+    $('preset').value = ''; syncPlace(); resetMarks(); loadReal();
+  } catch (e) { status('поиск не удался: ' + e.message, true); }
+}
+
+let loadId = 0;
+async function loadReal() {
+  const id = ++loadId; S.mode = 'real'; save();
+  try {
+    const src = await fetchTiles(S.lat, S.lon, S.radiusKm);
+    if (id !== loadId) return;
+    source = src; buildHeights(); requestRender();
+    const [mn, mx] = S._relief;
+    status(`${S.name || S.lat.toFixed(4) + ', ' + S.lon.toFixed(4)} · ${Math.round(mn)}–${Math.round(mx)} м · r ${S.radiusKm} км · z${src.z}`);
+  } catch (e) {
+    if (id !== loadId) return;
+    status('нет данных высот (' + e.message + ') — показана процедурная гора', true);
+    source = { kind: 'proc', seed: S.procSeed || 1 }; buildHeights(); requestRender();
+  }
+}
+function loadProc() {
+  ++loadId; S.mode = 'proc';
+  source = { kind: 'proc', seed: S.procSeed }; buildHeights(); requestRender(); save();
+  status('процедурная гора · seed ' + S.procSeed);
+}
+
+function exportPng() {
+  const scale = 3, w = cv.width, h = cv.height;
+  cv.width = Math.round(cv.clientWidth * scale); cv.height = Math.round(cv.clientHeight * scale);
+  render(scale);
+  cv.toBlob(b => {
+    const a = document.createElement('a'); a.href = URL.createObjectURL(b);
+    a.download = `mountain-${(S.name || 'custom').replace(/\s+/g, '_')}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    cv.width = w; cv.height = h; render();
+  });
+}
+
+// ---------- boot ----------
+new ResizeObserver(resize).observe(cv);
+syncPlace(); syncTools(); renderList();
+if (S.mode === 'proc') loadProc(); else loadReal();
+</script>
+</body>
+</html>

@@ -1,0 +1,387 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Turmite Melt</title>
+<style>
+  :root { --bg:#0c0c0c; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#ff2fd0; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; min-width:0; }
+  canvas { width:min(100%, calc(100vh - 40px)); aspect-ratio:1; cursor: crosshair; }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #info { margin-top:10px; color:var(--dim); white-space:pre; font-size:11px; line-height:1.5; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) { body { flex-direction:column; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv" width="512" height="512"></canvas></div>
+<div id="panel">
+  <h1>Turmite melt</h1>
+  <div class="btns">
+    <button id="bNew" title="N">new scene</button>
+    <button id="bGlitch" title="G">reglitch</button>
+    <button id="bPause" title="Space">pause</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div id="controls"></div>
+  <div id="info"></div>
+  <div class="hint">
+    Несколько тьюрмитов (обобщённых муравьёв Лэнгтона) с разными правилами ходят по общему тору.
+    Состояние клетки и плотность следов превращаются в карту высот: крупное размытие даёт
+    плавные «облака», мелкое — рельеф, синус — рябь. Затем прямоугольные зоны глитча
+    размазывают высоту вниз (потёки) и вбок, а цвет берётся из высоты и направления нормали.<br><br>
+    Клик — добавить муравья.<br>
+    N — новая сцена · G — перебросить глитч · Space — пауза · S — PNG
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+let R = Math.random;
+const pick = arr => arr[R() * arr.length | 0];
+const rint = (a, b) => a + (R() * (b - a + 1) | 0);
+const $ = id => document.getElementById(id);
+
+// ---------- turmite rules ----------
+// L/R — поворот, N — прямо, U — разворот. Длина строки = число состояний клетки.
+const KNOWN = ['RL', 'RLR', 'LLRR', 'LRRRRRLLR', 'LLRRRLRLRLLR', 'RRLLLRLLLRRR', 'RRLRLLRRRRRR',
+  'LRRL', 'RLLR', 'RRLL', 'LRRRRLLLRRR', 'RLLLLRRRLLL', 'LLRR', 'RRLLRLLRRLLR'];
+const TURN = { L: 3, R: 1, N: 0, U: 2 };
+const DX = [0, 1, 0, -1], DY = [-1, 0, 1, 0];
+function randomRule() {
+  const n = rint(3, 12); let s = '';
+  for (let i = 0; i < n; i++) { const r = R(); s += r < 0.44 ? 'L' : r < 0.88 ? 'R' : r < 0.96 ? 'N' : 'U'; }
+  return s.includes('L') && s.includes('R') ? s : randomRule();
+}
+function ruleFor(mode) {
+  if (mode === 'known') return pick(KNOWN);
+  if (mode === 'random') return randomRule();
+  return R() < 0.55 ? pick(KNOWN) : randomRule();
+}
+
+// ---------- params ----------
+const P = {
+  seed: 1, size: 512, ants: 7, steps: 2500, warm: 400, ruleMode: 'mix',
+  big: 40, small: 5, wBig: 1.2, wSmall: 0.7, wRaw: 0.15, wBase: 0.3,
+  ripple: 0.03, rippleF: 40, bump: 7, hue: 0.8, angle: 0.45, hueOff: 0.8, sat: 0.9,
+  drip: 0.7, smear: 0.5, glitch: 34, shift: 0.3, churn: 0.4,
+};
+const CONTROLS = [
+  ['ants', 'ants', 1, 24, 1], ['steps', 'steps/fr', 0, 20000, 100], ['warm', 'warmup k', 0, 3000, 50],
+  ['big', 'blur big', 2, 120, 1], ['small', 'blur small', 0, 20, 1],
+  ['wBig', 'w big', 0, 3, 0.05], ['wSmall', 'w small', 0, 3, 0.05], ['wRaw', 'w raw', 0, 1, 0.01], ['wBase', 'w base', 0, 2, 0.05],
+  ['ripple', 'ripple', 0, 0.3, 0.005], ['rippleF', 'ripple f', 5, 200, 1],
+  ['bump', 'bump', 0, 30, 0.5], ['hue', 'hue span', 0, 5, 0.05], ['angle', 'normal hue', 0, 1.5, 0.05],
+  ['hueOff', 'hue shift', 0, 1, 0.01], ['sat', 'saturation', 0, 1, 0.01],
+  ['drip', 'drip', 0, 1, 0.01], ['smear', 'side smear', 0, 1, 0.01], ['glitch', 'glitch rects', 0, 120, 1],
+  ['shift', 'row shift', 0, 1, 0.01], ['churn', 'churn', 0, 1, 0.01],
+];
+const REGEN = new Set(['ants', 'warm']);     // требуют новой сцены
+const REGLITCH = new Set(['glitch', 'drip', 'smear', 'shift']);
+
+// ---------- state ----------
+const cv = $('cv'), ctx = cv.getContext('2d');
+let S, N, st, hv, fA, fB, F, G, tmp, KV, KH, SH, BASE, img;
+let ants = [], rects = [], paused = false, frame = 0, totalSteps = 0, maxN = 2;
+
+function alloc() {
+  S = P.size; N = S * S; cv.width = cv.height = S;
+  st = new Uint8Array(N); hv = new Float32Array(N);
+  fA = new Float32Array(N); fB = new Float32Array(N); F = new Float32Array(N); G = new Float32Array(N);
+  tmp = new Float32Array(N); KV = new Float32Array(N); KH = new Float32Array(N); SH = new Int16Array(S);
+  BASE = new Float32Array(N);
+  img = ctx.createImageData(S, S);
+}
+
+function makeAnt(x, y) {
+  const rule = ruleFor(P.ruleMode);
+  return { x, y, dir: rint(0, 3), rule, n: rule.length, turns: Uint8Array.from(rule, c => TURN[c]),
+    w: (R() < 0.8 ? 1 : -0.6) * (0.4 + R() * 1.6) };
+}
+
+function newScene(keepSeed) {
+  if (!keepSeed) P.seed = Math.random() * 1e6 | 0;
+  R = mulberry(P.seed);
+  alloc(); ants = []; totalSteps = 0; frame = 0;
+  makeBase();
+  const cluster = R() < 0.25;   // кучно из центра или разбросанно
+  for (let k = 0; k < P.ants; k++) {
+    const x = cluster ? (S / 2 + (R() - 0.5) * S * 0.5) | 0 : rint(0, S - 1);
+    const y = cluster ? (S / 2 + (R() - 0.5) * S * 0.5) | 0 : rint(0, S - 1);
+    ants.push(makeAnt(x, y));
+  }
+  maxN = Math.max(2, ...ants.map(a => a.n));
+  // случайный стартовый мусор в паре пятен — ломает симметрию хайвеев
+  for (let b = 0; b < 3; b++) {
+    const cx = rint(0, S - 1), cy = rint(0, S - 1), r = rint(4, 30);
+    for (let y = -r; y <= r; y++) for (let x = -r; x <= r; x++)
+      if (R() < 0.3) st[((cy + y + S) % S) * S + (cx + x + S) % S] = rint(0, maxN - 1);
+  }
+  runAnts(P.warm * 1000 / Math.max(1, ants.length) | 0);
+  makeGlitch();
+  showInfo(); render();
+}
+
+// плавный фон (сумма периодичных волн), чтобы пустые места тоже были градиентом
+function makeBase() {
+  const W = [];
+  for (let k = 0; k < 5; k++) W.push([rint(1, 2) * (R() < 0.5 ? -1 : 1), rint(0, 2) * (R() < 0.5 ? -1 : 1), R() * 6.28, 0.3 + R()]);
+  const T = Math.PI * 2 / S;
+  for (let y = 0; y < S; y++) for (let x = 0; x < S; x++) {
+    let v = 0; for (const [a, b, ph, amp] of W) v += amp * Math.sin((a * x + b * y) * T + ph);
+    BASE[y * S + x] = v * 0.25;
+  }
+}
+
+// ---------- automaton ----------
+function runAnts(steps) {
+  for (const a of ants) {
+    let { x, y, dir } = a; const turns = a.turns, n = a.n, w = a.w;
+    for (let s = 0; s < steps; s++) {
+      const i = y * S + x, c = st[i] % n;
+      dir = (dir + turns[c]) & 3;
+      st[i] = (c + 1) % n;
+      hv[i] += w;
+      x += DX[dir]; y += DY[dir];
+      if (x < 0) x += S; else if (x >= S) x -= S;
+      if (y < 0) y += S; else if (y >= S) y -= S;
+    }
+    a.x = x; a.y = y; a.dir = dir;
+  }
+  totalSteps += steps * ants.length;
+}
+
+// ---------- glitch map ----------
+function glitchRect() {
+  const r = R();
+  if (r < 0.62) {         // вертикальный потёк
+    const w = rint(2, S * 0.12 | 0), h = rint(S * 0.1 | 0, S * 0.85 | 0);
+    return { t: 'v', x: rint(-w / 2 | 0, S - 1), y: rint(-h / 3 | 0, S - 1), w, h, k: 0.01 + R() * R() * 0.25,
+      mx: R() < 0.4, j: R() * 1e4 };
+  } else if (r < 0.9) {   // горизонтальный мазок
+    const w = rint(S * 0.1 | 0, S * 0.7 | 0), h = rint(2, S * 0.08 | 0);
+    return { t: 'h', x: rint(-w / 3 | 0, S - 1), y: rint(0, S - 1), w, h, k: 0.01 + R() * R() * 0.3, j: R() * 1e4 };
+  }
+  const h = rint(2, S * 0.05 | 0);  // сдвиг строк
+  return { t: 's', y: rint(0, S - 1), h, off: rint(-S * 0.15 | 0, S * 0.15 | 0) };
+}
+function wobble(t, j) {   // гладкий шум 0..1 + мелкая рвань
+  return 0.5 + 0.28 * Math.sin(t * 0.07 + j) + 0.14 * Math.sin(t * 0.23 + j * 1.7) + 0.08 * Math.sin(t * 1.3 + j * 3.1);
+}
+function put(M, i, k) { if (M[i] === 0 || Math.abs(k) < Math.abs(M[i])) M[i] = k; }
+function makeGlitch() { rects = []; for (let k = 0; k < P.glitch; k++) rects.push(glitchRect()); buildGlitch(); }
+function buildGlitch() {
+  KV.fill(0); KH.fill(0); SH.fill(0);
+  for (const g of rects) {
+    if (g.t === 's') {
+      if (P.shift <= 0) continue;
+      for (let y = g.y; y < g.y + g.h && y < S; y++) SH[y] = g.off * P.shift | 0;
+      continue;
+    }
+    const amt = g.t === 'v' ? P.drip : P.smear;
+    if (amt <= 0) continue;
+    // чем сильнее drip, тем меньше k — длиннее хвост
+    const k = Math.min(1, g.k / (0.15 + amt * amt * 3));
+    const M = g.t === 'v' ? KV : KH;
+    // max-потёк кодируется отрицательным k: высота «стекает», не опускаясь ниже исходной
+    const kk = g.mx ? -k : k;
+    const x0 = Math.max(0, g.x), x1 = Math.min(S, g.x + g.w), y0 = Math.max(0, g.y), y1 = Math.min(S, g.y + g.h);
+    if (g.t === 'v') {
+      // рваный нижний край: длина потёка своя у каждого столбца
+      for (let x = x0; x < x1; x++) {
+        const e = Math.min(y1, y0 + g.h * (0.45 + 0.55 * wobble(x, g.j)) | 0);
+        for (let y = y0; y < e; y++) put(M, y * S + x, kk);
+      }
+    } else {
+      for (let y = y0; y < y1; y++) {
+        const e = Math.max(x0, x1 - g.w * (0.4 + 0.6 * wobble(y, g.j)) | 0);
+        for (let x = e; x < x1; x++) put(M, y * S + x, kk);
+      }
+    }
+  }
+}
+
+// ---------- blur (box x2, тор) ----------
+function boxH(src, dst, r) {
+  const d = 1 / (2 * r + 1);
+  for (let y = 0; y < S; y++) {
+    const o = y * S; let s = 0;
+    for (let k = -r; k <= r; k++) s += src[o + ((k % S) + S) % S];
+    for (let x = 0; x < S; x++) {
+      dst[o + x] = s * d;
+      s += src[o + (x + r + 1) % S] - src[o + ((x - r) % S + S) % S];
+    }
+  }
+}
+function boxV(src, dst, r) {
+  const d = 1 / (2 * r + 1);
+  for (let x = 0; x < S; x++) {
+    let s = 0;
+    for (let k = -r; k <= r; k++) s += src[(((k % S) + S) % S) * S + x];
+    for (let y = 0; y < S; y++) {
+      dst[y * S + x] = s * d;
+      s += src[((y + r + 1) % S) * S + x] - src[(((y - r) % S + S) % S) * S + x];
+    }
+  }
+}
+function blur(buf, r) {
+  if (r < 1) return;
+  r = Math.min(r, (S >> 1) - 1);
+  boxH(buf, tmp, r); boxV(tmp, buf, r); boxH(buf, tmp, r); boxV(tmp, buf, r);
+}
+
+// ---------- render ----------
+function render() {
+  // 1. высота: плотность следов (крупно) + состояние клеток (мелко)
+  let hmax = 1e-6, hmin = 0;
+  for (let i = 0; i < N; i++) {
+    const v = Math.sign(hv[i]) * Math.log1p(Math.abs(hv[i]));
+    fB[i] = v; if (v > hmax) hmax = v; if (v < hmin) hmin = v;
+    fA[i] = st[i] / maxN;
+  }
+  const hs = 1 / (hmax - hmin);
+  for (let i = 0; i < N; i++) fB[i] = (fB[i] - hmin) * hs;
+  blur(fB, P.big); blur(fA, P.small);
+  const { wBig, wSmall, wRaw, wBase, ripple, rippleF } = P;
+  for (let i = 0; i < N; i++) {
+    let v = wBig * fB[i] * 2 + wSmall * fA[i] + wRaw * st[i] / maxN + wBase * BASE[i];
+    F[i] = v + ripple * Math.sin(v * rippleF);
+  }
+
+  // 2. потёки вниз
+  for (let x = 0; x < S; x++) {
+    let v = F[x];
+    for (let y = 0, i = x; y < S; y++, i += S) {
+      const k = KV[i];
+      if (k > 0) { v += (F[i] - v) * k * (0.35 + 1.3 * ((i * 2654435761 >>> 0) / 4294967296)); G[i] = v; }
+      else if (k < 0) { v = Math.max(F[i], v + k * 0.02); G[i] = v; }
+      else G[i] = v = F[i];
+    }
+  }
+  // 3. мазки вбок (справа налево — тянет влево, как пиксель-сорт)
+  for (let y = 0; y < S; y++) {
+    const o = y * S; let v = G[o + S - 1];
+    for (let x = S - 1; x >= 0; x--) {
+      const i = o + x, k = KH[i];
+      if (k > 0) { v += (G[i] - v) * k * (0.5 + ((i * 40503 & 1023) / 1023)); F[i] = v; }
+      else F[i] = v = G[i];
+    }
+  }
+
+  // 4. нормали → цвет
+  const d = img.data, bump = P.bump * S / 64, TAU = Math.PI * 2;
+  const { hue, angle, hueOff, sat } = P;
+  const Lx = -0.5, Ly = -0.6, Lz = 0.62;
+  for (let y = 0; y < S; y++) {
+    const off = SH[y];
+    const yu = (y > 0 ? y - 1 : 0) * S, yd = (y < S - 1 ? y + 1 : y) * S, yc = y * S;
+    for (let x = 0; x < S; x++) {
+      let sx = x + off; sx = ((sx % S) + S) % S;
+      const xl = sx > 0 ? sx - 1 : 0, xr = sx < S - 1 ? sx + 1 : sx;
+      const h = F[yc + sx];
+      const nx = -(F[yc + xr] - F[yc + xl]) * bump, ny = -(F[yd + sx] - F[yu + sx]) * bump;
+      const il = 1 / Math.sqrt(nx * nx + ny * ny + 1);
+      const slope = Math.min(1, Math.sqrt(nx * nx + ny * ny));
+      const light = (nx * Lx + ny * Ly + Lz) * il;          // -1..1
+      let hh = hueOff + h * hue + (Math.atan2(ny, nx) / TAU) * angle * slope;
+      hh = (hh - Math.floor(hh)) * 6;
+      const s = sat * (0.78 + 0.22 * slope) * (1 - 0.35 * Math.max(0, light - 0.75) * 4);
+      const v = Math.min(1, 0.72 + 0.4 * light);
+      const i6 = hh | 0, f = hh - i6, p = v * (1 - s), q = v * (1 - s * f), t = v * (1 - s * (1 - f));
+      let r, g, b;
+      switch (i6) {
+        case 0: r = v; g = t; b = p; break; case 1: r = q; g = v; b = p; break;
+        case 2: r = p; g = v; b = t; break; case 3: r = p; g = q; b = v; break;
+        case 4: r = t; g = p; b = v; break; default: r = v; g = p; b = q;
+      }
+      const j = (yc + x) * 4;
+      d[j] = r * 255; d[j + 1] = g * 255; d[j + 2] = b * 255; d[j + 3] = 255;
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ---------- loop ----------
+function tick() {
+  runAnts(P.steps);
+  frame++;
+  if (P.churn > 0 && rects.length && R() < P.churn * 0.15) {
+    rects[R() * rects.length | 0] = glitchRect(); buildGlitch();
+  }
+  render();
+  if (frame % 10 === 0) showInfo();
+}
+function loop() { if (!paused) tick(); requestAnimationFrame(loop); }
+
+// ---------- ui ----------
+function buildControls() {
+  const box = $('controls');
+  box.insertAdjacentHTML('beforeend', `
+    <div class="row"><label>size</label><select id="c_size">
+      ${[256, 384, 512, 768, 1024].map(v => `<option ${v === P.size ? 'selected' : ''}>${v}</option>`).join('')}
+    </select><span></span></div>
+    <div class="row"><label>rules</label><select id="c_ruleMode">
+      ${['mix', 'known', 'random'].map(v => `<option ${v === P.ruleMode ? 'selected' : ''}>${v}</option>`).join('')}
+    </select><span></span></div>`);
+  $('c_size').onchange = e => { P.size = +e.target.value; newScene(true); };
+  $('c_ruleMode').onchange = e => { P.ruleMode = e.target.value; newScene(); };
+  for (const [key, label, min, max, step] of CONTROLS) {
+    box.insertAdjacentHTML('beforeend', `<div class="row"><label>${label}</label>
+      <input type="range" id="c_${key}" min="${min}" max="${max}" step="${step}" value="${P[key]}">
+      <output id="o_${key}">${P[key]}</output></div>`);
+    $('c_' + key).oninput = e => {
+      P[key] = +e.target.value; $('o_' + key).textContent = P[key];
+      if (REGEN.has(key)) newScene(true);
+      else { if (REGLITCH.has(key)) key === 'glitch' ? makeGlitch() : buildGlitch(); if (paused) render(); }
+    };
+  }
+}
+function showInfo() {
+  $('info').textContent = `seed ${P.seed}\nsteps ${(totalSteps / 1e6).toFixed(2)}M\n` +
+    ants.map((a, k) => `${String(k).padStart(2)} ${a.rule}`).join('\n');
+}
+function reglitch() { makeGlitch(); render(); }
+function save() {
+  const a = document.createElement('a'); a.download = `turmite-melt-${P.seed}-${frame}.png`;
+  a.href = cv.toDataURL('image/png'); a.click();
+}
+function togglePause() { paused = !paused; $('bPause').textContent = paused ? 'play' : 'pause'; }
+
+$('bNew').onclick = () => newScene();
+$('bGlitch').onclick = reglitch;
+$('bPause').onclick = togglePause;
+$('bSave').onclick = save;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT') return;
+  const k = e.key.toLowerCase();
+  if (k === 'n') newScene(); else if (k === 'g') reglitch(); else if (k === 's') save();
+  else if (e.code === 'Space') { e.preventDefault(); togglePause(); }
+});
+cv.addEventListener('click', e => {
+  const r = cv.getBoundingClientRect();
+  const x = ((e.clientX - r.left) / r.width * S) | 0, y = ((e.clientY - r.top) / r.height * S) | 0;
+  const a = makeAnt(x, y); ants.push(a); maxN = Math.max(maxN, a.n); showInfo();
+});
+
+buildControls();
+newScene();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

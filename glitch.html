@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Глитч-поток</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; image-rendering: pixelated; }
+  #hint {
+    position: fixed; left: 16px; bottom: 14px;
+    font: 12px/1.4 -apple-system, system-ui, sans-serif; letter-spacing: .02em;
+    color: rgba(255, 255, 255, .7); pointer-events: none;
+    text-shadow: 0 1px 3px rgba(0,0,0,.8);
+    transition: opacity 1.2s ease;
+  }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint">клик / пробел — новая форма · A — автосмена (вкл) · S — сохранить PNG · H — скрыть подсказку</div>
+<script>
+const cv = document.getElementById('c');
+const hint = document.getElementById('hint');
+const gl = cv.getContext('webgl2', { antialias: false, preserveDrawingBuffer: false });
+if (!gl) { document.body.innerHTML = '<p style="color:#fff;font:16px system-ui;padding:20px">Нужен WebGL2</p>'; throw 0; }
+
+// ---------------------------------------------------------------- shaders
+const VS = `#version 300 es
+void main(){ vec2 p = vec2((gl_VertexID<<1)&2, gl_VertexID&2); gl_Position = vec4(p*2.-1., 0., 1.); }`;
+
+const FS = `#version 300 es
+precision highp float;
+uniform vec2 uRes;
+uniform float uTime;
+uniform float uMix;
+uniform vec2 uMouse;
+uniform vec4 uA[12];
+uniform vec4 uB[12];
+out vec4 outColor;
+
+float h11(float p){ p = fract(p*.1031); p *= p + 33.33; p *= p + p; return fract(p); }
+float h21(vec2 p){ vec3 p3 = fract(vec3(p.xyx)*.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y)*p3.z); }
+vec2 h22(vec2 p){ vec3 p3 = fract(vec3(p.xyx)*vec3(.1031,.1030,.0973)); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.xx + p3.yz)*p3.zy); }
+float h31(vec3 p3){ p3 = fract(p3*.1031); p3 += dot(p3, p3.zyx + 31.32); return fract((p3.x + p3.y)*p3.z); }
+
+float noise(vec3 x){
+  vec3 i = floor(x), f = fract(x);
+  vec3 u = f*f*f*(f*(f*6. - 15.) + 10.);
+  float a = h31(i),              b = h31(i + vec3(1,0,0));
+  float c = h31(i + vec3(0,1,0)), d = h31(i + vec3(1,1,0));
+  float e = h31(i + vec3(0,0,1)), g = h31(i + vec3(1,0,1));
+  float k = h31(i + vec3(0,1,1)), l = h31(i + vec3(1,1,1));
+  return mix(mix(mix(a,b,u.x), mix(c,d,u.x), u.y), mix(mix(e,g,u.x), mix(k,l,u.x), u.y), u.z);
+}
+const mat2 ROT = mat2(1.6, 1.2, -1.2, 1.6);
+float fbm(vec3 p){
+  float s = 0., a = .5;
+  for (int i = 0; i < 5; i++) { s += a*noise(p); p.xy = ROT*p.xy; p.z *= 1.4; a *= .5; }
+  return s/.96875;
+}
+
+// P layout: see the Float32Array in makeParams()
+vec3 scene(vec2 fc, vec4 P[12]){
+  float t = uTime;
+  vec2 res = uRes;
+  float U = res.y/900.;                 // resolution-independent pixel unit
+  vec2 seed = P[0].xy;
+  float asp = res.x/res.y;
+
+  // ---- tiles: rectangular regions with their own glitch treatment
+  vec2 uv = fc/res;
+  vec2 grid = P[4].yz;
+  vec2 cid = floor(uv*grid);
+  float c0 = h21(cid + seed);
+  if (c0 > .5) {                        // split some tiles once more
+    vec2 div = c0 > .75 ? vec2(2., 1.) : vec2(1., 3.);
+    cid = cid*4. + floor(fract(uv*grid)*div) + 100.;
+  }
+  float rBlock = h21(cid + seed + 13.);
+  float rMode  = h21(cid + seed + 29.);
+  float rPix   = h21(cid + seed + 41.);
+  float rHue   = h21(cid + seed + 57.);
+
+  // pixelation (macroblocks)
+  if (rPix < P[4].w) {
+    float ps = max(2., P[10].z*U*(.6 + .8*h21(cid + seed + 71.)));
+    fc = (floor(fc/ps) + .5)*ps;
+  }
+
+  vec2 n = fc/res.y;                    // x: 0..asp, y: 0..1
+
+  // horizontal row jitter (scan tearing)
+  if (P[10].x > 0.) {
+    float row = floor(fc.y/max(1., 2.*U));
+    float m = smoothstep(.5, .72, noise(vec3(n.y*5., seed.x + 3., t*.09)));
+    n.x += (noise(vec3(row*.37, seed.y, t*.5)) - .5)*P[10].x*m*4.;
+  }
+
+  // pixel-sort-like smears
+  float cw = max(1., P[11].x*U);
+  float L = P[3].z;
+  int mode = rMode < P[3].x ? 1 : (rMode > 1. - P[3].y ? 2 : 0);
+  if (mode == 1) {                      // vertical drips (downward)
+    float col = floor(fc.x/cw);
+    float xn = col*cw/res.y;
+    float off = noise(vec3(xn*2.5, seed.x, t*.05))*.5 + h11(col*.37 + seed.y)*P[11].y*.1 + t*.012;
+    float D = 1. - n.y;
+    float s = (D + off)/L;
+    float seg = floor(s), loc = fract(s);
+    float keep = .12 + .6*noise(vec3(xn*7., seg*3.1 + seed.y, t*.07));
+    float lk = loc < keep ? loc : keep + (loc - keep)*P[3].w;
+    n.y = 1. - ((seg + lk)*L - off);
+  } else if (mode == 2) {               // horizontal smears (rightward)
+    float row = floor(fc.y/cw);
+    float yn = row*cw/res.y;
+    float off = noise(vec3(yn*2.5, seed.y, t*.05))*.5 + h11(row*.61 + seed.x)*P[11].y*.1 + t*.015;
+    float s = (n.x + off)/L;
+    float seg = floor(s), loc = fract(s);
+    float keep = .12 + .6*noise(vec3(yn*7., seg*3.1 + seed.x, t*.07));
+    float lk = loc < keep ? loc : keep + (loc - keep)*P[3].w;
+    n.x = (seg + lk)*L - off;
+  }
+
+  vec2 p = n - vec2(asp, 1.)*.5;
+
+  // displaced tiles (content sampled from elsewhere, slowly sliding)
+  if (rBlock < P[4].x) {
+    vec2 o = (h22(cid + seed) - .5)*vec2(1.2, .8);
+    o += .12*vec2(sin(t*P[11].w + rHue*6.28), cos(t*P[11].w*.8 + rBlock*9.));
+    p += o;
+  }
+
+  // ---- field: domain-warped fbm
+  float sc = P[5].y, tt = t*P[5].z;
+  vec2 q = p*sc + seed;
+  vec3 Q = vec3(q, tt);
+  vec2 w = vec2(fbm(Q), fbm(Q + vec3(5.2, 1.3, 2.7)));
+  float v = fbm(vec3(q + P[5].x*(w - .5)*2., tt*1.3 + 4.));
+  float hs = v*P[6].w;
+
+  // ---- vortex / eye
+  vec2 c = P[1].xy + .07*vec2(sin(t*.11 + seed.x), cos(t*.09 + seed.y)) + uMouse*.06;
+  vec2 d = p - c; d.x /= P[1].w;
+  float r = length(d);
+  float ang = atan(d.y, d.x);
+  float rv = log(r + .015)*P[2].y - t*P[2].z
+           + (w.x - .5)*P[5].x*1.2 + (v - .5)*P[5].x*1.6
+           + P[2].x*.25*sin(ang*2. + P[2].x/(r + .2) + t*.15);
+  float vf = P[1].z*smoothstep(1.1, .05, r + (w.y - .5)*.5);
+  hs = mix(hs, rv, vf);
+
+  // sand ripples
+  float ra = seed.x*.37;
+  hs += P[8].w*sin(dot(p, vec2(cos(ra), sin(ra)))*P[11].z + w.y*9. + t*.25);
+
+  // posterize
+  hs = mix(hs, floor(hs*9.)/9., P[9].w);
+
+  // grain that twinkles smoothly (per-pixel random phase)
+  vec2 gc = floor(fc/max(1., U));
+  float g1 = h21(gc + seed*7.), g2 = h21(gc + seed*7. + 91.3);
+  float gph = h21(gc + 17.7)*6.2832;
+  float g = mix(g1, g2, .5 + .5*sin(t*.9 + gph));
+  float gm = .35 + smoothstep(.35, .7, w.y);
+
+  float h = hs + (g - .5)*P[5].w*gm + P[0].z + t*P[0].w + (rHue - .5)*P[10].w*step(rBlock, P[4].x + .25);
+
+  // ---- colour
+  vec3 col = P[6].xyz + P[7].xyz*cos(6.28318*(P[8].xyz*h + P[9].xyz));
+  float lum = dot(col, vec3(.299, .587, .114));
+  col = clamp(mix(vec3(lum), col, P[7].w), 0., 1.);
+
+  // dark veins
+  col *= 1. - P[10].y*smoothstep(.62, .95, .5 + .5*sin(hs*6.28318*.5 + w.x*4.));
+
+  // chrome / liquid metal
+  float gx = dFdx(hs), gy = dFdy(hs);
+  vec3 nr = normalize(vec3(-gx, -gy, 22./res.y));
+  float env = .5 + .5*sin(nr.x*3.5 + nr.y*8. + hs*2.2 + t*.1);
+  vec3 chrome = vec3(.02) + vec3(pow(env, 5.))*1.15 + col*.55*smoothstep(.15, .6, env)*(1. - env);
+  chrome += (g - .5)*.12;
+  float cmField = mix(w.y, r*1.5 + (w.x - .5)*.7, P[1].z);
+  float cm = P[2].w*smoothstep(.35, .62, cmField);
+  col = mix(col, chrome, cm);
+
+  return col;
+}
+
+void main(){
+  vec2 fc = gl_FragCoord.xy;
+  vec3 col = scene(fc, uA);
+  if (uMix > 0.) {
+    vec3 nx = scene(fc, uB);
+    vec2 cell = floor(fc/uRes.y*vec2(7., 11.));
+    float hc = h21(cell + 3.1)*.65 + (1. - fc.y/uRes.y)*.1;
+    float m = smoothstep(hc, hc + .25, uMix);
+    col = mix(col, nx, m);
+  }
+  outColor = vec4(col, 1.);
+}`;
+
+function compile(type, src) {
+  const s = gl.createShader(type);
+  gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+const prog = gl.createProgram();
+gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+gl.linkProgram(prog);
+if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+gl.useProgram(prog);
+gl.bindVertexArray(gl.createVertexArray());
+const U = {};
+for (const n of ['uRes', 'uTime', 'uMix', 'uMouse', 'uA', 'uB']) U[n] = gl.getUniformLocation(prog, n);
+
+// ---------------------------------------------------------------- params
+const R = (a = 1, b) => b === undefined ? Math.random() * a : a + Math.random() * (b - a);
+const pick = a => a[Math.floor(Math.random() * a.length)];
+const chance = p => Math.random() < p;
+
+// cosine palettes: col = a + b*cos(2π(c*h + d))
+const PALS = {
+  rainbow: { a: [.5, .5, .5],    b: [.5, .5, .5],    c: [1, 1, 1],    d: [0, .33, .67] },
+  neon:    { a: [.55, .5, .55],  b: [.5, .55, .5],   c: [1, 1, 1],    d: [.0, .25, .6] },
+  redteal: { a: [.6, .35, .45],  b: [.42, .35, .35], c: [1, 1, .8],   d: [0, .5, .75] },
+  magreen: { a: [.55, .45, .55], b: [.45, .5, .45],  c: [1, 1, 1.3],  d: [0, .5, .1] },
+  pastel:  { a: [.62, .6, .66],  b: [.42, .45, .4],  c: [1, 1, 1],    d: [.05, .4, .7] },
+  sky:     { a: [.72, .8, .95],  b: [.32, .22, .12], c: [1, 1.4, 1],  d: [.1, .25, .6] },
+  fire:    { a: [.6, .4, .45],   b: [.45, .45, .5],  c: [1, .8, 1.2], d: [0, .15, .55] },
+};
+
+function base() {
+  return {
+    sx: R(0, 90), sy: R(0, 90), hueOff: R(), cycle: R(.008, .03) * (chance(.5) ? 1 : -1),
+    vcx: R(-.25, .25), vcy: R(-.15, .15), vortex: 0, vasp: R(1, 1.5),
+    twist: R(.2, 1.2), ringF: R(1.5, 3.5), ringS: R(.04, .12), chrome: 0,
+    vDrip: 0, hSmear: 0, dripLen: R(.3, .8), dripK: R(.02, .12),
+    block: R(.1, .3), gx: Math.round(R(2, 5)), gy: Math.round(R(2, 5)), pix: 0,
+    warp: R(.8, 1.8), scale: R(1.2, 2.6), speed: R(.035, .07), grain: R(.15, .35),
+    pal: pick(Object.keys(PALS)), bands: R(1.5, 3), sat: R(1, 1.35),
+    ripple: 0, poster: 0,
+    rowJit: 0, dark: 0, pixSize: R(8, 20), blockHue: R(.1, .5),
+    colW: pick([1, 1, 2, 3]), jag: R(.2, 1), rippleF: R(70, 150), drift: R(.03, .12),
+  };
+}
+
+const ARCH = {
+  eye: o => Object.assign(o, {
+    vortex: R(.8, 1), vasp: R(1.2, 1.7), chrome: R(.5, .85), hSmear: R(.15, .45), vDrip: R(0, .15),
+    rowJit: R(.01, .035), grain: R(.2, .45), bands: R(2, 3.5), pal: pick(['rainbow', 'neon', 'fire']),
+    dark: R(0, .4), block: R(.05, .25),
+  }),
+  melt: o => Object.assign(o, {
+    vDrip: R(.6, .95), hSmear: R(0, .1), dripLen: R(.45, 1), dripK: R(.02, .08), block: R(.4, .7),
+    warp: R(1.4, 2.2), bands: R(1, 2), pal: pick(['redteal', 'fire', 'redteal']), grain: R(.04, .12),
+    pix: R(0, .15), jag: R(.5, 1.2),
+  }),
+  mosaic: o => Object.assign(o, {
+    block: R(.6, .9), gx: Math.round(R(3, 6)), gy: Math.round(R(3, 6)), vDrip: R(.3, .55), hSmear: R(.1, .3),
+    grain: R(.3, .5), bands: R(2, 4), ripple: R(.05, .18), pal: pick(['magreen', 'rainbow', 'neon']),
+    blockHue: R(.4, .9), scale: R(2, 3.5),
+  }),
+  portal: o => Object.assign(o, {
+    vortex: R(.65, .9), vasp: R(.9, 1.2), chrome: R(0, .15), vDrip: R(.5, .8), bands: R(1.5, 2.5),
+    pal: pick(['pastel', 'neon', 'rainbow']), ringF: R(1.2, 2.5), block: R(.15, .4), grain: R(.1, .2),
+  }),
+  smear: o => Object.assign(o, {
+    hSmear: R(.7, .95), vDrip: 0, pix: R(.3, .6), pixSize: R(10, 26), pal: 'sky', bands: R(1, 2),
+    block: R(.2, .4), rowJit: R(.02, .05), grain: R(.1, .3), sat: R(.9, 1.2), dripLen: R(.4, 1.2), ripple: R(0, .1),
+  }),
+  tide: o => Object.assign(o, {
+    hSmear: R(.3, .55), vDrip: R(0, .15), bands: R(4, 8), warp: R(2, 3), scale: R(1.5, 3),
+    pix: R(.2, .5), pixSize: R(6, 14), pal: pick(['rainbow', 'neon', 'fire']), sat: R(1.2, 1.6),
+    poster: chance(.5) ? R(.3, .8) : 0, grain: R(.05, .15),
+  }),
+};
+
+function jitter(v, amt) { return v.map(x => x + R(-amt, amt)); }
+
+function makeParams(prevArch) {
+  let keys = Object.keys(ARCH).filter(k => k !== prevArch);
+  const arch = pick(keys);
+  const o = ARCH[arch](base());
+  if (chance(.2)) o.pal = pick(Object.keys(PALS));        // occasional off-script palette
+  if (chance(.25)) o.chrome = Math.max(o.chrome, R(.2, .5));
+  if (chance(.2) && !o.vortex) { o.vortex = R(.3, .6); }
+  const P = PALS[o.pal];
+  const a = jitter(P.a, .04), b = jitter(P.b, .04), c = jitter(P.c, .08), d = jitter(P.d, .08);
+  const arr = new Float32Array([
+    o.sx, o.sy, o.hueOff, o.cycle,
+    o.vcx, o.vcy, o.vortex, o.vasp,
+    o.twist, o.ringF, o.ringS, o.chrome,
+    o.vDrip, o.hSmear, o.dripLen, o.dripK,
+    o.block, o.gx, o.gy, o.pix,
+    o.warp, o.scale, o.speed, o.grain,
+    ...a, o.bands,
+    ...b, o.sat,
+    ...c, o.ripple,
+    ...d, o.poster,
+    o.rowJit, o.dark, o.pixSize, o.blockHue,
+    o.colW, o.jag, o.rippleF, o.drift,
+  ]);
+  return { arr, arch };
+}
+
+// ---------------------------------------------------------------- state
+let cur = makeParams(), next = null;
+let mix = 0, mixStart = 0;
+const MIX_DUR = 3.2;
+let auto = true, lastSwitch = 0;
+const AUTO_EVERY = 16;
+let quality = Math.min(1, 1.6 / (window.devicePixelRatio || 1));
+let wantSave = false;
+const mouse = { x: 0, y: 0, tx: 0, ty: 0 };
+
+function resize() {
+  const dpr = window.devicePixelRatio || 1;
+  const k = dpr * quality;
+  cv.width = Math.max(2, Math.round(innerWidth * k));
+  cv.height = Math.max(2, Math.round(innerHeight * k));
+  gl.viewport(0, 0, cv.width, cv.height);
+}
+addEventListener('resize', resize);
+resize();
+
+function newForm(t) {
+  if (next) { cur = next; }             // finish any running transition instantly
+  next = makeParams(cur.arch);
+  mixStart = t; lastSwitch = t;
+}
+
+const t0 = performance.now();
+const now = () => (performance.now() - t0) / 1000;
+
+cv.addEventListener('click', () => newForm(now()));
+addEventListener('mousemove', e => { mouse.tx = e.clientX / innerWidth * 2 - 1; mouse.ty = 1 - e.clientY / innerHeight * 2; });
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if (k === ' ') { e.preventDefault(); newForm(now()); }
+  else if (k === 'a' || k === 'ф') {
+    auto = !auto; lastSwitch = now();
+    hint.textContent = hint.textContent.replace(/\((вкл|выкл)\)/, auto ? '(вкл)' : '(выкл)');
+  }
+  else if (k === 's' || k === 'ы') wantSave = true;
+  else if (k === 'h' || k === 'р') hint.style.opacity = hint.style.opacity === '0' ? '1' : '0';
+});
+
+// ---------------------------------------------------------------- loop
+let frames = 0, acc = 0, lastT = now();
+function frame() {
+  const t = now();
+  const dt = t - lastT; lastT = t;
+
+  // adaptive resolution: drop quality if we can't hold ~50fps
+  acc += dt; frames++;
+  if (frames >= 45) {
+    const avg = acc / frames;
+    if (avg > .022 && quality > .3) { quality *= .85; resize(); }
+    frames = 0; acc = 0;
+  }
+
+  if (auto && !next && t - lastSwitch > AUTO_EVERY) newForm(t);
+
+  mouse.x += (mouse.tx - mouse.x) * .03;
+  mouse.y += (mouse.ty - mouse.y) * .03;
+
+  if (next) {
+    mix = Math.min(1, (t - mixStart) / MIX_DUR);
+    if (mix >= 1) { cur = next; next = null; mix = 0; }
+  }
+
+  gl.uniform2f(U.uRes, cv.width, cv.height);
+  gl.uniform1f(U.uTime, t);
+  gl.uniform1f(U.uMix, next ? mix : 0);
+  gl.uniform2f(U.uMouse, mouse.x, mouse.y);
+  gl.uniform4fv(U.uA, cur.arr);
+  gl.uniform4fv(U.uB, next ? next.arr : cur.arr);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  if (wantSave) {
+    wantSave = false;
+    cv.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b);
+      a.download = `glitch-${Date.now()}.png`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+    });
+  }
+  requestAnimationFrame(frame);
+}
+setTimeout(() => { hint.style.opacity = '0'; }, 7000);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>
