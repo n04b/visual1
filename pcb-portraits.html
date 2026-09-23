@@ -1,0 +1,1022 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>PCB Portraits</title>
+<style>
+  :root { --bg:#0c0c0c; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#f2a53e; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; display:flex; align-items:center; justify-content:center; padding:20px; min-width:0; }
+  canvas { display:block; cursor:pointer; box-shadow: 0 0 0 1px #1e1e1e; }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  .row { display:grid; grid-template-columns: 78px 1fr 44px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; color:var(--fg); }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg);
+    border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:10px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #info { margin-top:10px; color:var(--dim); white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>PCB Portraits</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bAuto" title="A">auto</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div id="controls"></div>
+  <div class="row"><label>палитра</label><select id="pal"></select><span></span></div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <div class="btns"><button id="bFrame" title="B">рамка платы</button></div>
+  <div id="info"></div>
+  <div class="hint">
+    Space / клик — новый портрет<br>
+    A — автосмена<br>
+    P — следующая палитра<br>
+    B — рамка платы<br>
+    S — сохранить PNG
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+function makeRng(seed) {
+  const n = mulberry32(hashStr(seed));
+  const r = () => n();
+  r.range = (a, b) => a + (b - a) * n();
+  r.int = (a, b) => a + Math.floor(n() * (b - a + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => {
+    let s = 0; for (const w of ws) s += w;
+    let v = n() * s;
+    for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i];
+    return items[items.length - 1];
+  };
+  return r;
+}
+function makeNoise(rng) {
+  const v = new Float32Array(256 * 256);
+  for (let i = 0; i < v.length; i++) v[i] = rng() * 2 - 1;
+  const at = (i, j) => v[((j & 255) << 8) | (i & 255)];
+  return (x, y) => {
+    const i = Math.floor(x), j = Math.floor(y), fx = x - i, fy = y - j;
+    const u = fx * fx * (3 - 2 * fx), w = fy * fy * (3 - 2 * fy);
+    return lerp(lerp(at(i, j), at(i + 1, j), u), lerp(at(i, j + 1), at(i + 1, j + 1), u), w);
+  };
+}
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const sstep = (a, b, x) => { const t = clamp((x - a) / (b - a)); return t * t * (3 - 2 * t); };
+const mixA = (a, b, t) => Math.atan2(lerp(Math.sin(a), Math.sin(b), t), lerp(Math.cos(a), Math.cos(b), t));
+const wrapA = a => Math.atan2(Math.sin(a), Math.cos(a));
+
+// ---------- params ----------
+const P = { res: 96, density: 1, bus: 1, wiggle: 1, pour: 1, parts: 1, pal: 'gold', format: 'p34', frame: true };
+const CTRL = [
+  ['res',     'сетка',     50, 160, 2],
+  ['density', 'плотность', 0.2, 2, 0.05],
+  ['bus',     'шины',      0, 2, 0.05],
+  ['wiggle',  'изгибы',    0, 2, 0.05],
+  ['pour',    'заливка',   0, 2, 0.05],
+  ['parts',   'детали',    0, 2, 0.05],
+];
+const FORMATS = { a: ['A · 1:√2', Math.SQRT1_2], p34: ['3:4', 3 / 4], p45: ['4:5', 4 / 5], sq: ['1:1', 1], st: ['9:16', 9 / 16] };
+
+// copper colours: top/bot traces, pour & hatch planes, via ring/hole, SMD pads, silkscreen
+const PAL = {
+  gold:  { name: 'золото (голая плата)', outside: '#140902', board: '#5a2b0a', mottle: ['#83420f', '#3b1904', '#94521a', '#4a2208'], mottleA: 0.4,
+           top: '#f2a53e', bot: '#8a4a14', pour: '#f4b447', hatch: '#eb9d39', via: '#ffe7ba', hole: '#c9955a', pad: '#ffd98c',
+           halo: null, silk: null, edge: null },
+  green: { name: 'зелёная маска', outside: '#0a1f0e', board: '#166228', mottle: ['#1d7431', '#0f5220'], mottleA: 0.3,
+           top: '#45ae4a', bot: '#1f7a32', pour: '#3fa845', hatch: '#45ae4a', via: '#cf8745', hole: '#2a170c', pad: '#d99a55',
+           halo: '#0e4f1e', silk: '#eef0e4', edge: null },
+  mono:  { name: '1-bit', outside: '#000000', board: '#000000', top: '#ffffff', bot: null, pour: '#ffffff', hatch: '#ffffff',
+           via: '#ffffff', hole: '#000000', pad: '#ffffff', halo: null, silk: '#ffffff', edge: '#ffffff', pixel: 6 },
+  cad:   { name: 'CAD', outside: '#2c2c2c', board: '#050505', top: '#d3171f', bot: '#2533d6', pour: '#b3121a', hatch: '#d3171f',
+           via: '#1fc596', hole: '#0a0a0a', pad: '#1fc596', halo: null, silk: '#ecc424', edge: '#ecc424', keepout: '#d3171f' },
+  osh:   { name: 'фиолетовая', outside: '#10071a', board: '#3a1a5d', mottle: ['#48236f', '#2c1249'], mottleA: 0.3,
+           top: '#7d4db3', bot: '#4d2a78', pour: '#7648aa', hatch: '#7d4db3', via: '#ecc66b', hole: '#26113c', pad: '#f2cf72',
+           halo: '#2a1146', silk: '#f4f0f8', edge: null },
+};
+
+// ---------- figure ----------
+const BG = 0, HAIR = 1, FACE = 2, NECK = 3, BODY = 4;
+
+function superE(x, y, p, jaw) {
+  if (y > 0) { x /= Math.max(0.05, 1 - jaw * y * y); p = 2; }
+  return Math.pow(Math.abs(x), p) + Math.pow(Math.abs(y), p) < 1;
+}
+
+function makeFigure(rng, Ar) {
+  const f = {};
+  f.hair = rng.wpick(['long', 'bob', 'short', 'big', 'bun', 'bald'], [4, 3, 3, 1.5, 1.5, 0.6]);
+  f.cx = Ar / 2 + rng.range(-0.03, 0.03);
+  f.hrx = rng.range(0.15, 0.19);
+  f.hry = rng.range(0.19, 0.235);
+  f.hy = f.hry + rng.range(0.09, 0.14) + (f.hair === 'bun' ? 0.05 : f.hair === 'big' ? 0.03 : 0);
+  f.pow = rng.range(2.1, 2.8);
+  f.jaw = rng.range(0.15, 0.4);
+  f.turn = rng.range(-0.3, 0.3);
+  f.light = rng.chance(0.5) ? 1 : -1;
+  f.lightAmt = rng.range(0.16, 0.28);
+  f.skin = rng.range(0.63, 0.76);
+  f.hairTone = rng.range(0.55, 0.9);
+  f.pad = rng.range(0.015, 0.045);
+  f.flare = rng.range(0, 0.3);
+  f.ph = rng() * 6.28;
+  f.hairEnd = f.hair === 'long' ? rng.range(0.75, 1.05) : f.hair === 'bob' ? f.hy + f.hry * rng.range(0.55, 0.95) : 0;
+  f.part = rng.range(-0.5, 0.5);
+  f.fcx = f.cx + f.turn * f.hrx * 0.3;
+  f.frx = f.hrx * (f.hair === 'short' || f.hair === 'bald' ? 0.93 : 0.82);
+  f.fry = f.hry * 0.92;
+  f.fcy = f.hy + f.hry * 0.08;
+  f.nx = f.fcx + f.turn * f.frx * 0.22;
+  f.eyeY = f.fcy - f.fry * rng.range(0.04, 0.16);
+  f.eyeDX = f.frx * rng.range(0.4, 0.48);
+  f.eyeRX = f.frx * rng.range(0.17, 0.23);
+  f.eyeRY = f.eyeRX * rng.range(0.4, 0.6);
+  f.browY = f.eyeY - f.fry * rng.range(0.17, 0.25);
+  f.noseY = f.fcy + f.fry * rng.range(0.24, 0.34);
+  f.mouthY = f.fcy + f.fry * rng.range(0.52, 0.6);
+  f.mouthRX = f.frx * rng.range(0.28, 0.42);
+  f.smile = rng.wpick([1, 0, -1], [3, 3, 1]);
+  f.gaze = rng.range(-0.8, 0.8);
+  f.bangs = f.hair !== 'bald' && f.hair !== 'bun' && rng.chance(0.35);
+  f.fringe = f.bangs ? f.browY - rng.range(0.01, 0.03) : f.hy - f.hry * rng.range(0.3, 0.55);
+  f.fringeWave = rng.range(0, f.bangs ? 0.012 : 0.035);
+  f.fringeFreq = rng.range(8, 26);
+  f.glasses = rng.chance(0.2);
+  f.nw = f.hrx * rng.range(0.38, 0.5);
+  f.yS = f.hy + f.hry + rng.range(0.04, 0.1);
+  f.shW = rng.range(0.3, 0.44);
+  f.cloth = rng.range(0.3, 0.8);
+  f.collar = rng.pick(['v', 'round', 'high']);
+  f.collarD = rng.range(0.04, 0.11);
+  f.bun = { x: f.cx + rng.range(-0.04, 0.04), y: f.hy - f.hry * 1.05, r: f.hrx * rng.range(0.4, 0.6) };
+  return f;
+}
+
+const eyeX = (f, s) => f.nx + s * f.eyeDX * (1 - s * f.turn * 0.25);
+const hairline = (f, x) => f.hair === 'bald' ? -1
+  : f.fringe + f.part * 0.04 * (x - f.cx) / f.hrx + f.fringeWave * Math.sin((x - f.cx) * f.fringeFreq + f.ph);
+
+// brightness of the skin; eyes/brows/mouth are drawn as parts, so only shading lives here
+function faceTone(f, x, y) {
+  const dx = (x - f.fcx) / f.frx, dy = (y - f.fcy) / f.fry;
+  let t = f.skin + f.light * dx * f.lightAmt - Math.max(0, dy) * 0.05;
+  t -= 0.3 * sstep(0.55, 1.05, dx * dx + dy * dy);
+  if (f.hair !== 'bald') t -= 0.25 * (1 - sstep(0, 0.04, y - hairline(f, x)));
+  for (const s of [-1, 1]) {
+    const sd = ((x - eyeX(f, s)) / (f.eyeRX * 1.8)) ** 2 + ((y - f.eyeY + f.eyeRY * 0.3) / (f.eyeRY * 3)) ** 2;
+    if (sd < 1) t -= 0.22 * (1 - sd);
+  }
+  if (y > f.eyeY && y < f.noseY && (x - f.nx) * -f.light > 0 && Math.abs(x - f.nx) < f.frx * 0.16)
+    t -= 0.2 * sstep(f.eyeY, f.noseY, y);
+  if (((x - f.nx) / (f.frx * 0.25)) ** 2 + ((y - f.noseY - f.fry * 0.05) / (f.fry * 0.06)) ** 2 < 1) t -= 0.2;
+  if (((x - f.nx) / (f.mouthRX * 0.8)) ** 2 + ((y - f.mouthY - f.fry * 0.13) / (f.fry * 0.06)) ** 2 < 1) t -= 0.15;
+  return t;
+}
+
+// → [region, tone]
+function sample(f, x, y) {
+  const hx = (x - f.cx) / f.hrx, hy = (y - f.hy) / f.hry;
+  const inHead = superE(hx, hy, f.pow, f.jaw);
+  const inFace = superE((x - f.fcx) / f.frx, (y - f.fcy) / f.fry, 2.2, f.jaw * 1.2);
+  const hl = hairline(f, x);
+  if (inFace && y >= hl) return [FACE, faceTone(f, x, y)];
+
+  const nx = lerp(f.fcx, f.cx, 0.5), chin = f.fcy + f.fry;
+  const skin = () => f.skin - 0.2 - 0.25 * (1 - sstep(chin, chin + 0.07, y)) + f.light * ((x - nx) / f.nw) * 0.1;
+  const neckW = f.nw * (1 + 0.35 * sstep(f.yS - 0.05, f.yS + 0.06, y));
+  const inNeck = y > f.hy && y < f.yS + 0.06 && Math.abs(x - nx) < neckW;
+  if (inNeck && !(f.collar === 'high' && y > f.yS - 0.05)) return [NECK, skin()];
+
+  let inHair = false;
+  if (f.hair !== 'bald') {
+    const px = (x - f.cx) / (f.hrx + f.pad), py = (y - f.hy + f.pad * 0.5) / (f.hry + f.pad);
+    if (f.hair === 'short') inHair = py < 0.2 && superE(px, py, f.pow, 0) && y < f.hy + f.hry * 0.05;
+    else if (f.hair === 'bun') inHair = (py < 0.1 && superE(px, py, f.pow, 0) && y < f.hy + f.hry * 0.05)
+      || (x - f.bun.x) ** 2 + (y - f.bun.y) ** 2 < f.bun.r ** 2;
+    else if (f.hair === 'big') inHair = ((x - f.cx) / (f.hrx * 1.3 + f.pad)) ** 2 + ((y - f.hy + 0.03) / (f.hry * 1.12 + f.pad)) ** 2 < 1;
+    else {
+      const k = clamp((y - f.hy) / Math.max(0.01, f.hairEnd - f.hy));
+      const hw = (f.hrx + f.pad) * (1 + f.flare * k);
+      const end = f.hairEnd + 0.025 * Math.sin(x * 57 + f.ph);
+      inHair = (py < 0 && superE(px, py, f.pow, 0)) || (y >= f.hy && y < end && Math.abs(x - f.cx) < hw);
+    }
+  }
+  const hairT = () => f.hairTone + 0.15 * f.light * clamp((x - f.cx) / f.hrx, -1, 1);
+  if (inHair) return [HAIR, hairT()];
+  if (inHead) return y < hl ? [HAIR, hairT()] : [FACE, f.skin - 0.18 + f.light * hx * 0.1];
+
+  if (y > f.yS - 0.04) {
+    const bw = lerp(f.nw * 1.3, f.shW, sstep(f.yS - 0.04, f.yS + 0.1, y)) + 0.06 * Math.max(0, y - f.yS);
+    if (Math.abs(x - f.cx) < bw) {
+      if (f.collar === 'v' && y - f.yS < f.collarD * (1 - Math.abs(x - nx) / (f.nw * 1.7))) return [NECK, skin()];
+      if (f.collar === 'round' && ((x - nx) / (f.nw * 1.5)) ** 2 + ((y - f.yS + 0.02) / f.collarD) ** 2 < 1) return [NECK, skin()];
+      return [BODY, f.cloth + f.light * ((x - f.cx) / f.shW) * 0.12];
+    }
+  }
+  return [BG, 0];
+}
+
+// flow directions the traces follow in each region
+function hairAngle(f, x, y) {
+  if (f.hair === 'bun' && (x - f.bun.x) ** 2 + (y - f.bun.y) ** 2 < f.bun.r ** 2)
+    return Math.atan2(x - f.bun.x, -(y - f.bun.y));
+  const u = (x - f.cx) / f.hrx, v = (y - f.hy) / f.hry;
+  let tx = -f.hrx * v, ty = f.hry * u;
+  if (f.hair === 'big') return Math.atan2(ty, tx) - 0.45;
+  const side = u >= f.part ? 1 : -1;
+  if (tx * side + ty * 1.2 < 0) { tx = -tx; ty = -ty; }
+  let w = sstep(-0.4, 0.1, v);
+  if (f.bangs && Math.abs(u - f.part * 0.3) < 0.9 && y > f.fringe - 0.08) w = Math.max(w, 0.85);
+  return mixA(Math.atan2(ty, tx), Math.atan2(1, side * (0.15 + f.flare)), w);
+}
+function faceAngle(f, x, y) {
+  const u = (x - f.fcx) / f.frx, v = (y - f.fcy) / f.fry;
+  let tx = -f.frx * v, ty = f.fry * u;
+  if (ty < 0 || (ty === 0 && tx < 0)) { tx = -tx; ty = -ty; }
+  return Math.atan2(ty, tx);
+}
+function bodyAngle(f, x, y) {
+  return Math.atan2(lerp(0.35, 1.6, clamp((y - f.yS) / 0.25)), x >= f.cx ? 1 : -1);
+}
+
+// ---------- routing grid ----------
+// The board is a grid of PITCH-sized cells. Every trace is a chain of cells moving in one of
+// 8 directions, so all bends come out at 45°. Each cell has a class that decides who may use it.
+const PITCH = 10, TW = 0.4;                  // cell size and trace width (in cells)
+const C_BG = 0, C_HAIR = 1, C_FACE = 2, C_NECK = 3, C_BODY = 4, C_POUR = 5, C_HATCH = 6, C_KEEP = 7;
+const DX = [1, 1, 0, -1, -1, -1, 0, 1], DY = [0, 1, 1, 1, 0, -1, -1, -1];
+const TRD = [2, 1, 0, 7, 6, 5, 4, 3];         // direction after transposing a footprint
+const Q = Math.PI / 4;
+const qdir = a => ((Math.round(a / Q) % 8) + 8) % 8;
+const ddiff = (a, b) => ((b - a + 12) % 8) - 4;
+
+// ---------- footprints (cell units, origin = top-left cell of the footprint) ----------
+function makeFootprints(rng) {
+  return {
+    rc: () => ({ w: 3, h: 1, ref: rng.chance(0.6) ? 'R' : 'C', lab: [1, -1.5], items: [
+        { k: 'pad', a: 0, b: 0, w: 0.8, h: 1.05 }, { k: 'pad', a: 2, b: 0, w: 0.8, h: 1.05 },
+        { k: 'rect', a0: -0.6, b0: -0.8, a1: 2.6, b1: 0.8 }],
+      pins: [[{ a: 0, b: 0, d: 4 }], [{ a: 2, b: 0, d: 0 }]] }),
+    sot: () => ({ w: 3, h: 3, ref: 'Q', lab: [3.6, 1], items: [
+        { k: 'pad', a: 0, b: 2, w: 0.7, h: 1 }, { k: 'pad', a: 2, b: 2, w: 0.7, h: 1 }, { k: 'pad', a: 1, b: 0, w: 0.7, h: 1 },
+        { k: 'rect', a0: -0.5, b0: 0.6, a1: 2.5, b1: 1.4 }],
+      pins: [[{ a: 0, b: 2, d: 2 }, { a: 2, b: 2, d: 2 }], [{ a: 1, b: 0, d: 6 }]] }),
+    soic: () => {
+      const n = rng.int(3, 8), H = rng.int(4, 6), items = [], top = [], bot = [];
+      for (let a = 0; a < n; a++) {
+        items.push({ k: 'pad', a, b: 0, w: 0.55, h: 1.3 }, { k: 'pad', a, b: H - 1, w: 0.55, h: 1.3 });
+        top.push({ a, b: 0, d: 6 }); bot.push({ a, b: H - 1, d: 2 });
+      }
+      items.push({ k: 'rect', a0: -0.6, b0: 0.8, a1: n - 0.4, b1: H - 1.8 }, { k: 'dot', a: 0, b: H - 2.3, r: 0.2 });
+      return { w: n, h: H, ref: 'U', lab: [(n - 1) / 2, (H - 1) / 2], items, pins: [top, bot] };
+    },
+    qfn: () => {
+      const n = rng.int(4, 9), S = n + 2, m = (S - 1) / 2, items = [], g = [[], [], [], []];
+      for (let q = 1; q <= n; q++) {
+        items.push({ k: 'pad', a: q, b: 0, w: 0.5, h: 1.1 }, { k: 'pad', a: q, b: S - 1, w: 0.5, h: 1.1 },
+                   { k: 'pad', a: 0, b: q, w: 1.1, h: 0.5 }, { k: 'pad', a: S - 1, b: q, w: 1.1, h: 0.5 });
+        g[0].push({ a: q, b: 0, d: 6 }); g[1].push({ a: q, b: S - 1, d: 2 });
+        g[2].push({ a: 0, b: q, d: 4 }); g[3].push({ a: S - 1, b: q, d: 0 });
+      }
+      items.push({ k: 'pad', a: m, b: m, w: n - 1.4, h: n - 1.4 });
+      const vk = Math.max(1, Math.floor((n - 1) / 2));
+      for (let u = 0; u < vk; u++) for (let v = 0; v < vk; v++)
+        items.push({ k: 'via', a: m + (u - (vk - 1) / 2) * 1.3, b: m + (v - (vk - 1) / 2) * 1.3, r: 0.24, h: 0.1 });
+      items.push({ k: 'rect', a0: 0.5, b0: 0.5, a1: S - 1.5, b1: S - 1.5 }, { k: 'dot', a: -0.4, b: -0.4, r: 0.25 });
+      return { w: S, h: S, ref: 'U', lab: [m, -1.7], items, pins: g, square: true };
+    },
+    bga: () => {
+      const k = rng.int(4, 7), S = 2 * k - 1, items = [], g = [[], [], [], []];
+      for (let u = 0; u < k; u++) for (let v = 0; v < k; v++) items.push({ k: 'via', a: 2 * u, b: 2 * v, r: 0.38, h: 0.14 });
+      for (let u = 0; u < k; u++) { g[0].push({ a: 2 * u, b: 0, d: 6 }); g[1].push({ a: 2 * u, b: S - 1, d: 2 }); }
+      for (let v = 1; v < k - 1; v++) { g[2].push({ a: 0, b: 2 * v, d: 4 }); g[3].push({ a: S - 1, b: 2 * v, d: 0 }); }
+      items.push({ k: 'rect', a0: -1, b0: -1, a1: S, b1: S }, { k: 'tri', a: -1, b: -1, s: 1.3 });
+      return { w: S, h: S, ref: 'U', lab: [(S - 1) / 2, -2.2], items, pins: g, thru: true, square: true };
+    },
+    hdr: () => {
+      const n = rng.int(3, 8), d = rng.chance(0.5) ? 6 : 2, items = [], g = [];
+      for (let a = 0; a < n; a++) { items.push({ k: 'thru', a: 2 * a, b: 0, r: 0.62, h: 0.28, sq: a === 0 }); g.push({ a: 2 * a, b: 0, d }); }
+      items.push({ k: 'rect', a0: -1, b0: -1, a1: 2 * n - 1, b1: 1 });
+      return { w: 2 * n - 1, h: 1, ref: 'J', lab: [-2.4, 0], items, pins: [g], thru: true };
+    },
+    tp: () => ({ w: 1, h: 1, ref: 'TP', lab: [0, -1.5], items: [{ k: 'thru', a: 0, b: 0, r: 0.55, h: 0 }],
+      pins: [[{ a: 0, b: 0, d: rng.int(0, 7) }]], thru: true }),
+    fid: () => ({ w: 3, h: 3, ref: null, items: [{ k: 'cu', a: 1, b: 1, r: 0.5 }, { k: 'circ', a: 1, b: 1, r: 1.3 }], pins: [] }),
+  };
+}
+function transpose(fp) {
+  const t = { ...fp, w: fp.h, h: fp.w, lab: fp.lab && [fp.lab[1], fp.lab[0]] };
+  t.items = fp.items.map(it => it.k === 'rect' ? { ...it, a0: it.b0, b0: it.a0, a1: it.b1, b1: it.a1 }
+                             : { ...it, a: it.b, b: it.a, w: it.h, h: it.w });
+  t.pins = fp.pins.map(g => g.map(q => ({ a: q.b, b: q.a, d: TRD[q.d] })));
+  return t;
+}
+
+function buildScene(seed) {
+  const rng = makeRng(seed);
+  const NX = P.res, NY = Math.max(24, Math.round(NX / FORMATS[P.format][1]));
+  const N = NX * NY, p = PITCH, DW = NX * p, DH = NY * p, Ar = NX / NY;
+  const f = makeFigure(rng, Ar), nz = makeNoise(rng);
+  const fbm = (x, y) => nz(x, y) * 0.65 + nz(x * 2.1 + 17.3, y * 2.1 + 5.1) * 0.35;
+  const at = (i, j) => j * NX + i;
+  const inb = (i, j) => i >= 0 && j >= 0 && i < NX && j < NY;
+  const un = i => (i + 0.5) / NY;             // cell index → normalised coordinate (height = 1)
+  const cc = v => Math.floor(v * NY);         // normalised coordinate → cell index
+
+  // ---- sample the figure
+  const reg = new Uint8Array(N), tone = new Float32Array(N);
+  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+    const [r, t] = sample(f, un(i), un(j));
+    reg[at(i, j)] = r; tone[at(i, j)] = t;
+  }
+  // light skin becomes a solid copper pour, mid tones a hatched pour, shadows are left to traces
+  const hi = 0.72 - 0.1 * P.pour, lo = hi - 0.14;
+  const cls = new Uint8Array(N);
+  for (let c = 0; c < N; c++) {
+    const r = reg[c], t = tone[c];
+    cls[c] = r === HAIR ? C_HAIR : r === BODY ? C_BODY : r === BG ? C_BG
+      : t > hi ? C_POUR : t > lo ? C_HATCH : r === FACE ? C_FACE : C_NECK;
+  }
+
+  const occ = [new Uint8Array(N), new Uint8Array(N)];     // per layer: cell taken
+  const diag = [new Uint8Array(N), new Uint8Array(N)];    // per layer: 2×2 block already crossed diagonally
+  const feats = [], vias = [], pads = [], silk = [];
+  const keep = (i, j) => { if (inb(i, j)) cls[at(i, j)] = C_KEEP; };
+  const viaAt = (i, j, r, h, extra) => vias.push({ x: (i + 0.5) * p, y: (j + 0.5) * p, r: r * p, h: h * p, ...extra });
+
+  // ---- facial features: hand-placed octilinear traces, pads and vias
+  const octi = pts => {
+    const out = [pts[0].slice()];
+    for (let k = 1; k < pts.length; k++) {
+      let [i, j] = out[out.length - 1];
+      const [ti, tj] = pts[k];
+      while (i !== ti || j !== tj) { i += Math.sign(ti - i); j += Math.sign(tj - j); out.push([i, j]); }
+    }
+    return out;
+  };
+  const feature = (pts, w) => {
+    const cells = octi(pts.map(([a, b]) => [Math.round(a), Math.round(b)]));
+    cells.forEach(([i, j], k) => {
+      if (!inb(i, j)) return;
+      keep(i, j); occ[0][at(i, j)] = 1;
+      if (k) { const [pi, pj] = cells[k - 1]; if (pi !== i && pj !== j) { keep(pi, j); keep(i, pj); } }
+    });
+    feats.push({ pts: cells, w });
+    return cells;
+  };
+  const fvia = (i, j, r, h, extra) => {
+    if (!inb(i, j)) return;
+    keep(i, j); occ[0][at(i, j)] = occ[1][at(i, j)] = 1; viaAt(i, j, r, h, extra);
+  };
+  const keepEllipse = (ex, ey, rx, ry) => {
+    for (let j = Math.floor(ey - ry); j <= Math.ceil(ey + ry); j++)
+      for (let i = Math.floor(ex - rx); i <= Math.ceil(ex + rx); i++)
+        if (((i - ex) / rx) ** 2 + ((j - ey) / ry) ** 2 < 1) keep(i, j);
+  };
+
+  const E = [-1, 1].map(s => {
+    const a = Math.max(2, Math.round(f.eyeRX * NY));
+    return { s, ex: cc(eyeX(f, s)), ey: cc(f.eyeY), a, h: clamp(Math.round(f.eyeRY * NY), 1, a - 1) };
+  });
+  for (const e of E) keepEllipse(e.ex, e.ey - e.h / 2 + 0.5, e.a + 1.3, e.h / 2 + 1.7);
+  const flick = rng.chance(0.6), lowerLid = rng.chance(0.65);
+  for (const { s, ex, ey, a, h } of E) {
+    const lid = [[ex - a, ey], [ex - a + h, ey - h], [ex + a - h, ey - h], [ex + a, ey]];
+    const o = [ex + s * (a + 2), ey - 2];
+    if (flick) s < 0 ? lid.unshift(o) : lid.push(o);
+    feature(lid, 0.55);
+    if (flick) fvia(o[0], o[1], 0.34, 0.13);
+    if (lowerLid && a >= 3) feature([[ex - a + 2, ey + 1], [ex + a - 2, ey + 1]], 0.3);
+    const ir = Math.max(0.7, h / 2 + 0.1);
+    viaAt(ex + f.gaze * Math.max(0, a - h / 2 - 1), ey - (h - 1) / 2, ir, ir * 0.45, { iris: true });
+  }
+  if (f.glasses) {
+    for (const e of E) {
+      const Rx = e.a + 2, Ry = Math.max(e.h + 1, 3), k = Math.min(Ry - 1, Math.round(Rx * 0.45));
+      const gx = e.ex, gy = e.ey - Math.floor(e.h / 2);
+      e.g = { Rx, Ry, k, gx, gy }; e.gTop = gy - Ry;
+      feature([[gx - Rx + k, gy - Ry], [gx + Rx - k, gy - Ry], [gx + Rx, gy - Ry + k], [gx + Rx, gy + Ry - k],
+               [gx + Rx - k, gy + Ry], [gx - Rx + k, gy + Ry], [gx - Rx, gy + Ry - k], [gx - Rx, gy - Ry + k],
+               [gx - Rx + k, gy - Ry]], 0.45);
+    }
+    const [L, R] = E.map(e => e.g), by = L.gy - L.Ry + L.k;
+    if (R.gx - R.Rx > L.gx + L.Rx) feature([[L.gx + L.Rx, by], [R.gx - R.Rx, by]], 0.45);
+    const fl = cc(f.fcx - f.frx) - 1, fr = cc(f.fcx + f.frx) + 1;
+    if (fl < L.gx - L.Rx) feature([[L.gx - L.Rx, by], [fl, by]], 0.45);
+    if (fr > R.gx + R.Rx) feature([[R.gx + R.Rx, by], [fr, by]], 0.45);
+  }
+  const browStyle = rng.int(0, 2), browThick = rng.chance(0.4), browW = rng.range(0.5, 0.7);
+  for (const e of E) {
+    const { s, ex, ey, a, h } = e;
+    let by = Math.min(cc(f.browY), ey - h - 2);
+    if (e.gTop !== undefined) by = Math.min(by, e.gTop - 2);
+    const inner = ex - s * (a - 1), outer = ex + s * (a + 1);
+    feature(browStyle === 0 ? [[inner, by + 1], [inner + s, by], [outer - 2 * s, by], [outer, by + 2]]
+          : browStyle === 1 ? [[inner, by], [outer - s, by], [outer, by + 1]]
+          : [[inner, by + 2], [inner + 2 * s, by], [outer, by]], browW);
+    if (browThick && a >= 3) feature([[inner + 2 * s, by - 1], [outer - 3 * s, by - 1]], 0.35);
+  }
+  {
+    const ns = -f.light, nx = cc(f.nx), ny = cc(f.noseY), top = Math.min(E[0].ey, ny - 2);
+    feature([[nx + ns, top], [nx + ns, ny - 1], [nx, ny], [nx - 2 * ns, ny]], 0.42);
+    fvia(nx - 2 * ns, ny, 0.36, 0.14);
+    fvia(nx + 2 * ns, ny, 0.36, 0.14);
+  }
+  {
+    const mx = cc(f.nx), my = cc(f.mouthY), ma = Math.max(2, Math.round(f.mouthRX * NY)), c = f.smile, ac = Math.abs(c);
+    keepEllipse(mx, my + 0.8, ma + 1.6, 2.4);
+    feature([[mx - ma, my - c], [mx - ma + ac, my], [mx + ma - ac, my], [mx + ma, my - c]], 0.5);
+    fvia(mx - ma, my - c, 0.34, 0.13); fvia(mx + ma, my - c, 0.34, 0.13);
+    if (rng.chance(0.6)) pads.push({ x: (mx + 0.5) * p, y: (my + 2.5) * p, w: Math.max(1, 2 * ma - 2) * p * 0.75, h: 0.9 * p, r: 0.4 * p });
+    else if (ma >= 3) feature([[mx - ma + 2, my + 2], [mx + ma - 2, my + 2]], 0.3);
+  }
+
+  // ---- clean up the zones
+  // hatched zones keep a gap from solid ones, like two copper zones on a real board
+  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+    const c = at(i, j);
+    if (cls[c] === C_HATCH && ((i > 0 && cls[c - 1] === C_POUR) || (i < NX - 1 && cls[c + 1] === C_POUR)
+        || (j > 0 && cls[c - NX] === C_POUR) || (j < NY - 1 && cls[c + NX] === C_POUR))) cls[c] = C_KEEP;
+  }
+  // a one-cell gap around the silhouette
+  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+    const c = at(i, j);
+    if (reg[c] !== BG) continue;
+    let near = false;
+    for (let dj = -1; dj <= 1 && !near; dj++) for (let di = -1; di <= 1; di++)
+      if (inb(i + di, j + dj) && reg[at(i + di, j + dj)] !== BG) { near = true; break; }
+    if (near) cls[c] = C_KEEP;
+  }
+  const M = P.frame ? 2 : 1, edge = new Uint8Array(N);
+  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++)
+    if (i < M || j < M || i >= NX - M || j >= NY - M) { edge[at(i, j)] = 1; cls[at(i, j)] = C_KEEP; }
+
+  // distance (in cells) from the figure
+  const dist = new Float32Array(N).fill(1e9), qu = new Int32Array(N);
+  let qh = 0, qt = 0;
+  for (let c = 0; c < N; c++) if (reg[c] !== BG) { dist[c] = 0; qu[qt++] = c; }
+  while (qh < qt) {
+    const c = qu[qh++], i = c % NX, j = (c / NX) | 0;
+    for (let d = 0; d < 8; d++) {
+      const ii = i + DX[d], jj = j + DY[d];
+      if (inb(ii, jj) && dist[at(ii, jj)] === 1e9) { dist[at(ii, jj)] = dist[c] + 1; qu[qt++] = at(ii, jj); }
+    }
+  }
+  // drop specks of pour
+  const seen = new Uint8Array(N), stack = [], comp = [];
+  for (let c0 = 0; c0 < N; c0++) {
+    const k = cls[c0];
+    if (seen[c0] || (k !== C_POUR && k !== C_HATCH)) continue;
+    comp.length = 0; stack.push(c0); seen[c0] = 1;
+    while (stack.length) {
+      const c = stack.pop(), i = c % NX, j = (c / NX) | 0;
+      comp.push(c);
+      for (let d = 0; d < 8; d += 2) {
+        const ii = i + DX[d], jj = j + DY[d];
+        if (inb(ii, jj) && !seen[at(ii, jj)] && cls[at(ii, jj)] === k) { seen[at(ii, jj)] = 1; stack.push(at(ii, jj)); }
+      }
+    }
+    if (comp.length < 5) for (const c of comp) cls[c] = C_KEEP;
+  }
+
+  // ---- per-cell density (how many traces a cell invites) and flow angle
+  const dens = new Float32Array(N), angTop = new Float32Array(N), angBot = new Float32Array(N);
+  const ox = f.cx, oy = f.hy + 0.08;
+  for (let c = 0; c < N; c++) {
+    const x = un(c % NX), y = un((c / NX) | 0);
+    const bgA = Math.atan2(y - oy, x - ox) + fbm(x * 2.2 + 3, y * 2.2 + 11) * 1.3 * P.wiggle;
+    angBot[c] = bgA + Math.PI / 2;
+    switch (cls[c]) {
+      case C_HAIR:
+        dens[c] = clamp(tone[c] + 0.18 * fbm(x * 9, y * 9));
+        angTop[c] = hairAngle(f, x, y) + fbm(x * 7 + 31, y * 7) * 0.5 * P.wiggle; break;
+      case C_FACE: case C_NECK:
+        dens[c] = clamp((tone[c] - 0.12) / (lo - 0.12));
+        angTop[c] = cls[c] === C_FACE ? faceAngle(f, x, y) : Math.PI / 2 + fbm(x * 9, y * 9 + 5) * 0.25; break;
+      case C_BODY:
+        dens[c] = clamp(tone[c] + 0.2 * fbm(x * 6 + 9, y * 6));
+        angTop[c] = bodyAngle(f, x, y) + fbm(x * 5 + 13, y * 5) * 0.4 * P.wiggle; break;
+      default:
+        // thinner right around the silhouette so the figure stands out
+        dens[c] = clamp(P.density * (0.25 + 0.3 * fbm(x * 3 + 50, y * 3 + 7)) * (0.3 + 0.9 * sstep(0, 0.12 * NY, dist[c] - 2)));
+        angTop[c] = bgA;
+    }
+  }
+  const bottomOK = c => !edge[c] && (reg[c] === BG || reg[c] === BODY);
+
+  // ---- vias
+  const endVia = (L, pt, nb) => {
+    const [i, j] = pt, c = at(i, j), o = 1 - L;
+    if (occ[o][c]) return;
+    occ[o][c] = 1;
+    // a fat via only where it has room; it then claims its neighbours
+    let big = rng.chance(0.35);
+    const around = fn => {
+      for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+        const ii = i + di, jj = j + dj;
+        if ((di || dj) && !(nb && ii === nb[0] && jj === nb[1]) && fn(ii, jj) === false) return false;
+      }
+    };
+    if (big) big = around((ii, jj) => inb(ii, jj) && !occ[L][at(ii, jj)]) !== false;
+    if (big) around((ii, jj) => { occ[L][at(ii, jj)] = 1; });
+    viaAt(i, j, big ? 0.6 : 0.36, big ? 0.24 : 0.14);
+  };
+
+  // ---- components
+  const FP = makeFootprints(rng), cnt = {}, pinGroups = [];
+  const canPlace = (i0, j0, w, h) => {
+    for (let j = j0 - 1; j <= j0 + h; j++) for (let i = i0 - 1; i <= i0 + w; i++) {
+      if (!inb(i, j)) return false;
+      const c = at(i, j);
+      if (occ[0][c] || occ[1][c] || edge[c] || (cls[c] !== C_BG && cls[c] !== C_BODY)) return false;
+    }
+    return true;
+  };
+  const placeComp = type => {
+    let fp = FP[type]();
+    if (!fp.square && rng.chance(0.5)) fp = transpose(fp);
+    for (let t = 0; t < 80; t++) {
+      const i0 = rng.int(1, NX - fp.w - 1), j0 = rng.int(1, NY - fp.h - 1);
+      if (!canPlace(i0, j0, fp.w, fp.h)) continue;
+      for (let j = j0; j < j0 + fp.h; j++) for (let i = i0; i < i0 + fp.w; i++) {
+        occ[0][at(i, j)] = 1; if (fp.thru) occ[1][at(i, j)] = 1;
+      }
+      const X = a => (i0 + a + 0.5) * p, Y = b => (j0 + b + 0.5) * p;
+      for (const it of fp.items) {
+        if (it.k === 'pad') pads.push({ x: X(it.a), y: Y(it.b), w: it.w * p, h: it.h * p, r: Math.min(it.w, it.h) * p * 0.22 });
+        else if (it.k === 'cu') pads.push({ x: X(it.a), y: Y(it.b), w: 2 * it.r * p, h: 2 * it.r * p, r: it.r * p });
+        else if (it.k === 'via' || it.k === 'thru') vias.push({ x: X(it.a), y: Y(it.b), r: it.r * p, h: it.h * p, sq: it.sq });
+        else if (it.k === 'rect') silk.push({ k: 'rect', x0: X(it.a0), y0: Y(it.b0), x1: X(it.a1), y1: Y(it.b1) });
+        else silk.push({ k: it.k, x: X(it.a), y: Y(it.b), r: (it.r || it.s) * p });
+      }
+      if (fp.ref) {
+        cnt[fp.ref] = (cnt[fp.ref] || 0) + 1;
+        silk.push({ k: 'text', x: X(fp.lab[0]), y: Y(fp.lab[1]), s: fp.ref + cnt[fp.ref] });
+      }
+      for (const g of fp.pins) pinGroups.push({ cl: cls[at(i0, j0)], pins: g.map(q => ({ i: i0 + q.a, j: j0 + q.b, d: q.d })) });
+      return true;
+    }
+    return false;
+  };
+  if (P.frame) {
+    let k = 0;
+    for (const [i, j] of [[4, 4], [NX - 5, 4], [4, NY - 5], [NX - 5, NY - 5]]) {
+      if (reg[at(i, j)] !== BG) continue;
+      for (let jj = j - 2; jj <= j + 2; jj++) for (let ii = i - 2; ii <= i + 2; ii++) { keep(ii, jj); occ[0][at(ii, jj)] = occ[1][at(ii, jj)] = 1; }
+      viaAt(i, j, 1.7, 1.0);
+      silk.push({ k: 'text', x: (i + 0.5 + (i < NX / 2 ? 4 : -4)) * p, y: (j + 0.5) * p, s: 'P$' + ++k });
+    }
+  }
+  const nComp = Math.round(P.parts * N / 1100), nBig = Math.round(nComp * 0.25);
+  for (let k = 0; k < nBig; k++) placeComp(rng.wpick(['qfn', 'bga', 'soic', 'hdr'], [2, 1, 2, 1.2]));
+  for (let k = nBig; k < nComp; k++) placeComp(rng.wpick(['rc', 'sot', 'tp', 'fid', 'soic'], [6, 2, 2, 0.6, 0.8]));
+
+  // a via fence along the silhouette
+  if (rng.chance(0.55)) {
+    const vg = new Uint8Array(N);
+    for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+      const c = at(i, j);
+      if (cls[c] !== C_KEEP || reg[c] !== BG || edge[c] || occ[0][c] || occ[1][c]) continue;
+      let ok = true;
+      for (let dj = -2; dj <= 2 && ok; dj++) for (let di = -2; di <= 2; di++)
+        if (inb(i + di, j + dj) && vg[at(i + di, j + dj)]) { ok = false; break; }
+      if (!ok) continue;
+      vg[c] = 1; occ[0][c] = occ[1][c] = 1; viaAt(i, j, 0.3, 0.12);
+    }
+  }
+
+  // ---- walkers: each trace grows cell by cell along the flow field, never crossing another
+  const traces = [[], []];
+  const walker = (i, j, d, L, cl, th, life, minRun) =>
+    ({ i, j, d, L, cl, th, life, minRun, run: 0, path: [[i, j]], pieces: [], plan: null, sw: false, pin: false });
+  const tryMove = (w, d) => {
+    const ni = w.i + DX[d], nj = w.j + DY[d];
+    if (!inb(ni, nj)) return false;
+    const c = at(ni, nj), L = w.L;
+    if (occ[L][c]) return false;
+    if (L === 0 ? cls[c] !== w.cl || dens[c] < w.th : !bottomOK(c)) return false;
+    const b = Math.min(w.i, ni) + Math.min(w.j, nj) * NX;
+    if (d & 1) { if (diag[L][b]) return false; diag[L][b] = 1; }
+    occ[L][c] = 1;
+    w.run = d === w.d ? w.run + 1 : 1;
+    w.i = ni; w.j = nj; w.d = d; w.path.push([ni, nj]);
+    return true;
+  };
+  const step = w => {
+    if (w.life-- <= 0) return false;
+    if (w.plan) {
+      const d = w.plan.shift();
+      if (!w.plan.length) w.plan = null;
+      if (tryMove(w, d)) return true;
+      w.plan = null;
+    }
+    const a = (w.L ? angBot : angTop)[at(w.i, w.j)];
+    const td = Math.abs(wrapA(a - w.d * Q)) < Q / 2 + 0.15 ? w.d : qdir(a);
+    const df = ddiff(w.d, td);
+    if (df && w.run >= w.minRun && tryMove(w, (w.d + Math.sign(df) + 8) % 8)) return true;
+    if (tryMove(w, w.d)) return true;
+    const o = rng.chance(0.5) ? 1 : 7;
+    if (rng.chance(0.7) && tryMove(w, (w.d + o) % 8)) return true;
+    if (rng.chance(0.5) && tryMove(w, (w.d + 8 - o) % 8)) return true;
+    // dive to the bottom layer through a via
+    if (w.sw && w.L === 0 && w.path.length > 2 && rng.chance(0.3 * P.parts)) {
+      const c = at(w.i, w.j);
+      if (!occ[1][c] && bottomOK(c)) {
+        occ[1][c] = 1; viaAt(w.i, w.j, 0.36, 0.14);
+        w.pieces.push({ L: 0, pts: w.path }); w.path = [[w.i, w.j]];
+        w.L = 1; w.sw = false; w.run = 0;
+        return true;
+      }
+    }
+    return false;
+  };
+  const unmark = (L, pts) => pts.forEach(([i, j], k) => {
+    occ[L][at(i, j)] = 0;
+    if (k) { const [pi, pj] = pts[k - 1]; if (pi !== i && pj !== j) diag[L][Math.min(i, pi) + Math.min(j, pj) * NX] = 0; }
+  });
+  const finish = (w, pv) => {
+    const pieces = [...w.pieces, { L: w.L, pts: w.path }];
+    const total = pieces.reduce((s, q) => s + q.pts.length, 0) - pieces.length + 1;
+    if (!w.pin && total < 3) { for (const q of pieces) unmark(q.L, q.pts); return; }
+    for (const q of pieces) if (q.pts.length > 1) traces[q.L].push(q.pts);
+    const first = pieces[0].pts;
+    if (!w.pin && first.length > 1 && rng.chance(pv * 0.8)) endVia(pieces[0].L, first[0], first[1]);
+    if (w.path.length > 1 && rng.chance(pv)) endVia(w.L, w.path[w.path.length - 1], w.path[w.path.length - 2]);
+  };
+  const meander = d => {
+    const n = (d + 2) % 8, m = (d + 6) % 8, A = rng.int(1, 3), K = rng.int(2, 6), fw = rng.int(1, 2), plan = [];
+    const rep = (dir, k) => { for (let q = 0; q < k; q++) plan.push(dir); };
+    rep(n, A);
+    for (let q = 0; q < K; q++) { rep(d, fw); rep(q % 2 ? n : m, 2 * A); }
+    rep(d, fw); rep(K % 2 ? n : m, A); rep(d, 2);
+    return plan;
+  };
+  const runBundle = (ws, cfg) => {
+    let act = ws;
+    while (act.length) {
+      const w0 = act[0];
+      // the whole bus jogs sideways together
+      if (act.length === ws.length && ws.length > 1 && rng.chance(0.015 * P.wiggle)
+          && act.every(w => !w.plan && w.d === w0.d && w.run >= w.minRun)) {
+        const t = rng.chance(0.5) ? 1 : 7, k = rng.int(1, 3);
+        for (const w of act) w.plan = [...Array(k).fill((w0.d + t) % 8), w0.d];
+      }
+      // lone traces sometimes meander, like length-matched lines
+      if (ws.length === 1 && cfg.meander && !(w0.d & 1) && !w0.plan && w0.run >= 3 && rng.chance(0.025 * P.wiggle))
+        w0.plan = meander(w0.d);
+      const next = [];
+      for (const w of act) if (step(w)) next.push(w); else finish(w, cfg.pv);
+      act = next;
+    }
+  };
+
+  const CFG = {
+    [C_HAIR]: { spawn: 0.6,  bus: 7, th: 0.75, life: () => 999, pv: 0.3 },
+    [C_FACE]: { spawn: 0.35, bus: 4, th: 1,    life: () => 999, pv: 0.4 },
+    [C_NECK]: { spawn: 0.35, bus: 4, th: 1,    life: () => 999, pv: 0.35 },
+    [C_BODY]: { spawn: 0.5,  bus: 6, th: 0.7,  life: () => 999, pv: 0.45 },
+    [C_BG]:   { spawn: 0.07, bus: 6, th: 1,    life: () => rng.chance(0.6) ? rng.int(5, 25) : rng.int(25, 110), pv: 0.75, sw: true, meander: true },
+    bot:      { spawn: 0.035, bus: 5, th: 0,   life: () => rng.int(8, 60), pv: 0.2 },
+  };
+  const bundle = (i0, j0, L, cl, cfg) => {
+    const d = qdir((L ? angBot : angTop)[at(i0, j0)]);
+    let n = d & 1 ? (d + 1) % 8 : (d + 2) % 8;
+    if (rng.chance(0.5)) n = (n + 4) % 8;
+    const nb = 1 + Math.floor(Math.pow(rng(), 1.5) * cfg.bus * P.bus);
+    const minRun = rng.int(2, 4), life = cfg.life(), ws = [];
+    for (let k = 0; k < nb; k++) {
+      const i = i0 + DX[n] * k, j = j0 + DY[n] * k;
+      if (!inb(i, j)) break;
+      const c = at(i, j), th = rng() * cfg.th;
+      if (occ[L][c] || (L ? !bottomOK(c) : cls[c] !== cl || dens[c] < th)) break;
+      occ[L][c] = 1;
+      const w = walker(i, j, d, L, cl, th, life + rng.int(-2, 2), minRun);
+      w.sw = !L && !!cfg.sw;
+      ws.push(w);
+    }
+    runBundle(ws, cfg);
+  };
+
+  // component pins first: every side of a chip escapes as one bus
+  for (const g of pinGroups) {
+    const life = rng.int(6, 70), minRun = rng.int(2, 4);
+    runBundle(g.pins.map(q => {
+      const w = walker(q.i, q.j, q.d, 0, g.cl, 0, life, minRun);
+      w.pin = true; w.sw = true; w.plan = [q.d, q.d];
+      return w;
+    }), { pv: 0.8, meander: true });
+  }
+  // then each region, spawning upstream first so the flows stay long
+  const partX = f.cx + f.part * f.hrx, partY = f.hy - f.hry;
+  const KEY = {
+    [C_HAIR]: (x, y) => Math.hypot(x - partX, y - partY),
+    [C_FACE]: (x, y) => y,
+    [C_NECK]: (x, y) => y,
+    [C_BODY]: (x, y) => Math.hypot(x - f.cx, y - f.yS),
+    [C_BG]:   (x, y, c) => dist[c] / NY,
+  };
+  for (const cl of [C_HAIR, C_FACE, C_NECK, C_BODY, C_BG]) {
+    const cand = [], key = new Float32Array(N), cfg = CFG[cl];
+    for (let c = 0; c < N; c++) if (cls[c] === cl) { cand.push(c); key[c] = KEY[cl](un(c % NX), un((c / NX) | 0), c) + rng() * 0.08; }
+    cand.sort((a, b) => key[a] - key[b]);
+    for (const c of cand)
+      if (!occ[0][c] && rng() < cfg.spawn * P.density * dens[c]) bundle(c % NX, (c / NX) | 0, 0, cl, cfg);
+  }
+  for (let c = 0; c < N; c++)
+    if (bottomOK(c) && !occ[1][c] && rng() < CFG.bot.spawn * P.density) bundle(c % NX, (c / NX) | 0, 1, C_BG, CFG.bot);
+
+  // stitching vias in empty background
+  for (let k = Math.round(P.parts * N / 400); k > 0; k--) {
+    const i = rng.int(1, NX - 2), j = rng.int(1, NY - 2), c = at(i, j);
+    if (cls[c] !== C_BG && cls[c] !== C_HATCH || reg[c] !== BG) continue;
+    let ok = true;
+    for (let dj = -1; dj <= 1 && ok; dj++) for (let di = -1; di <= 1; di++)
+      if (occ[0][at(i + di, j + dj)] || occ[1][at(i + di, j + dj)]) { ok = false; break; }
+    if (ok) { occ[0][c] = occ[1][c] = 1; viaAt(i, j, rng.chance(0.3) ? 0.55 : 0.36, 0.16); }
+  }
+
+  // ---- geometry for the renderer
+  const cx = i => (i + 0.5) * p;
+  const polyPath = (list, path = new Path2D()) => {
+    for (const pts of list) {
+      path.moveTo(cx(pts[0][0]), cx(pts[0][1]));
+      for (let k = 1; k < pts.length; k++) {
+        const last = k === pts.length - 1;
+        const d0 = [pts[k][0] - pts[k - 1][0], pts[k][1] - pts[k - 1][1]];
+        const d1 = last ? null : [pts[k + 1][0] - pts[k][0], pts[k + 1][1] - pts[k][1]];
+        if (last || d0[0] !== d1[0] || d0[1] !== d1[1]) path.lineTo(cx(pts[k][0]), cx(pts[k][1]));
+      }
+    }
+    return path;
+  };
+  const featW = new Map();
+  for (const ft of feats) { if (!featW.has(ft.w)) featW.set(ft.w, []); featW.get(ft.w).push(ft.pts); }
+  const hatchLines = new Path2D(), hs = p * 1.2;
+  for (let k = -DH; k < DW + DH; k += hs) { hatchLines.moveTo(k, 0); hatchLines.lineTo(k + DH, DH); hatchLines.moveTo(k, DH); hatchLines.lineTo(k + DH, 0); }
+  const blobs = [];
+  for (let k = 0; k < 40; k++) blobs.push({ x: rng() * DW, y: rng() * DH, r: rng.range(0.05, 0.3) * DH, c: rng.int(0, 3), a: rng.range(0.3, 1) });
+
+  return {
+    DW, DH, NX, NY, p, seed, frame: P.frame, blobs, vias, pads, silk, hatchLines,
+    pour: march(cls, C_POUR, NX, NY, p), hatch: march(cls, C_HATCH, NX, NY, p),
+    top: polyPath(traces[0]), bot: polyPath(traces[1]),
+    feats: [...featW].map(([w, list]) => ({ w, path: polyPath(list) })),
+    stats: { traces: traces[0].length + traces[1].length + feats.length, vias: vias.length, pads: pads.length },
+  };
+}
+
+// Marching squares over cell centres: the zone outline runs along cell edges with every
+// corner cut at 45°, which is exactly how copper pours look. Polygons share one winding.
+function march(cls, k, NX, NY, p) {
+  const fill = new Path2D(), edge = new Path2D();
+  const m = (i, j) => i >= 0 && j >= 0 && i < NX && j < NY && cls[j * NX + i] === k ? 1 : 0;
+  for (let j = -1; j < NY; j++) for (let i = -1; i < NX; i++) {
+    const code = m(i, j) * 8 + m(i + 1, j) * 4 + m(i + 1, j + 1) * 2 + m(i, j + 1);
+    if (!code) continue;
+    const x0 = (i + 0.5) * p, y0 = (j + 0.5) * p, x1 = x0 + p, y1 = y0 + p, xm = x0 + p / 2, ym = y0 + p / 2;
+    const A = [x0, y0], B = [x1, y0], C = [x1, y1], D = [x0, y1], T = [xm, y0], R = [x1, ym], Bo = [xm, y1], L = [x0, ym];
+    const poly = (...pts) => { fill.moveTo(...pts[0]); for (let q = 1; q < pts.length; q++) fill.lineTo(...pts[q]); fill.closePath(); };
+    const seg = (u, v) => { edge.moveTo(...u); edge.lineTo(...v); };
+    switch (code) {
+      case 15: poly(A, B, C, D); break;
+      case 8: poly(A, T, L); seg(T, L); break;
+      case 4: poly(B, R, T); seg(T, R); break;
+      case 2: poly(C, Bo, R); seg(R, Bo); break;
+      case 1: poly(D, L, Bo); seg(L, Bo); break;
+      case 12: poly(A, B, R, L); seg(L, R); break;
+      case 6: poly(B, C, Bo, T); seg(T, Bo); break;
+      case 3: poly(L, R, C, D); seg(L, R); break;
+      case 9: poly(A, T, Bo, D); seg(T, Bo); break;
+      case 7: poly(T, B, C, D, L); seg(T, L); break;
+      case 11: poly(A, T, R, C, D); seg(T, R); break;
+      case 13: poly(A, B, R, Bo, D); seg(R, Bo); break;
+      case 14: poly(A, B, C, Bo, L); seg(Bo, L); break;
+      case 10: poly(A, T, L); poly(C, Bo, R); seg(T, L); seg(R, Bo); break;
+      case 5: poly(B, R, T); poly(D, L, Bo); seg(T, R); seg(L, Bo); break;
+    }
+  }
+  return { fill, edge };
+}
+
+// ---------- render ----------
+function render(ctx, sc, s) {
+  const pal = PAL[P.pal], p = sc.p;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.fillStyle = pal.outside; ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+  ctx.setTransform(s, 0, 0, s, 0, 0);
+  const board = new Path2D();
+  if (sc.frame) board.roundRect(0.7 * p, 0.7 * p, sc.DW - 1.4 * p, sc.DH - 1.4 * p, 2.4 * p);
+  else board.rect(0, 0, sc.DW, sc.DH);
+  ctx.save();
+  ctx.fillStyle = pal.board; ctx.fill(board); ctx.clip(board);
+  if (pal.mottle) {
+    for (const b of sc.blobs) {
+      const col = pal.mottle[b.c % pal.mottle.length], g = ctx.createRadialGradient(b.x, b.y, 0, b.x, b.y, b.r);
+      g.addColorStop(0, col); g.addColorStop(1, col + '00');
+      ctx.globalAlpha = pal.mottleA * b.a; ctx.fillStyle = g; ctx.fillRect(b.x - b.r, b.y - b.r, 2 * b.r, 2 * b.r);
+    }
+    ctx.globalAlpha = 1;
+  }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  if (pal.bot) { ctx.strokeStyle = pal.bot; ctx.lineWidth = TW * p; ctx.stroke(sc.bot); }
+
+  // copper zones
+  ctx.fillStyle = pal.pour; ctx.fill(sc.pour.fill);
+  ctx.save();
+  ctx.clip(sc.hatch.fill);
+  ctx.strokeStyle = pal.hatch; ctx.lineCap = 'butt';
+  ctx.lineWidth = 0.22 * p; ctx.stroke(sc.hatchLines);
+  ctx.lineWidth = 0.6 * p; ctx.stroke(sc.hatch.edge);
+  ctx.restore();
+
+  // traces
+  ctx.strokeStyle = pal.top; ctx.lineWidth = TW * p; ctx.stroke(sc.top);
+  for (const ft of sc.feats) { ctx.lineWidth = ft.w * p; ctx.stroke(ft.path); }
+
+  // pads and vias
+  const pads = new Path2D();
+  for (const q of sc.pads) pads.roundRect(q.x - q.w / 2, q.y - q.h / 2, q.w, q.h, q.r);
+  ctx.fillStyle = pal.pad; ctx.fill(pads);
+  const circles = (grow, holes) => {
+    const path = new Path2D();
+    for (const v of sc.vias) {
+      const r = (holes ? v.h : v.r) + grow;
+      if (r <= 0) continue;
+      if (v.sq && !holes) path.rect(v.x - r, v.y - r, 2 * r, 2 * r);
+      else { path.moveTo(v.x + r, v.y); path.arc(v.x, v.y, r, 0, Math.PI * 2); }
+    }
+    return path;
+  };
+  if (pal.halo) { ctx.fillStyle = pal.halo; ctx.fill(circles(0.22 * p, false)); }
+  ctx.fillStyle = pal.via; ctx.fill(circles(0, false));
+  ctx.fillStyle = pal.hole; ctx.fill(circles(0, true));
+
+  // silkscreen
+  if (pal.silk) {
+    ctx.strokeStyle = ctx.fillStyle = pal.silk;
+    ctx.lineWidth = 0.16 * p; ctx.lineCap = 'butt';
+    ctx.font = `600 ${1.05 * p}px ui-monospace, Menlo, monospace`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
+    for (const q of sc.silk) {
+      if (q.k === 'rect') ctx.strokeRect(q.x0, q.y0, q.x1 - q.x0, q.y1 - q.y0);
+      else if (q.k === 'text') ctx.fillText(q.s, q.x, q.y);
+      else if (q.k === 'dot') { ctx.beginPath(); ctx.arc(q.x, q.y, q.r, 0, Math.PI * 2); ctx.fill(); }
+      else if (q.k === 'circ') { ctx.beginPath(); ctx.arc(q.x, q.y, q.r, 0, Math.PI * 2); ctx.stroke(); }
+      else if (q.k === 'tri') { ctx.beginPath(); ctx.moveTo(q.x, q.y); ctx.lineTo(q.x + q.r, q.y); ctx.lineTo(q.x, q.y + q.r); ctx.fill(); }
+    }
+    ctx.textAlign = 'right';
+    ctx.fillText(`FACE-${sc.seed.toUpperCase()}  REV A`, sc.DW - (sc.frame ? 3 : 1.5) * p, sc.DH - (sc.frame ? 2.2 : 1.2) * p);
+  }
+  if (pal.keepout && sc.frame) {
+    ctx.strokeStyle = pal.keepout; ctx.lineWidth = 0.12 * p; ctx.setLineDash([0.35 * p, 0.45 * p]);
+    ctx.strokeRect(1.6 * p, 1.6 * p, sc.DW - 3.2 * p, sc.DH - 3.2 * p);
+    ctx.setLineDash([]);
+  }
+  ctx.restore();
+  if (sc.frame && pal.edge) { ctx.strokeStyle = pal.edge; ctx.lineWidth = 0.18 * p; ctx.stroke(board); }
+}
+
+// 1-bit palettes render small, get thresholded, then scale up with hard pixels
+function pixelRender(sc, pal) {
+  const sp = pal.pixel / PITCH, off = document.createElement('canvas');
+  off.width = Math.round(sc.DW * sp); off.height = Math.round(sc.DH * sp);
+  const g = off.getContext('2d', { willReadFrequently: true });
+  render(g, sc, sp);
+  const im = g.getImageData(0, 0, off.width, off.height), d = im.data;
+  for (let i = 0; i < d.length; i += 4) { const v = d[i] + d[i + 1] + d[i + 2] > 384 ? 255 : 0; d[i] = d[i + 1] = d[i + 2] = v; d[i + 3] = 255; }
+  g.putImageData(im, 0, 0);
+  return off;
+}
+
+// ---------- ui ----------
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const stage = document.getElementById('stage');
+const seedInp = document.getElementById('seed');
+let seed = randSeed(), scene = null, auto = null;
+
+function regen() {
+  scene = buildScene(seed);
+  const st = scene.stats;
+  document.getElementById('info').textContent = `${scene.NX}×${scene.NY} клеток\nдорожек ${st.traces} · переходов ${st.vias} · площадок ${st.pads}`;
+  draw();
+}
+function draw() {
+  const dpr = window.devicePixelRatio || 1, pal = PAL[P.pal];
+  const aw = Math.max(50, stage.clientWidth - 40), ah = Math.max(50, stage.clientHeight - 40);
+  const css = Math.min(aw / scene.DW, ah / scene.DH);
+  if (pal.pixel) {
+    const off = pixelRender(scene, pal), k = Math.max(1, Math.round(scene.DW * css * dpr / off.width));
+    cv.width = off.width * k; cv.height = off.height * k;
+    ctx.imageSmoothingEnabled = false; ctx.drawImage(off, 0, 0, cv.width, cv.height);
+  } else {
+    const s = css * dpr;
+    cv.width = Math.round(scene.DW * s); cv.height = Math.round(scene.DH * s);
+    render(ctx, scene, s);
+  }
+  cv.style.width = scene.DW * css + 'px'; cv.style.height = scene.DH * css + 'px';
+}
+function newPortrait() { seed = randSeed(); seedInp.value = seed; regen(); }
+function save() {
+  const pal = PAL[P.pal], c = document.createElement('canvas'), g = c.getContext('2d');
+  if (pal.pixel) {
+    const off = pixelRender(scene, pal);
+    c.width = off.width * 4; c.height = off.height * 4;
+    g.imageSmoothingEnabled = false; g.drawImage(off, 0, 0, c.width, c.height);
+  } else {
+    const s = Math.max(2, 2400 / scene.DW);
+    c.width = Math.round(scene.DW * s); c.height = Math.round(scene.DH * s);
+    render(g, scene, s);
+  }
+  const a = document.createElement('a');
+  a.download = `pcb-${seed.replace(/[^\w-]/g, '_')}-${P.pal}.png`;
+  a.href = c.toDataURL('image/png'); a.click();
+}
+function toggleAuto() {
+  if (auto) { clearInterval(auto); auto = null; } else auto = setInterval(newPortrait, 2500);
+  document.getElementById('bAuto').classList.toggle('on', !!auto);
+}
+function setPal(k) {
+  P.pal = k; palSel.value = k;
+  document.documentElement.style.setProperty('--acc', PAL[k].pour === '#ffffff' ? '#bbbbbb' : PAL[k].top);
+  draw();
+}
+function toggleFrame() {
+  P.frame = !P.frame;
+  document.getElementById('bFrame').classList.toggle('on', P.frame);
+  regen();
+}
+
+const box = document.getElementById('controls');
+for (const [k, label, min, max, step] of CTRL) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${P[k]}"><output>${P[k]}</output>`;
+  const inp = row.querySelector('input'), out = row.querySelector('output');
+  inp.oninput = () => { P[k] = +inp.value; out.textContent = P[k]; regen(); };
+  box.appendChild(row);
+}
+const palSel = document.getElementById('pal');
+for (const [k, v] of Object.entries(PAL)) palSel.add(new Option(v.name, k, false, k === P.pal));
+palSel.onchange = () => setPal(palSel.value);
+const fmt = document.getElementById('format');
+for (const [k, [label]] of Object.entries(FORMATS)) fmt.add(new Option(label, k, false, k === P.format));
+fmt.onchange = () => { P.format = fmt.value; regen(); };
+document.getElementById('bFrame').classList.toggle('on', P.frame);
+
+seedInp.value = seed;
+seedInp.onchange = () => { seed = seedInp.value; regen(); };
+document.getElementById('bNew').onclick = newPortrait;
+document.getElementById('bDice').onclick = newPortrait;
+document.getElementById('bAuto').onclick = toggleAuto;
+document.getElementById('bSave').onclick = save;
+document.getElementById('bFrame').onclick = toggleFrame;
+cv.addEventListener('click', newPortrait);
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space') { e.preventDefault(); newPortrait(); }
+  else if (e.code === 'KeyR') newPortrait();
+  else if (e.code === 'KeyS') save();
+  else if (e.code === 'KeyA') toggleAuto();
+  else if (e.code === 'KeyB') toggleFrame();
+  else if (e.code === 'KeyP') { const ks = Object.keys(PAL); setPal(ks[(ks.indexOf(P.pal) + 1) % ks.length]); }
+});
+let rt;
+new ResizeObserver(() => { clearTimeout(rt); rt = setTimeout(() => scene && draw(), 80); }).observe(stage);
+regen();
+</script>
+</body>
+</html>
