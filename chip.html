@@ -1,0 +1,984 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Кремний</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: pointer; touch-action: none; }
+  canvas.drag { cursor: grabbing; }
+  .ui {
+    position: fixed; font: 12px/1.4 -apple-system, system-ui, sans-serif; letter-spacing: .02em;
+    color: rgba(230, 225, 215, .6); pointer-events: none;
+    text-shadow: 0 0 6px rgba(0, 0, 0, .8);
+    transition: opacity 1.2s ease;
+  }
+  #hint { left: 16px; bottom: 14px; }
+  #hint { max-width: calc(100vw - 32px); }
+  #info { right: 16px; top: 14px; text-align: right; font-variant-numeric: tabular-nums; }
+  #info b { font-weight: 600; color: rgba(245, 240, 230, .85); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="hint" class="ui">клик / пробел — новый чип · 1–8 — стиль, 0 — любой · колесо — зум, тянуть — сдвиг, Z — сброс · S — PNG · H — скрыть</div>
+<div id="info" class="ui"></div>
+<script>
+// ---------- random ----------
+function mulberry32(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+let rng = Math.random;
+const R = (a = 1, b) => b === undefined ? rng() * a : a + rng() * (b - a);
+const RI = (a, b) => Math.floor(R(a, b + 1));
+const pick = arr => arr[Math.floor(rng() * arr.length)];
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const newSeed = () => (rng() * 2147483647) | 0;
+function pickW(w) {
+  let sum = 0; for (const k in w) sum += w[k];
+  let x = rng() * sum;
+  for (const k in w) { x -= w[k]; if (x <= 0) return k; }
+  return Object.keys(w)[0];
+}
+function subset(arr, n) {                       // n random items, original order kept
+  const idx = arr.map((_, i) => i).sort(() => rng() - 0.5).slice(0, n).sort((a, b) => a - b);
+  return idx.map(i => arr[i]);
+}
+
+// value noise, fBm, range ~[0, 1]
+function makeNoise(seed) {
+  const r = mulberry32(seed), N = 256, P = new Float32Array(N * N);
+  for (let i = 0; i < P.length; i++) P[i] = r();
+  const sm = t => t * t * (3 - 2 * t);
+  const v = (x, y) => {
+    const xi = Math.floor(x), yi = Math.floor(y), sx = sm(x - xi), sy = sm(y - yi);
+    const i = xi & 255, j = yi & 255, i1 = (i + 1) & 255, j1 = (j + 1) & 255;
+    const a = P[j * N + i], b = P[j * N + i1], c = P[j1 * N + i], d = P[j1 * N + i1];
+    return a + (b - a) * sx + (c - a) * sy + (a - b - c + d) * sx * sy;
+  };
+  return (x, y) => clamp((v(x, y) * 0.55 + v(x * 2.1 + 17, y * 2.1 + 5) * 0.3 + v(x * 4.3 + 3, y * 4.3 + 11) * 0.15 - 0.5) * 2.2 + 0.5, 0, 1);
+}
+
+// ---------- colors ----------
+function hsl(c, a = 1, dh = 0, dl = 0, ds = 0) {
+  return `hsla(${((c[0] + dh) % 360 + 360) % 360},${clamp(c[1] + ds, 0, 100)}%,${clamp(c[2] + dl, 0, 100)}%,${a})`;
+}
+const jit = (c, dh = 6, ds = 6, dl = 5) => [c[0] + R(-dh, dh), clamp(c[1] + R(-ds, ds), 0, 100), clamp(c[2] + R(-dl, dl), 0, 100)];
+
+// batches rects by fill color: one fill() per color instead of per rect
+function batch() {
+  const m = new Map();
+  return {
+    rect(col, x, y, w, h) { let p = m.get(col); if (!p) m.set(col, p = new Path2D()); p.rect(x, y, w, h); },
+    fill(c, alpha = 1) {
+      c.globalAlpha = alpha;
+      for (const [col, p] of m) { c.fillStyle = col; c.fill(p); }
+      c.globalAlpha = 1; m.clear();
+    }
+  };
+}
+
+// ---------- styles (one per reference look) ----------
+const STYLES = {
+  prescott: {
+    label: 'Прескотт', nodes: [90, 65],
+    sub: [20, 50, 20], core: [22, 55, 27], chan: [18, 55, 28],
+    logic: [[28, 45, 28], [20, 68, 36], [12, 74, 41], [30, 80, 47], [44, 72, 45], [80, 42, 38], [345, 58, 46]],
+    logicGap: 0.1, speck: 0.5,
+    sram: [[95, 70, 58], [56, 90, 60], [325, 72, 68], [8, 82, 56], [22, 88, 54], [150, 58, 46]],
+    accent: [[230, 72, 56], [200, 72, 60], [140, 70, 50], [60, 90, 64], [330, 85, 62], [0, 85, 55]],
+    wire: [[350, 75, 66], [25, 85, 62], [200, 45, 72]],
+    pad: [45, 80, 60], padStyle: 'thin', ring: [[150, 60, 45], [330, 70, 58]], io: [[350, 70, 52], [20, 80, 48], [150, 50, 40]],
+    outline: null, grid: 0.1, iris: 0.08, edge: null,
+    arch: { bands: 4, slice: 2, side: 1 }, detail: [1000, 1400],
+    types: { sram: 1.2, logic: 4, datapath: 1.5, regfile: 1, bus: 0.6, analog: 0.4, rom: 0.4, tiles: 0.3 }
+  },
+  katmai: {
+    label: 'Катмай', nodes: [250, 180],
+    sub: [42, 70, 30], core: [46, 70, 38], chan: [45, 80, 42],
+    logic: [[210, 62, 34], [200, 72, 42], [195, 75, 52], [182, 60, 46], [50, 85, 54], [40, 82, 46], [0, 72, 48]],
+    logicGap: 0.07, speck: 0.4,
+    sram: [[42, 95, 55], [48, 95, 62], [170, 55, 50], [160, 50, 56]],
+    accent: [[215, 85, 55], [195, 80, 62], [0, 80, 55], [120, 60, 50], [280, 50, 58]],
+    wire: [[50, 90, 66], [190, 70, 62], [0, 70, 56]],
+    pad: [45, 60, 55], padStyle: 'thin', ring: [[190, 60, 45], [50, 80, 55]], io: [[195, 70, 48], [45, 80, 52], [110, 50, 40]],
+    outline: [110, 60, 42], outlineW: 0.7, grid: 0.07, iris: 0.1, edge: null,
+    arch: { side: 3, slice: 2, bands: 1 }, detail: [800, 1100],
+    types: { sram: 1.3, logic: 3, datapath: 2, regfile: 1.5, bus: 0.6, analog: 0.4, rom: 0.5, tiles: 0.2 }
+  },
+  klamath: {
+    label: 'Кламат', nodes: [350, 250],
+    sub: [34, 70, 28], core: [38, 80, 38], chan: [240, 40, 40],
+    logic: [[25, 60, 34], [20, 85, 44], [10, 80, 44], [30, 90, 48], [40, 90, 50], [55, 90, 55], [90, 60, 45]],
+    logicGap: 0.08, speck: 0.45,
+    sram: [[58, 100, 55], [55, 100, 62], [50, 95, 50]],
+    accent: [[5, 85, 50], [30, 95, 55], [100, 65, 50], [180, 60, 50], [55, 30, 85]],
+    wire: [[240, 50, 58], [40, 90, 62], [10, 80, 56]],
+    pad: [40, 70, 55], padStyle: 'thin', ring: [[240, 40, 45], [30, 80, 50]], io: [[30, 85, 48], [240, 40, 48], [55, 90, 55]],
+    outline: [240, 50, 50], outlineW: 0.5, grid: 0.06, iris: 0.06, edge: null,
+    arch: { side: 4, slice: 2 }, detail: [700, 1000],
+    types: { sram: 1, logic: 3.5, datapath: 1.5, regfile: 1.2, bus: 0.5, analog: 0.3, rom: 0.4, tiles: 0 }
+  },
+  optical: {
+    label: 'Под микроскопом', nodes: [600, 500, 350],
+    sub: [38, 28, 46], core: [36, 34, 55], chan: [34, 30, 48],
+    logic: [[40, 28, 46], [36, 32, 51], [34, 36, 56], [30, 36, 61], [45, 26, 55]],
+    logicGap: 0.05, speck: 0.35,
+    sram: [[35, 38, 60], [38, 35, 56], [32, 42, 63]],
+    accent: [[175, 40, 58], [340, 45, 70], [35, 90, 62], [200, 30, 62], [25, 60, 66]],
+    wire: [[30, 40, 72], [180, 35, 66], [40, 30, 44]],
+    pad: [40, 12, 64], padStyle: 'teeth', ring: [[30, 30, 38], [175, 40, 55]], io: [[36, 30, 52], [30, 25, 44], [40, 15, 60]],
+    outline: [30, 30, 34], outlineW: 0.6, grid: 0.05, iris: 0.24, edge: null,
+    arch: { side: 2, slice: 3 }, detail: [650, 950],
+    types: { sram: 1.5, logic: 3, datapath: 2, regfile: 1, bus: 0.8, analog: 0.4, rom: 0.3, tiles: 0 }
+  },
+  layout: {
+    label: 'Топология', nodes: [6000, 3000, 2000], layout: true,
+    sub: [0, 0, 0], core: [0, 0, 1], chan: [0, 0, 0],
+    layers: { diff: [138, 85, 52], diff2: [58, 95, 58], poly: [0, 85, 56], m1: [300, 80, 60], m2: [262, 70, 58], cont: [0, 0, 12] },
+    logic: [], sram: [], accent: [], wire: [[300, 80, 60]], logicGap: 0,
+    pad: [0, 0, 38], padStyle: 'square', ring: [[300, 60, 40]], io: [[0, 0, 30]],
+    outline: null, grid: 0, iris: 0, edge: null,
+    arch: { slice: 1 }, detail: [300, 460],
+    types: { sram: 1, logic: 5, datapath: 1, regfile: 0.5, bus: 0.3, analog: 0.2, rom: 0.6, tiles: 0 }
+  },
+  nehalem: {
+    label: 'Нехалем', nodes: [45, 32],
+    sub: [60, 35, 32], core: [55, 34, 40], chan: [70, 40, 44],
+    logic: [[285, 25, 34], [270, 30, 40], [250, 35, 48], [60, 30, 48], [35, 45, 50], [20, 42, 45], [300, 25, 38]],
+    logicGap: 0.06, speck: 0.5,
+    sram: [[28, 55, 48], [35, 50, 52], [20, 50, 42], [265, 40, 56]],
+    accent: [[210, 60, 58], [25, 80, 45], [280, 45, 56], [190, 55, 55], [50, 70, 55]],
+    wire: [[280, 40, 66], [40, 50, 66], [200, 50, 72]],
+    pad: [270, 30, 50], padStyle: 'thin', ring: [[270, 40, 55], [60, 50, 50]], io: [[265, 35, 52], [55, 40, 52], [200, 40, 50]],
+    outline: [70, 50, 50], outlineW: 0.7, grid: 0.1, iris: 0.15, edge: 'rainbow',
+    arch: { cores: 5, slice: 0.5 }, detail: [1100, 1500],
+    types: { sram: 1, logic: 3, datapath: 2, regfile: 1.5, bus: 0.4, analog: 0.3, rom: 0.3, tiles: 0.5 }
+  },
+  willamette: {
+    label: 'Уилламетт', nodes: [180, 130],
+    sub: [225, 55, 28], core: [215, 55, 34], chan: [200, 50, 40],
+    logic: [[230, 60, 34], [220, 70, 44], [215, 55, 54], [205, 65, 60], [180, 50, 50], [48, 85, 55], [40, 80, 50], [0, 70, 50]],
+    logicGap: 0.06, speck: 0.5,
+    sram: [[175, 50, 55], [45, 90, 55], [170, 45, 60], [200, 70, 58], [50, 90, 62]],
+    accent: [[48, 95, 58], [0, 80, 55], [190, 80, 60], [215, 90, 58], [300, 50, 55], [140, 55, 50]],
+    wire: [[50, 90, 62], [0, 80, 56], [190, 70, 70]],
+    pad: [50, 80, 55], padStyle: 'thin', ring: [[280, 60, 45], [50, 90, 55]], io: [[220, 60, 48], [50, 85, 52], [280, 50, 45]],
+    outline: [190, 70, 50], outlineW: 0.8, grid: 0.06, iris: 0.12, edge: 'rainbow',
+    arch: { slice: 3, side: 2, bands: 1 }, detail: [900, 1300],
+    types: { sram: 1.3, logic: 3.5, datapath: 2, regfile: 1.2, bus: 0.6, analog: 0.4, rom: 0.4, tiles: 0.2 }
+  },
+  soc: {
+    label: 'SoC', nodes: [7, 5, 4, 3],
+    sub: [245, 55, 38], core: [248, 55, 40], chan: [250, 45, 34],
+    logic: [[255, 50, 30], [250, 55, 34], [245, 55, 38], [240, 55, 42], [255, 50, 46], [235, 55, 50]],
+    logicGap: 0.02, speck: 0.6,
+    sram: [[225, 90, 62], [222, 85, 57], [228, 90, 67], [285, 45, 34]],
+    accent: [[225, 90, 62], [285, 45, 38], [30, 90, 60], [340, 70, 74], [150, 40, 40]],
+    wire: [[30, 90, 62], [225, 80, 72]],
+    pad: [30, 70, 72], padStyle: 'thin', ring: [[30, 90, 60], [340, 60, 76]], io: [[50, 80, 70], [340, 60, 76], [120, 40, 62]],
+    outline: [28, 95, 58], outlineW: 1.1, grid: 0.04, iris: 0.06, edge: null, corners: true,
+    arch: { slice: 3, cores: 1 }, detail: [1200, 1600],
+    types: { sram: 0.8, logic: 1.5, datapath: 0.2, regfile: 0.3, bus: 0.2, analog: 0.3, rom: 0.2, tiles: 4 }
+  }
+};
+const STYLE_KEYS = Object.keys(STYLES);
+
+// ---------- floorplan (die units: long side = 1) ----------
+let F;   // generation context: style, feature unit, channel probability
+
+const leaf = (r, type, seed) => ({ x: r.x, y: r.y, w: r.w, h: r.h, type: type || null, seed: seed || newSeed() });
+
+// cut rect into pieces side by side (vert = cuts are vertical lines) with gaps between
+function cutAlong(r, vert, parts, gap) {
+  const sum = parts.reduce((a, b) => a + b, 0);
+  const len = (vert ? r.w : r.h) - gap * (parts.length - 1);
+  let p = vert ? r.x : r.y;
+  return parts.map(f => {
+    const s = len * f / sum;
+    const q = vert ? { x: p, y: r.y, w: s, h: r.h } : { x: r.x, y: p, w: r.w, h: s };
+    p += s + gap;
+    return q;
+  });
+}
+const gapBetween = (a, b, vert) => vert
+  ? { x: a.x + a.w, y: a.y, w: b.x - a.x - a.w, h: a.h, dir: 'v' }
+  : { x: a.x, y: a.y + a.h, w: a.w, h: b.y - a.y - a.h, dir: 'h' };
+
+function pickType(b) {
+  const T = F.st.types, ar = Math.max(b.w, b.h) / Math.min(b.w, b.h), a = b.w * b.h;
+  return pickW({
+    sram: T.sram * (a > 0.015 ? 2 : a > 0.004 ? 1 : 0.3) * (ar < 4 ? 1 : 0.3),
+    logic: T.logic * (a > 0.003 ? 1 : 0.4),
+    datapath: T.datapath * (ar > 1.4 ? 1.5 : 0.6) * (a > 0.003 ? 1 : 0.3) * (a > 0.03 ? 0.2 : 1),
+    regfile: T.regfile * (a < 0.01 ? 1.2 : 0.3),
+    bus: T.bus * (ar > 4 ? 4 : ar > 2.5 ? 0.8 : 0) * (a > 0.02 ? 0.1 : 1),
+    analog: T.analog * (a < 0.008 && ar < 2 ? 1.5 : 0.1),
+    rom: T.rom * (a < 0.01 ? 1 : 0.2),
+    tiles: T.tiles * (a > 0.006 ? 1.2 : 0.4)
+  });
+}
+
+// recursive guillotine partition
+function sliceFill(r, depth, out, o = {}) {
+  const min = o.min || 0.04;
+  const cv = r.w > min * 2.2, ch = r.h > min * 2.2;
+  if (depth <= 0 || (!cv && !ch) || (!o.top && rng() < 0.1)) { out.blocks.push(leaf(r)); return; }
+  const vert = cv && ch
+    ? rng() < (o.pref === 'v' ? 0.8 : o.pref === 'h' ? 0.2 : r.w * r.w / (r.w * r.w + r.h * r.h))
+    : cv;
+  const len = vert ? r.w : r.h;
+  // repeated identical units: cache ways, execution slices
+  if (depth <= 3 && rng() < 0.14) {
+    const k = RI(2, 4), g = F.uf * R(0.8, 2.5), s = (len - g * (k - 1)) / k;
+    if (s > min * 0.7) {
+      const seed = newSeed(), type = pickType(vert ? { w: s, h: r.h } : { w: r.w, h: s });
+      for (const q of cutAlong(r, vert, Array(k).fill(1), g)) out.blocks.push(leaf(q, type, seed));
+      return;
+    }
+  }
+  const t = clamp(pick([0.5, 0.5, 1 / 3, 2 / 3, 0.25, 0.75, 0.4, 0.6]) + R(-0.03, 0.03), 0.18, 0.82);
+  const wide = rng() < F.chanP;
+  const g = F.uf * (wide ? R(3, 8) : R(0.6, 1.6));
+  const [A, B] = cutAlong(r, vert, [t, 1 - t], g);
+  if (wide) out.chans.push(gapBetween(A, B, vert));
+  const o2 = { ...o, top: false };
+  sliceFill(A, depth - 1 - (rng() < 0.25 ? 1 : 0), out, o2);
+  sliceFill(B, depth - 1 - (rng() < 0.25 ? 1 : 0), out, o2);
+}
+
+const ARCH = {
+  slice(core, out) { sliceFill(core, RI(4, 6), out, { top: true }); },
+
+  // horizontal bands separated by routing channels, cache bands on top
+  bands(core, out) {
+    const n = RI(3, 6), g = F.uf * R(2, 5);
+    const bands = cutAlong(core, false, Array.from({ length: n }, () => R(0.6, 1.4)), g);
+    const cacheTop = rng() < 0.65 ? RI(1, 2) : 0;
+    bands.forEach((r, i) => {
+      if (i < n - 1) out.chans.push(gapBetween(r, bands[i + 1], false));
+      if (i < cacheTop) {
+        const seed = rng() < 0.4 ? newSeed() : 0;
+        for (const q of cutAlong(r, true, Array.from({ length: RI(3, 7) }, () => R(0.5, 1.5)), F.uf * R(0.8, 2)))
+          out.blocks.push(rng() < 0.85 ? leaf(q, 'sram', seed) : leaf(q, pick(['logic', 'datapath'])));
+      } else sliceFill(r, RI(2, 4), out, { pref: 'v', top: true });
+    });
+  },
+
+  // big cache on one side: two identical halves around a tag strip
+  side(core, out) {
+    const side = pick(['l', 'r', 't', 'b']), f = R(0.28, 0.45), g = F.uf * R(2, 6);
+    const vert = side === 'l' || side === 'r';
+    let [C, Rr] = cutAlong(core, vert, [f, 1 - f], g);
+    if (side === 'r' || side === 'b') [C, Rr] = cutAlong(core, vert, [1 - f, f], g).reverse();
+    out.chans.push(side === 'l' || side === 't' ? gapBetween(C, Rr, vert) : gapBetween(Rr, C, vert));
+    if (rng() < 0.3) out.blocks.push(leaf(C, 'sram'));
+    else {
+      const m = R(0.06, 0.14), seed = newSeed();
+      const [a, b, c] = cutAlong(C, !vert, [(1 - m) / 2, m, (1 - m) / 2], F.uf * R(0.8, 2));
+      out.blocks.push(leaf(a, 'sram', seed), leaf(b, pick(['logic', 'datapath', 'regfile', 'bus'])), leaf(c, 'sram', seed));
+    }
+    sliceFill(Rr, RI(4, 6), out, { top: true });
+  },
+
+  // multi-core: uncore strip, row(s) of identical mirrored cores, shared cache slices
+  cores(core, out) {
+    const n = pick([2, 4, 4, 6, 8]), rows = n >= 6 && rng() < 0.35 ? 2 : 1, perRow = n / rows;
+    const g = F.uf * R(2, 4), ft = R(0.07, 0.12);
+    const [top, rest] = cutAlong(core, false, [ft, 1 - ft], g);
+    out.chans.push(gapBetween(top, rest, false));
+    sliceFill(top, 2, out, { pref: 'v', min: 0.02, top: true });
+    const fc = rows === 1 ? R(0.52, 0.66) : R(0.3, 0.36);
+    const bands = rows === 1 ? cutAlong(rest, false, [fc, 1 - fc], g) : cutAlong(rest, false, [fc, 1 - 2 * fc, fc], g);
+    const coreBands = rows === 1 ? [bands[0]] : [bands[0], bands[2]], cacheR = bands[1];
+    const mid = perRow % 2 === 0 && rng() < 0.7, wm = R(0.06, 0.12), s = mid ? (1 - wm) / perRow : 1 / perRow;
+    const parts = mid ? [...Array(perRow / 2).fill(s), wm, ...Array(perRow / 2).fill(s)] : Array(perRow).fill(s);
+    const split = r => {
+      const q = cutAlong(r, true, parts, g), m = mid ? q.splice(perRow / 2, 1)[0] : null;
+      return { cells: q, mid: m };
+    };
+    let grp = null;
+    coreBands.forEach((band, bi) => {
+      const { cells, mid: m } = split(band);
+      if (!grp) {
+        grp = { w: cells[0].w, h: cells[0].h, blocks: [], chans: [], inst: [] };
+        sliceFill({ x: 0, y: 0, w: grp.w, h: grp.h }, RI(3, 5), grp, { top: true, min: 0.025 });
+        out.groups.push(grp);
+      }
+      cells.forEach((c, i) => grp.inst.push({ x: c.x, y: c.y, fx: i % 2 === 1, fy: bi === 1 }));
+      if (m) sliceFill(m, 3, out, { pref: 'h', min: 0.02, top: true });
+    });
+    const { cells, mid: m } = split(cacheR), seed = newSeed();
+    for (const c of cells) out.blocks.push(leaf(c, 'sram', seed));
+    if (m) sliceFill(m, 2, out, { min: 0.02, top: true });
+    grp.n = n;
+  }
+};
+
+function genChip(seed, styleName) {
+  rng = mulberry32(seed);
+  const st = STYLES[styleName];
+  const aspect = parseFloat(pickW({ 1: 3, 1.12: 2, 0.9: 2, 1.28: 1.5, 0.8: 1.5, 1.45: 1 }));
+  const dw = aspect >= 1 ? 1 : aspect, dh = aspect >= 1 ? 1 / aspect : 1;
+  const detail = R(st.detail[0], st.detail[1]);
+  const pr = st.padStyle === 'square' ? R(0.07, 0.09) : st.padStyle === 'teeth' ? R(0.035, 0.05) : R(0.022, 0.034);
+  const core = { x: pr, y: pr, w: dw - 2 * pr, h: dh - 2 * pr };
+  const out = { blocks: [], chans: [], groups: [] };
+  F = { st, uf: 1 / detail, chanP: R(0.2, 0.6) };
+  const arch = pickW(st.arch);
+  ARCH[arch](core, out);
+  for (const b of [...out.blocks, ...out.groups.flatMap(g => g.blocks)]) if (!b.type) b.type = pickType(b);
+  const node = pick(st.nodes);
+  return {
+    seed, styleName, st, dw, dh, detail, pr, core, arch, ...out, fx: newSeed(),
+    name: pick(['RX', 'KX', 'AX', 'ZN', 'QM', 'VX', 'TX', 'NV', 'EL', 'MK', 'SR', 'PX']) + '-' + RI(100, 9999) + pick(['', '', '', 'A', 'B', 'X', 'M']),
+    node: node >= 1000 ? (node / 1000) + ' мкм' : node + ' нм',
+    ncores: out.groups[0] ? out.groups[0].n : 0
+  };
+}
+
+// ---------- block painters (pixel space; u = feature unit in px) ----------
+let st, u, NZ;
+const WHITE = '#fff', BLACK = '#000';
+
+function routing(c, r, dens = 1) {
+  const B = batch(), cols = st.wire.map(w => hsl(w));
+  const n = Math.round(r.w * r.h / (u * u * 260) * dens);
+  for (let i = 0; i < n; i++) {
+    const h = rng() < 0.55, len = R(4, 50) * u * (rng() < 0.1 ? 4 : 1), t = R(0.25, 0.6) * u;
+    B.rect(pick(cols), r.x + R(r.w) - (h ? len / 2 : 0), r.y + R(r.h) - (h ? 0 : len / 2), h ? len : t, h ? t : len);
+  }
+  B.fill(c, 0.3);
+}
+
+function speckle(c, r, amount) {
+  const B = batch(), n = Math.round(r.w * r.h / (u * u * 5) * amount);
+  for (let i = 0; i < n; i++) {
+    const s = R(0.3, 1) * u;
+    B.rect(rng() < 0.5 ? WHITE : BLACK, r.x + R(r.w), r.y + R(r.h), s, s * R(0.5, 2));
+  }
+  B.fill(c, 0.13);
+}
+
+// standard-cell rows; colour clusters follow a noise field
+function logicLeaf(c, r) {
+  const n0 = st.logic.length, win = RI(Math.min(2, n0), Math.min(4, n0)), s0 = RI(0, n0 - win);
+  const cols = st.logic.slice(s0, s0 + win).map(k => hsl(jit(k, 4, 5, 4)));
+  if (rng() < 0.2 && st.accent.length) cols.push(hsl(pick(st.accent), 1, 0, -8));
+  const vert = rng() < 0.2, rh = R(1.2, 2.4) * u, ns = R(5, 18) * u, ox = R(500), oy = R(500);
+  const gap = st.logicGap * R(0.5, 1.5), bias = R(-0.2, 0.2), spread = R(0.45, 0.9), wmax = R(3, 8);
+  const along = vert ? r.h : r.w, across = vert ? r.w : r.h, B = batch(), n = cols.length;
+  for (let a = 0; a < across; a += rh) {
+    for (let p = 0; p < along;) {
+      const cw = (0.5 + rng() * rng() * wmax) * u;
+      const lx = vert ? a : p, ly = vert ? p : a;
+      const nz = NZ(lx / ns + ox, ly / ns + oy);
+      if (rng() > gap * (1 + (1 - nz) * 1.2)) {
+        const k = Math.floor(clamp(nz + bias + (rng() - 0.5) * spread, 0, 0.999) * n);
+        if (vert) B.rect(cols[k], r.x + lx + rh * 0.08, r.y + ly, rh * 0.84, cw - 0.2 * u);
+        else B.rect(cols[k], r.x + lx, r.y + ly + rh * 0.08, cw - 0.2 * u, rh * 0.84);
+      }
+      p += cw;
+    }
+  }
+  B.fill(c);
+}
+
+// large logic regions are made of smaller placement partitions
+function splitLogic(r, d, out) {
+  if (d <= 0 || r.w < 30 * u || r.h < 30 * u || rng() < 0.15) { out.push(r); return; }
+  const vert = rng() < r.w / (r.w + r.h), t = R(0.3, 0.7);
+  const [A, B] = cutAlong(r, vert, [t, 1 - t], R(0.4, 1.2) * u);
+  splitLogic(A, d - 1, out); splitLogic(B, d - 1, out);
+}
+
+function logic(c, r, o = {}) {
+  c.fillStyle = hsl(st.core, 1, 0, -5); c.fillRect(r.x, r.y, r.w, r.h);
+  const parts = [];
+  const big = r.w * r.h > (150 * u) ** 2;
+  if (!o.nested && r.w * r.h > (70 * u) ** 2 && (big || rng() < 0.85)) splitLogic(r, RI(big ? 3 : 2, big ? 5 : 4), parts); else parts.push(r);
+  for (const q of parts) logicLeaf(c, q);
+  speckle(c, r, st.speck);
+  routing(c, r, o.wires ?? 1);
+  if (!o.nested) macros(c, r);
+}
+
+// small hard macros dropped into a logic sea
+function macros(c, r) {
+  const k = rng() < 0.55 ? RI(1, 4) : 0;
+  for (let i = 0; i < k; i++) {
+    const w = r.w * R(0.1, 0.35), h = r.h * R(0.1, 0.35);
+    if (w < 12 * u || h < 12 * u) continue;
+    const q = { x: Math.round(r.x + R(r.w - w)), y: Math.round(r.y + R(r.h - h)), w: Math.round(w), h: Math.round(h) };
+    c.fillStyle = hsl(st.core, 1, 0, -14); c.fillRect(q.x - u, q.y - u, q.w + 2 * u, q.h + 2 * u);
+    PAINT[pick(['regfile', 'regfile', 'sram', 'rom', 'datapath'])](c, q, { nested: true });
+  }
+}
+
+// SRAM: grid of sub-arrays with bitline stripes, straps, sense amps, decoder spine
+function sram(c, r) {
+  const horiz = r.w >= r.h ? rng() < 0.7 : rng() < 0.3;
+  const pal = subset(st.sram, RI(1, Math.min(3, st.sram.length))).map(k => jit(k, 4, 4, 3));
+  c.fillStyle = hsl(pal[0], 1, 0, -28, -10); c.fillRect(r.x, r.y, r.w, r.h);
+  const nx = clamp(Math.round(r.w / (R(35, 110) * u)), 1, 24), ny = clamp(Math.round(r.h / (R(30, 90) * u)), 1, 24);
+  const gx = R(1, 3) * u, gy = R(1, 3) * u, mid = rng() < 0.6 ? R(0.6, 1.4) * u : 0;
+  const spine = nx >= 2 && rng() < 0.5 ? R(2, 6) * u : 0, half = Math.ceil(nx / 2);
+  const sw = (r.w - gx * (nx + 1) - spine) / nx, sh = (r.h - gy * (ny + 1)) / ny;
+  if (sw < u || sh < u) return;
+  const by = pick(['col', 'col', 'row', 'check', 'one']);
+  const pitch = R(0.8, 1.7) * u, strap = RI(6, 20), amp = rng() < 0.6 ? R(1, 2.5) * u : 0, ampSide = rng() < 0.5;
+  const cross = rng() < 0.5 ? R(3, 12) * u : 0;
+  const B = batch(), D = batch(), L = batch(), M = batch();
+  for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+    const x = r.x + gx + i * (sw + gx) + (spine && i >= half ? spine : 0), y = r.y + gy + j * (sh + gy);
+    const ci = by === 'col' ? Math.floor(i * pal.length / nx) : by === 'row' ? Math.floor(j * pal.length / ny) : by === 'check' ? (i + j) % pal.length : 0;
+    const col = pal[ci];
+    B.rect(hsl(col, 1, 0, (i + j) % 2 ? -3 : 0), x, y, sw, sh);
+    if (horiz) {
+      for (let k = 0, yy = y; yy < y + sh; yy += pitch, k++) (k % strap ? D : L).rect(k % strap ? BLACK : WHITE, x, yy, sw, pitch * 0.45);
+      if (cross) for (let xx = x + cross; xx < x + sw; xx += cross) D.rect(BLACK, xx, y, 0.35 * u, sh);
+      if (mid) M.rect(BLACK, x + sw / 2 - mid / 2, y, mid, sh);
+    } else {
+      for (let k = 0, xx = x; xx < x + sw; xx += pitch, k++) (k % strap ? D : L).rect(k % strap ? BLACK : WHITE, xx, y, pitch * 0.45, sh);
+      if (cross) for (let yy = y + cross; yy < y + sh; yy += cross) D.rect(BLACK, x, yy, sw, 0.35 * u);
+      if (mid) M.rect(BLACK, x, y + sh / 2 - mid / 2, sw, mid);
+    }
+    if (amp) {
+      const ca = hsl(col, 1, 25, 14);
+      if (horiz) B.rect(ca, ampSide ? x : x + sw - amp, y, amp, sh);
+      else B.rect(ca, x, ampSide ? y : y + sh - amp, sw, amp);
+    }
+  }
+  B.fill(c); D.fill(c, 0.32); L.fill(c, 0.4); M.fill(c, 0.45);
+  if (amp) {   // re-draw sense amps over the stripes
+    for (let i = 0; i < nx; i++) for (let j = 0; j < ny; j++) {
+      const x = r.x + gx + i * (sw + gx) + (spine && i >= half ? spine : 0), y = r.y + gy + j * (sh + gy);
+      const ci = by === 'col' ? Math.floor(i * pal.length / nx) : by === 'row' ? Math.floor(j * pal.length / ny) : by === 'check' ? (i + j) % pal.length : 0;
+      const ca = hsl(pal[ci], 1, 25, 14);
+      if (horiz) B.rect(ca, ampSide ? x : x + sw - amp, y, amp, sh);
+      else B.rect(ca, x, ampSide ? y : y + sh - amp, sw, amp);
+    }
+    B.fill(c);
+  }
+  if (spine) {
+    const sx = r.x + gx + half * (sw + gx) - gx * 0.5;
+    logic(c, { x: sx, y: r.y + gy, w: spine, h: r.h - 2 * gy }, { nested: true, wires: 0.3 });
+  }
+}
+
+// register file: dense grid of bigger cells + decoder strip
+function regfile(c, r) {
+  const a = pick([...st.accent, ...st.sram]), b = pick(st.accent);
+  c.fillStyle = hsl(a, 1, 0, -30, -10); c.fillRect(r.x, r.y, r.w, r.h);
+  const side = pick(['l', 'r', 't', 'b']), dec = Math.min(R(3, 7) * u, (side === 'l' || side === 'r' ? r.w : r.h) * 0.3);
+  const q = { ...r }, d = { ...r };
+  if (side === 'l') { d.w = dec; q.x += dec; q.w -= dec; }
+  if (side === 'r') { d.x = r.x + r.w - dec; d.w = dec; q.w -= dec; }
+  if (side === 't') { d.h = dec; q.y += dec; q.h -= dec; }
+  if (side === 'b') { d.y = r.y + r.h - dec; d.h = dec; q.h -= dec; }
+  const cs = R(1.2, 3.2) * u, gp = cs * R(0.15, 0.3), mode = pick(['check', 'rows', 'cols', 'solid']);
+  const ca = hsl(jit(a)), cb = hsl(b, 1, 0, 8), cc = hsl(a, 1, 0, -10), B = batch();
+  for (let j = 0, y = q.y + gp; y < q.y + q.h - cs * 0.5; y += cs, j++)
+    for (let i = 0, x = q.x + gp; x < q.x + q.w - cs * 0.5; x += cs, i++) {
+      const col = mode === 'check' ? ((i + j) % 2 ? ca : cc) : mode === 'rows' ? (j % 4 === 0 ? cb : ca) : mode === 'cols' ? (i % 3 === 0 ? cb : ca) : ca;
+      B.rect(col, x, y, cs - gp, cs - gp);
+    }
+  B.fill(c);
+  logic(c, d, { nested: true, wires: 0.3 });
+}
+
+// bit-sliced datapath: rows = bits, columns = functional units
+function datapath(c, r) {
+  const horiz = r.w >= r.h ? rng() < 0.75 : rng() < 0.25;
+  const along = horiz ? r.w : r.h, across = horiz ? r.h : r.w;
+  const nb = Math.max(4, Math.min(pick([16, 32, 64, 64, 128]), Math.floor(across / (1.1 * u)))), bh = across / nb;
+  c.fillStyle = hsl(st.chan, 1, 0, -8); c.fillRect(r.x, r.y, r.w, r.h);
+  const cols = subset([...st.accent, ...st.logic, ...st.sram], RI(2, 4)), B = batch();
+  const put = (a, b, w, h, col) => horiz ? B.rect(col, r.x + a, r.y + b, w, h) : B.rect(col, r.x + b, r.y + a, h, w);
+  for (let p = 0; p < along;) {
+    const w = Math.min(along - p, R(2, 14) * u), kind = pick(['cells', 'cells', 'cells', 'split', 'split', 'bars', 'dots', 'wires']);
+    const col = pick(cols), c1 = hsl(jit(col), 1, 0, R(-10, 4)), c2 = hsl(col, 1, R(-20, 20), R(-15, 10));
+    const g = R(0.3, 0.9) * u, f = R(0.3, 0.7), iw = w - g;
+    for (let b = 0; b < nb; b++) {
+      const a0 = b * bh;
+      if (kind === 'cells') put(p, a0 + bh * 0.1, iw, bh * 0.8, b % 8 === 7 ? c2 : c1);
+      else if (kind === 'split') { put(p, a0 + bh * 0.1, iw * f - 0.3 * u, bh * 0.8, c1); put(p + iw * f, a0 + bh * 0.1, iw * (1 - f), bh * 0.8, c2); }
+      else if (kind === 'bars') put(p, a0, iw, bh * 0.45, c1);
+      else if (kind === 'dots') for (let q = p; q < p + iw - 0.8 * u; q += 1.6 * u) put(q, a0 + bh * 0.25, 0.8 * u, bh * 0.5, c1);
+      else put(p, a0 + bh * 0.4, iw, bh * 0.2, c1);
+    }
+    p += w;
+  }
+  B.fill(c);
+  speckle(c, r, st.speck * 0.5);
+  routing(c, r, 0.4);
+}
+
+// wide parallel bus with repeater rows
+function bus(c, r) {
+  const horiz = r.w >= r.h, len = horiz ? r.w : r.h, wid = horiz ? r.h : r.w;
+  c.fillStyle = hsl(st.chan, 1, 0, -10); c.fillRect(r.x, r.y, r.w, r.h);
+  const pitch = R(0.7, 1.4) * u, cols = subset(st.wire, RI(1, st.wire.length)).map(w => hsl(w, 1, 0, R(-10, 5)));
+  const B = batch(), V = batch(), cv = hsl(pick(st.accent.length ? st.accent : st.wire));
+  for (let a = pitch * 0.5, k = 0; a < wid; a += pitch, k++) {
+    const col = cols[k % cols.length];
+    if (horiz) B.rect(col, r.x, r.y + a, r.w, pitch * 0.5); else B.rect(col, r.x + a, r.y, pitch * 0.5, r.h);
+  }
+  const step = R(20, 70) * u, vs = R(1.5, 3) * u;
+  for (let p = R(step); p < len; p += step * R(0.7, 1.3))
+    for (let a = 0; a < wid; a += vs * 1.4) horiz ? V.rect(cv, r.x + p, r.y + a, vs, vs) : V.rect(cv, r.x + a, r.y + p, vs, vs);
+  B.fill(c, 0.8); V.fill(c, 0.9);
+}
+
+// PLL / analog: guard rings, capacitor arrays, sometimes a spiral inductor
+function analog(c, r) {
+  const col = pick(st.accent);
+  c.fillStyle = hsl(st.core, 1, 0, -12); c.fillRect(r.x, r.y, r.w, r.h);
+  const rings = RI(1, 3);
+  c.lineWidth = 0.6 * u;
+  for (let k = 0; k < rings; k++) {
+    const d = (1 + k * 1.5) * u;
+    c.strokeStyle = hsl(pick(st.wire), 0.85); c.strokeRect(r.x + d, r.y + d, r.w - 2 * d, r.h - 2 * d);
+  }
+  const ins = (2 + rings * 1.5) * u, q = { x: r.x + ins, y: r.y + ins, w: r.w - 2 * ins, h: r.h - 2 * ins };
+  if (q.w < 4 * u || q.h < 4 * u) return;
+  if (Math.abs(q.w / q.h - 1) < 0.4 && q.w > 36 * u && rng() < 0.6) {
+    const turns = RI(3, 6), tw = q.w / (turns * 4.4), cx = q.x + q.w / 2, cy = q.y + q.h / 2;
+    c.strokeStyle = hsl(pick(st.wire), 1, 0, 5); c.lineWidth = tw; c.lineCap = 'square';
+    c.beginPath();
+    let s = q.w / 2 - tw;
+    c.moveTo(cx - s, cy + s + tw * 2);
+    for (let t = 0; t < turns && s > tw * 2; t++) {
+      c.lineTo(cx - s, cy - s); c.lineTo(cx + s, cy - s); c.lineTo(cx + s, cy + s);
+      s -= tw * 2; c.lineTo(cx - s - tw * 2, cy + s + tw * 2);
+    }
+    c.stroke(); c.lineCap = 'butt';
+    return;
+  }
+  const n = RI(2, 5), m = Math.max(1, Math.round(n * q.h / q.w)), cw = q.w / n, ch = q.h / m, B = batch(), D = batch();
+  for (let i = 0; i < n; i++) for (let j = 0; j < m; j++) {
+    const x = q.x + i * cw + 0.8 * u, y = q.y + j * ch + 0.8 * u, w = cw - 1.6 * u, h = ch - 1.6 * u;
+    B.rect(hsl(col, 1, 0, rng() < 0.3 ? -10 : 0), x, y, w, h);
+    for (let yy = y + u; yy < y + h; yy += 1.4 * u) D.rect(BLACK, x, yy, w, 0.5 * u);
+  }
+  B.fill(c); D.fill(c, 0.18);
+}
+
+// mask ROM / fuse array: grid of bits
+function rom(c, r) {
+  const col = pick([...st.accent, ...st.sram]);
+  c.fillStyle = hsl(col, 1, 0, -30, -10); c.fillRect(r.x, r.y, r.w, r.h);
+  const p = R(1, 2) * u, on = hsl(col, 1, 0, 5), off = hsl(col, 1, 0, -14), B = batch(), dens = R(0.3, 0.7);
+  for (let y = r.y + p * 0.3; y < r.y + r.h - p * 0.5; y += p)
+    for (let x = r.x + p * 0.3; x < r.x + r.w - p * 0.5; x += p) B.rect(rng() < dens ? on : off, x, y, p * 0.6, p * 0.6);
+  B.fill(c);
+}
+
+// modern SoC look: logic sea studded with rows of small SRAM macros
+function tiles(c, r) {
+  logic(c, r, { nested: true, wires: 0.6 });
+  const pal = st.sram, main = subset(pal.slice(0, Math.max(1, pal.length - 1)), st.corners ? 3 : RI(1, 2)), odd = pal[pal.length - 1];
+  const ns = R(20, 60) * u, ox = R(500), oy = R(500), thr = R(0.3, 0.55), split = rng() < 0.6;
+  const B = batch(), D = batch();
+  for (let y = r.y + R(1, 3) * u; y < r.y + r.h - 3 * u;) {
+    const th = Math.min(R(4, 16) * u, r.y + r.h - y - u), tw0 = R(3, 12);
+    for (let x = r.x + R(1, 3) * u; x < r.x + r.w - 3 * u;) {
+      const tw = Math.min(tw0 * R(0.7, 1.3) * u, r.x + r.w - x - u);
+      if (NZ((x - r.x) / ns + ox, (y - r.y) / ns + oy) > thr) {
+        B.rect(hsl(jit(rng() < 0.85 ? pick(main) : odd, 3, 3, 4)), x, y, tw, th);
+        if (split) { D.rect(BLACK, x + tw / 2 - 0.15 * u, y, 0.3 * u, th); D.rect(BLACK, x, y + th / 2 - 0.15 * u, tw, 0.3 * u); }
+      }
+      x += tw + R(0.4, 1) * u;
+    }
+    y += th + R(0.5, 3) * u;
+  }
+  B.fill(c); D.fill(c, 0.3);
+}
+
+const PAINT = { logic, sram, regfile, datapath, bus, analog, rom, tiles };
+
+function channel(c, r) {
+  c.fillStyle = hsl(st.chan); c.fillRect(r.x, r.y, r.w, r.h);
+  const horiz = r.dir === 'h', wid = horiz ? r.h : r.w, pitch = R(0.8, 1.5) * u, B = batch();
+  const cols = st.wire.map(w => hsl(w));
+  for (let a = pitch * 0.5; a < wid - pitch * 0.3; a += pitch) {
+    const col = pick(cols);
+    if (horiz) B.rect(col, r.x, r.y + a, r.w, pitch * 0.45); else B.rect(col, r.x + a, r.y, pitch * 0.45, r.h);
+  }
+  B.fill(c, 0.5);
+}
+
+// ---------- mask-layout look (early NMOS/CMOS plots) ----------
+function lyLogic(c, r, o = {}) {
+  const L = st.layers, D = batch(), P = batch(), M1 = batch(), M2 = batch(), K = batch();
+  const cd = hsl(L.diff), cy = hsl(L.diff2), cp = hsl(L.poly), c1 = hsl(L.m1), c2 = hsl(L.m2), ck = hsl(L.cont);
+  const rh = R(14, 22) * u;
+  for (let y = r.y + u; y < r.y + r.h - rh * 0.5; y += rh) {
+    M1.rect(c1, r.x, y, r.w, 1.3 * u);
+    for (let x = r.x + R(3) * u; x < r.x + r.w;) {
+      const gw = RI(1, 4), cw = gw * R(2.6, 3.6) * u + 2 * u;
+      if (rng() < 0.12) { x += cw; continue; }
+      const dy1 = y + 2.6 * u, dh1 = rh * R(0.22, 0.3), dy2 = y + rh * 0.55, dh2 = rh * R(0.2, 0.28);
+      D.rect(cy, x, dy1, cw - u, dh1); D.rect(cd, x, dy2, cw - u, dh2);
+      const step = (cw - 2 * u) / gw;
+      for (let g = 0; g < gw; g++) {
+        const gx = x + u + g * step + step * 0.35;
+        P.rect(cp, gx, dy1 - u, 0.8 * u, dy2 + dh2 - dy1 + 2 * u);
+        if (rng() < 0.4) P.rect(cp, gx - 0.8 * u, y + rh * 0.43, 2.4 * u, 1.6 * u);
+      }
+      for (let g = 0; g <= gw; g++) {
+        const kx = x + 0.2 * u + g * step;
+        K.rect(ck, kx, dy1 + dh1 * 0.3, 0.9 * u, 0.9 * u);
+        K.rect(ck, kx, dy2 + dh2 * 0.3, 0.9 * u, 0.9 * u);
+      }
+      for (let k = RI(1, 3); k > 0; k--) M1.rect(c1, x + R(cw * 0.3), y + R(0.3, 0.75) * rh, R(0.4, 1.3) * cw, u);
+      M1.rect(c1, x + R(cw), y + rh * 0.2, u, rh * 0.6);
+      x += cw;
+    }
+  }
+  const n = Math.round(r.w * r.h / (u * u * 700) * (o.m2 ?? 1));
+  for (let i = 0; i < n; i++) {
+    const v = rng() < 0.6, len = R(10, 80) * u, x = r.x + R(r.w), y = r.y + R(r.h);
+    M2.rect(c2, x, y, v ? 1.3 * u : len, v ? len : 1.3 * u);
+    K.rect(ck, x + 0.2 * u, y + 0.2 * u, 0.9 * u, 0.9 * u);
+  }
+  D.fill(c, 0.92); P.fill(c, 0.85); M1.fill(c, 0.72); M2.fill(c, 0.62); K.fill(c);
+}
+
+// regular array: one mirrored bit-cell motif tiled as a pattern
+function lyArray(c, r) {
+  const L = st.layers, cw = Math.max(4, Math.round(R(5, 9) * u)), ch = Math.max(4, Math.round(R(5, 9) * u));
+  const pc = document.createElement('canvas'); pc.width = cw * 2; pc.height = ch * 2;
+  const p = pc.getContext('2d');
+  const motif = [
+    ['diff2', 0, R(0.1, 0.3), R(0.6, 1), R(0.2, 0.3), 0.92],
+    ['diff', R(0.1, 0.4), R(0.55, 0.7), R(0.4, 0.6), R(0.15, 0.25), 0.92],
+    ['poly', R(0.2, 0.45), 0, R(0.1, 0.15), 1, 0.85],
+    ['m1', 0, R(0.4, 0.55), 1, R(0.12, 0.18), 0.72],
+    ['m2', R(0.65, 0.85), 0, R(0.12, 0.18), 1, 0.62],
+    ['cont', R(0.1, 0.3), R(0.15, 0.3), 0.14, 0.14, 1]
+  ].filter(() => rng() < 0.85);
+  for (let q = 0; q < 4; q++) {
+    const fx = q & 1, fy = q >> 1;
+    p.save(); p.translate(fx ? cw * 2 : 0, fy ? ch * 2 : 0); p.scale(fx ? -1 : 1, fy ? -1 : 1);
+    for (const [l, x, y, w, h, a] of motif) { p.globalAlpha = a; p.fillStyle = hsl(L[l]); p.fillRect(x * cw, y * ch, w * cw, h * ch); }
+    p.restore();
+  }
+  c.save(); c.translate(r.x, r.y); c.fillStyle = c.createPattern(pc, 'repeat'); c.fillRect(0, 0, r.w, r.h); c.restore();
+  if (r.w > 40 * u && rng() < 0.7) {
+    const d = { x: r.x, y: r.y, w: Math.min(r.w * 0.25, R(12, 24) * u), h: r.h };
+    c.fillStyle = BLACK; c.fillRect(d.x, d.y, d.w, d.h);
+    lyLogic(c, d, { m2: 0.5 });
+  }
+}
+
+const LAYOUT = {
+  logic: lyLogic, tiles: lyLogic, analog: lyLogic,
+  sram: lyArray, regfile: lyArray, rom: lyArray, datapath: lyArray,
+  bus: (c, r) => channel(c, { ...r, dir: r.w >= r.h ? 'h' : 'v' })
+};
+
+function paintBlock(c, b, q) {
+  const saved = rng; rng = mulberry32(b.seed);
+  c.save(); c.beginPath(); c.rect(q.x, q.y, q.w, q.h); c.clip();
+  (st.layout ? LAYOUT : PAINT)[b.type](c, q, {});
+  c.restore();
+  if (st.outline) {
+    const lw = st.outlineW * u;
+    c.strokeStyle = hsl(st.outline, 0.9); c.lineWidth = lw;
+    c.strokeRect(q.x + lw / 2, q.y + lw / 2, q.w - lw, q.h - lw);
+  }
+  rng = saved;
+}
+
+// ---------- pad ring ----------
+// one edge drawn in local coords: x runs along the edge, y goes inward from the die edge
+function sideStrip(c, len, prp) {
+  const e = 4.5 * u, depth = prp - e - 0.8 * u, corner = prp;
+  const B = batch(), D = batch(), Pd = batch(), T = batch();
+  const pad = hsl(st.pad), padIn = hsl(st.pad, 1, 0, 14), wire = hsl(st.wire[0]);
+  const ioRow = (y0, h) => {
+    for (let x = corner; x < len - corner;) {
+      const w = Math.min(R(3, 9) * u, len - corner - x);
+      B.rect(hsl(pick(st.io), 1, 0, R(-14, 0), -15), x, y0, w - 0.4 * u, h);
+      D.rect(BLACK, x + w * 0.3, y0 + h * 0.15, w * 0.12, h * 0.7);
+      x += w;
+    }
+  };
+  if (st.padStyle === 'thin') {
+    ioRow(e, depth);
+    const ps = depth * 0.45;
+    for (let x = corner + R(10, 40) * u; x < len - corner - ps; x += R(40, 140) * u) {
+      Pd.rect(pad, x, e + depth * 0.28, ps, ps);
+      T.rect(padIn, x + ps * 0.2, e + depth * 0.28 + ps * 0.2, ps * 0.6, ps * 0.6);
+    }
+  } else if (st.padStyle === 'teeth') {
+    const pitch = R(2.4, 3.6) * u, tw = pitch * R(0.45, 0.6), tl = depth * R(0.45, 0.6);
+    for (let x = corner; x < len - corner - tw; x += pitch) Pd.rect(pad, x, e, tw, tl);
+    ioRow(e + tl + u, depth - tl - u);
+  } else {
+    const ps = depth * 0.62, pitch = ps * R(1.35, 1.8), n = Math.floor((len - 2 * corner) / pitch);
+    const x0 = (len - n * pitch) / 2 + (pitch - ps) / 2, py = e + depth * 0.06;
+    for (let i = 0; i < n; i++) {
+      const x = x0 + i * pitch;
+      Pd.rect(pad, x, py, ps, ps);
+      T.rect(padIn, x + ps * 0.12, py + ps * 0.12, ps * 0.76, ps * 0.76);
+      B.rect(wire, x + ps * 0.38, py + ps, ps * 0.24, prp - py - ps + u);
+    }
+  }
+  B.fill(c); D.fill(c, 0.25); Pd.fill(c); T.fill(c);
+}
+
+function paintRing(c, W, H, prp) {
+  c.fillStyle = hsl(st.sub); c.fillRect(0, 0, W, H);
+  c.lineWidth = 0.5 * u;
+  for (let k = 0; k < 3; k++) {
+    const d = (1.2 + k * 0.9) * u;
+    c.strokeStyle = hsl(st.ring[k % st.ring.length], 0.9); c.strokeRect(d, d, W - 2 * d, H - 2 * d);
+  }
+  const sides = [[0, 0, 0, W], [W, 0, Math.PI / 2, H], [W, H, Math.PI, W], [0, H, -Math.PI / 2, H]];
+  for (const [tx, ty, rot, len] of sides) {
+    c.save(); c.translate(tx, ty); c.rotate(rot); sideStrip(c, len, prp); c.restore();
+  }
+  // corners: analog macros on modern dies, alignment marks on old ones
+  const cs = prp - 5.5 * u;
+  [[0, 0], [W - prp, 0], [0, H - prp], [W - prp, H - prp]].forEach(([x, y], i) => {
+    const q = { x: Math.round(x + 5 * u), y: Math.round(y + 5 * u), w: Math.round(cs - 4 * u), h: Math.round(cs - 4 * u) };
+    if (st.corners) {
+      c.fillStyle = hsl(st.ring[1]); c.fillRect(q.x, q.y, q.w, q.h);
+      const s = { x: q.x + q.w * 0.2, y: q.y + q.h * 0.2, w: q.w * 0.6, h: q.h * 0.6 };
+      c.save(); c.beginPath(); c.rect(s.x, s.y, s.w, s.h); c.clip(); regfile(c, s); c.restore();
+    } else if (i === 0 || i === 3) {
+      const m = q.w * 0.5, t = Math.max(u * 0.8, q.w * 0.08);
+      c.fillStyle = hsl(st.pad, 0.85);
+      c.fillRect(q.x + q.w / 2 - m / 2, q.y + q.h / 2 - t / 2, m, t);
+      c.fillRect(q.x + q.w / 2 - t / 2, q.y + q.h / 2 - m / 2, t, m);
+    }
+  });
+}
+
+// ---------- whole die ----------
+const grain = document.createElement('canvas');
+(() => {
+  const n = 128; grain.width = grain.height = n;
+  const g = grain.getContext('2d'), img = g.createImageData(n, n);
+  for (let i = 0; i < n * n; i++) {
+    const v = Math.random() * 255;
+    img.data[i * 4] = img.data[i * 4 + 1] = img.data[i * 4 + 2] = v; img.data[i * 4 + 3] = 255;
+  }
+  g.putImageData(img, 0, 0);
+})();
+
+function overlays(c, W, H, core, chip) {
+  // global power straps
+  if (st.grid) {
+    const pitch = R(25, 60) * u, lw = R(0.6, 1.5) * u, col = hsl(pick(st.wire)), B = batch();
+    for (let y = core.y + pitch / 2; y < core.y + core.h; y += pitch) B.rect(col, core.x, y, core.w, lw);
+    if (rng() < 0.6) for (let x = core.x + pitch / 2; x < core.x + core.w; x += pitch) B.rect(col, x, core.y, lw, core.h);
+    B.fill(c, st.grid);
+  }
+  // thin-film iridescence
+  if (st.iris) {
+    c.globalCompositeOperation = 'overlay';
+    for (let i = 0; i < 7; i++) {
+      const x = R(W), y = R(H), rad = R(0.2, 0.6) * Math.max(W, H), g = c.createRadialGradient(x, y, 0, x, y, rad);
+      g.addColorStop(0, hsl([R(360), 80, 55], st.iris)); g.addColorStop(1, 'rgba(128,128,128,0)');
+      c.fillStyle = g; c.fillRect(0, 0, W, H);
+    }
+  }
+  // microscope light falloff
+  c.globalCompositeOperation = 'soft-light';
+  const ang = R(Math.PI * 2), d = Math.hypot(W, H) / 2, dx = Math.cos(ang) * d, dy = Math.sin(ang) * d;
+  const sh = c.createLinearGradient(W / 2 - dx, H / 2 - dy, W / 2 + dx, H / 2 + dy);
+  sh.addColorStop(0, 'rgba(255,255,255,0.35)'); sh.addColorStop(0.5, 'rgba(128,128,128,0)'); sh.addColorStop(1, 'rgba(0,0,0,0.35)');
+  c.fillStyle = sh; c.fillRect(0, 0, W, H);
+  // interference rainbow at the die edge
+  if (st.edge === 'rainbow') {
+    const g = c.createLinearGradient(0, 0, W, H), h0 = R(360);
+    for (let k = 0; k <= 8; k++) g.addColorStop(k / 8, hsl([h0 + k * 45, 95, 58]));
+    const frame = bw => { const p = new Path2D(); p.rect(0, 0, W, H); p.rect(bw, bw, W - 2 * bw, H - 2 * bw); return p; };
+    c.fillStyle = g;
+    c.globalCompositeOperation = 'screen'; c.globalAlpha = 0.4; c.fill(frame(9 * u), 'evenodd');
+    c.globalCompositeOperation = 'source-over'; c.globalAlpha = 0.95; c.fill(frame(2.6 * u), 'evenodd');
+    c.globalAlpha = 1;
+  }
+  c.globalCompositeOperation = 'overlay'; c.globalAlpha = 0.1;
+  c.fillStyle = c.createPattern(grain, 'repeat'); c.fillRect(0, 0, W, H);
+  c.globalCompositeOperation = 'source-over'; c.globalAlpha = 1;
+  // die marking
+  const fs = Math.max(8, (st.layout ? 5 : 3) * u), text = chip.name + '  ' + pick(['REV A', 'B1', 'C0', 'D2', 'STEP E']);
+  c.font = `600 ${fs}px ui-monospace, Menlo, monospace`; c.textBaseline = 'bottom';
+  const tw = c.measureText(text).width, tx = core.x + 2 * u, ty = core.y + core.h - 2 * u;
+  c.fillStyle = hsl(st.sub, 0.92); c.fillRect(tx - u, ty - fs - u, tw + 2 * u, fs + 2 * u);
+  c.fillStyle = hsl(st.pad, 0.9); c.fillText(text, tx, ty);
+}
+
+function renderChip(chip, Lpx) {
+  st = chip.st; NZ = makeNoise(chip.fx); u = Lpx / chip.detail;
+  const W = Math.round(chip.dw * Lpx), H = Math.round(chip.dh * Lpx);
+  const out = document.createElement('canvas'); out.width = W; out.height = H;
+  const c = out.getContext('2d');
+  rng = mulberry32(chip.fx);
+  const P = v => Math.round(v * Lpx);
+  const px = b => { const x = P(b.x), y = P(b.y); return { x, y, w: P(b.x + b.w) - x, h: P(b.y + b.h) - y, dir: b.dir }; };
+  paintRing(c, W, H, P(chip.pr));
+  const core = px(chip.core);
+  c.fillStyle = hsl(st.core, 1, 0, -10); c.fillRect(core.x, core.y, core.w, core.h);
+  for (const ch of chip.chans) channel(c, px(ch));
+  for (const b of chip.blocks) paintBlock(c, b, px(b));
+  // identical cores: paint once, stamp mirrored copies
+  for (const g of chip.groups) {
+    const gc = document.createElement('canvas'); gc.width = P(g.w); gc.height = P(g.h);
+    const gx = gc.getContext('2d');
+    gx.fillStyle = hsl(st.core, 1, 0, -10); gx.fillRect(0, 0, gc.width, gc.height);
+    for (const ch of g.chans) channel(gx, px(ch));
+    for (const b of g.blocks) paintBlock(gx, b, px(b));
+    for (const i of g.inst) {
+      c.save();
+      c.translate(P(i.x) + (i.fx ? gc.width : 0), P(i.y) + (i.fy ? gc.height : 0));
+      c.scale(i.fx ? -1 : 1, i.fy ? -1 : 1);
+      c.drawImage(gc, 0, 0);
+      c.restore();
+    }
+  }
+  overlays(c, W, H, core, chip);
+  return out;
+}
+
+// ---------- view / io ----------
+const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+const prev = document.createElement('canvas'), pctx = prev.getContext('2d');
+const hint = document.getElementById('hint'), info = document.getElementById('info');
+let W, H, DPR, chip, die, dieL = 0, fade = 0, dirty = true, lockStyle = null;
+const view = { z: 1, x: 0, y: 0 };            // zoom and pan (device px)
+const FIT = 0.86;
+
+const fitScale = () => Math.min(W * FIT / die.width, H * FIT / die.height);
+const neededL = () => clamp(Math.round(Math.min(W * FIT / chip.dw, H * FIT / chip.dh) * 2), 1200, 4096);
+
+function build() { dieL = neededL(); die = renderChip(chip, dieL); dirty = true; }
+
+const plural = n => n % 10 === 1 && n % 100 !== 11 ? 'ядро'
+  : n % 10 >= 2 && n % 10 <= 4 && (n % 100 < 12 || n % 100 > 14) ? 'ядра' : 'ядер';
+
+function show(seed, styleName) {
+  prev.width = W; prev.height = H;
+  if (die) pctx.drawImage(cv, 0, 0); else { pctx.fillStyle = '#000'; pctx.fillRect(0, 0, W, H); }
+  fade = 1;
+  chip = genChip(seed, styleName);
+  build();
+  view.z = 1; view.x = view.y = 0;
+  history.replaceState(null, '', '#' + seed + '-' + styleName);
+  const n = STYLE_KEYS.indexOf(styleName) + 1;
+  info.innerHTML = `<b>${chip.name}</b> · ${chip.node}${chip.ncores ? ' · ' + chip.ncores + ' ' + plural(chip.ncores) : ''}`
+    + `<br>${n} · ${chip.st.label}${lockStyle ? ' (закреплён)' : ''} · #${seed}`;
+}
+
+function regenerate() {
+  const s = lockStyle || STYLE_KEYS[Math.floor(Math.random() * STYLE_KEYS.length)];
+  show((Math.random() * 2147483647) | 0, s);
+}
+
+function clampView() {
+  const s = fitScale() * view.z, mx = Math.max(0, (die.width * s - W) / 2 + W * 0.1), my = Math.max(0, (die.height * s - H) / 2 + H * 0.1);
+  view.x = clamp(view.x, -mx, mx); view.y = clamp(view.y, -my, my);
+}
+
+function draw() {
+  ctx.globalAlpha = 1;
+  const bg = ctx.createRadialGradient(W / 2, H / 2, 0, W / 2, H / 2, Math.hypot(W, H) * 0.6);
+  bg.addColorStop(0, '#0e0e12'); bg.addColorStop(1, '#000');
+  ctx.fillStyle = bg; ctx.fillRect(0, 0, W, H);
+  const s = fitScale() * view.z, dw = die.width * s, dh = die.height * s;
+  const x = W / 2 - dw / 2 + view.x, y = H / 2 - dh / 2 + view.y;
+  ctx.save(); ctx.shadowColor = 'rgba(0,0,0,0.9)'; ctx.shadowBlur = 40 * DPR;
+  ctx.fillStyle = '#000'; ctx.fillRect(x, y, dw, dh); ctx.restore();
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(die, x, y, dw, dh);
+  if (fade > 0) {
+    ctx.globalAlpha = fade * fade * (3 - 2 * fade);
+    ctx.drawImage(prev, 0, 0);
+    ctx.globalAlpha = 1;
+  }
+}
+
+let last = performance.now();
+function loop(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (fade > 0) { fade = Math.max(0, fade - dt / 0.8); dirty = true; }
+  if (dirty) { draw(); dirty = false; }
+  requestAnimationFrame(loop);
+}
+
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 2);
+  W = cv.width = Math.max(2, Math.floor(innerWidth * DPR));
+  H = cv.height = Math.max(2, Math.floor(innerHeight * DPR));
+  if (chip && neededL() > dieL * 1.25) build();
+  if (die) clampView();
+  dirty = true;
+}
+
+let drag = null;
+cv.addEventListener('pointerdown', e => {
+  drag = { x: e.clientX, y: e.clientY, vx: view.x, vy: view.y, moved: false };
+  cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (!drag.moved && Math.hypot(dx, dy) > 4) { drag.moved = true; cv.classList.add('drag'); }
+  if (drag.moved) { view.x = drag.vx + dx * DPR; view.y = drag.vy + dy * DPR; clampView(); dirty = true; }
+});
+cv.addEventListener('pointerup', () => {
+  if (drag && !drag.moved) regenerate();
+  drag = null; cv.classList.remove('drag');
+});
+cv.addEventListener('pointercancel', () => { drag = null; cv.classList.remove('drag'); });
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  const z = clamp(view.z * Math.exp(-e.deltaY * (e.ctrlKey ? 0.01 : 0.0015)), 1, 16), f = z / view.z;
+  const mx = e.clientX * DPR - W / 2, my = e.clientY * DPR - H / 2;
+  view.x = mx - (mx - view.x) * f; view.y = my - (my - view.y) * f; view.z = z;
+  clampView(); dirty = true;
+}, { passive: false });
+
+function save() {
+  const m = Math.round(Math.max(die.width, die.height) * 0.06);
+  const out = document.createElement('canvas'); out.width = die.width + m * 2; out.height = die.height + m * 2;
+  const o = out.getContext('2d');
+  o.fillStyle = '#000'; o.fillRect(0, 0, out.width, out.height); o.drawImage(die, m, m);
+  out.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = `chip-${chip.name}-${chip.seed}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+
+addEventListener('resize', resize);
+addEventListener('keydown', e => {
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.code;
+  if (k === 'Space') { e.preventDefault(); regenerate(); }
+  else if (/^Digit[1-8]$/.test(k)) { lockStyle = STYLE_KEYS[+k.slice(5) - 1]; regenerate(); }
+  else if (k === 'Digit0') { lockStyle = null; regenerate(); }
+  else if (k === 'KeyZ') { view.z = 1; view.x = view.y = 0; dirty = true; }
+  else if (k === 'KeyS') save();
+  else if (k === 'KeyH') { const o = hint.style.opacity === '0' ? '1' : '0'; hint.style.opacity = o; info.style.opacity = o; }
+});
+setTimeout(() => { if (hint.style.opacity !== '0') hint.style.opacity = '0.35'; }, 6000);
+
+resize();
+const m = location.hash.match(/^#(\d+)(?:-(\w+))?/);
+if (m) show(+m[1], STYLES[m[2]] ? m[2] : STYLE_KEYS[+m[1] % STYLE_KEYS.length]);
+else regenerate();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>
