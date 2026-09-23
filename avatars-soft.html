@@ -35,14 +35,19 @@
   <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
   <div class="btns">
     <button id="bNew" title="Space">new</button>
-    <button id="bSave" title="S">save png</button>
   </div>
   <div id="controls"></div>
+  <h1 style="margin-top:16px">Экспорт PNG</h1>
+  <div id="export"></div>
+  <div class="btns">
+    <button id="bSave" title="S">лист</button>
+    <button id="bSaveAll" title="A">все по одной</button>
+  </div>
   <div class="hint">
     Space — новый набор<br>
     клик по аватарке — перегенерировать её<br>
     shift+клик — скачать одну аватарку<br>
-    S — сохранить весь лист
+    S — экспорт листа, A — все по одной
   </div>
 </div>
 <script>
@@ -277,106 +282,62 @@ function genAvatar(seed, o) {
 }
 
 // ---------- eyes ----------
-const EYE_STYLES = ['pixel', 'round', 'dot', 'sleepy', 'happy', 'line', 'cross', 'anime', 'heart', 'glasses', 'cyclops', 'big'];
+// pixel sprites, drawn looking right (mirrored for left). W = white, B = black, . = empty.
+// `a` is the row that sits on the eye line; `one` = a single eye in the gap between the pair.
+const EYES = {
+  pixel:   { a: 0, rows: ['WB'] },
+  tall:    { a: 0, rows: ['WB', 'WB'] },
+  big:     { a: 1, rows: ['WW', 'WB', 'WB'] },
+  wide:    { a: 0, rows: ['WWB', 'WWB'] },
+  dot:     { a: 0, rows: ['.B'] },
+  up:      { a: 1, rows: ['WB', 'WW'] },
+  sleepy:  { a: 1, rows: ['BB', 'WB'] },
+  tired:   { a: 0, rows: ['WB', 'BB'] },
+  shine:   { a: 0, rows: ['BW', 'BB'] },
+  closed:  { a: 0, rows: ['BB'] },
+  happy:   { a: 1, rows: ['.B.', 'B.B'] },
+  sparkle: { a: 1, rows: ['.W.', 'WBW', '.W.'] },
+  shades:  { a: 0, rows: ['WBB', 'BBB'] },
+  cyclops: { a: 1, rows: ['WWW', 'WWB', 'WWW'], one: true },
+};
+const EYE_STYLES = Object.keys(EYES);
 
 function drawEyes(c, av, ox, oy, k) {
-  const s = P.eyeSize, ink = '#000', white = '#fff';
-  const look = P.look === 'auto' ? av.look : P.look === 'right' ? 1 : P.look === 'left' ? -1 : 0;
-  const circle = (x, y, r, fill) => { c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); c.fillStyle = fill; c.fill(); };
-  const stroke = w => { c.lineWidth = w; c.lineCap = 'round'; c.lineJoin = 'round'; c.strokeStyle = ink; c.stroke(); };
-  c.save(); c.filter = 'none';
-  if (av.style === 'cyclops') {
-    const x = ox + (av.gap.x + 0.5) * k, y = oy + (av.gap.y + 0.5) * k, r = 1.3 * k * s;
-    circle(x, y, r, white); circle(x + look * r * 0.4, y, r * 0.5, ink);
-    c.restore(); return;
-  }
-  const centers = av.pairs.map(p => [ox + (p.x + 1) * k, oy + (p.y + 0.5) * k, p]);
-  for (const [x, y, p] of centers) {
-    switch (av.style) {
-      case 'pixel': {
-        const w = k * s, bx = look === 0 ? x - w / 2 : look > 0 ? x : x - w;
-        c.fillStyle = white; c.fillRect(Math.round(x - w), Math.round(y - w / 2), Math.round(w * 2), Math.round(w));
-        c.fillStyle = ink; c.fillRect(Math.round(bx), Math.round(y - w / 2), Math.round(w), Math.round(w));
-        break;
-      }
-      case 'big': { // two-cell-tall pixel eye
-        const w = k * s;
-        c.fillStyle = white; c.fillRect(Math.round(x - w), Math.round(y - w), Math.round(w * 2), Math.round(w * 2));
-        c.fillStyle = ink; c.fillRect(Math.round(x - w / 2 + look * w / 2), Math.round(y - w / 2), Math.round(w), Math.round(w * 1.5));
-        break;
-      }
-      case 'round': {
-        const r = 0.8 * k * s;
-        circle(x, y, r, white); circle(x + look * r * 0.45, y, r * 0.5, ink);
-        break;
-      }
-      case 'dot': circle(x + look * 0.25 * k * s, y, 0.42 * k * s, ink); break;
-      case 'sleepy': {
-        const r = 0.8 * k * s, bc = av.body[p.y][p.x] || [128, 128, 128];
-        circle(x, y, r, white); circle(x + look * r * 0.45, y + r * 0.2, r * 0.5, ink);
-        c.save(); c.beginPath(); c.arc(x, y, r + 0.5, 0, Math.PI * 2); c.clip();
-        c.fillStyle = `rgb(${bc.map(v => v * 0.75 | 0)})`; c.fillRect(x - r - 1, y - r - 1, 2 * r + 2, r + 1);
-        c.restore();
-        c.beginPath(); c.moveTo(x - r, y); c.lineTo(x + r, y); stroke(0.18 * k * s);
-        break;
-      }
-      case 'happy':
-        c.beginPath(); c.arc(x, y + 0.3 * k * s, 0.55 * k * s, Math.PI * 1.1, Math.PI * 1.9); stroke(0.26 * k * s);
-        break;
-      case 'line':
-        c.beginPath(); c.moveTo(x - 0.65 * k * s, y); c.lineTo(x + 0.65 * k * s, y); stroke(0.26 * k * s);
-        break;
-      case 'cross': {
-        const d = 0.42 * k * s;
-        c.beginPath(); c.moveTo(x - d, y - d); c.lineTo(x + d, y + d); c.moveTo(x + d, y - d); c.lineTo(x - d, y + d);
-        stroke(0.24 * k * s);
-        break;
-      }
-      case 'anime': {
-        const rx = 0.45 * k * s, ry = 0.75 * k * s;
-        c.beginPath(); c.ellipse(x + look * rx * 0.3, y, rx, ry, 0, 0, Math.PI * 2); c.fillStyle = ink; c.fill();
-        circle(x + look * rx * 0.3 + rx * 0.35, y - ry * 0.4, rx * 0.38, white);
-        break;
-      }
-      case 'heart': {
-        const r = 0.8 * k * s;
-        c.beginPath(); c.moveTo(x, y + r * 0.8);
-        c.bezierCurveTo(x - r * 1.3, y - r * 0.1, x - r * 0.6, y - r * 1.1, x, y - r * 0.35);
-        c.bezierCurveTo(x + r * 0.6, y - r * 1.1, x + r * 1.3, y - r * 0.1, x, y + r * 0.8);
-        c.fillStyle = '#ff1f3d'; c.fill();
-        break;
-      }
-      case 'glasses': {
-        const r = 0.85 * k * s;
-        circle(x, y, r, white); circle(x + look * r * 0.4, y, r * 0.42, ink);
-        c.beginPath(); c.arc(x, y, r, 0, Math.PI * 2); stroke(0.2 * k * s);
-        break;
-      }
-    }
-  }
-  if (av.style === 'glasses') {
-    const [[x1, y1], [x2]] = centers, r = 0.85 * k * s;
-    c.beginPath(); c.moveTo(x1 + r, y1); c.lineTo(x2 - r, y1); stroke(0.2 * k * s);
-  }
-  c.restore();
+  const sp = EYES[av.style] || EYES.pixel;
+  const look = P.look === 'auto' ? av.look : P.look === 'right' ? 1 : -1;
+  const rows = look < 0 ? sp.rows.map(r => [...r].reverse().join('')) : sp.rows;
+  const u = Math.max(1, Math.round(k * P.eyeSize)), w = rows[0].length;
+  const centers = sp.one ? [[av.gap.x + 0.5, av.gap.y]] : av.pairs.map(p => [p.x + 1, p.y]);
+  centers.forEach(([cxCell, cyCell], n) => {
+    const cx = ox + cxCell * k;
+    // odd-width sprites shift half a pixel outwards so they stay on the grid and keep a gap between them
+    const left = Math.round(cx - w * u / 2 + (w % 2 && !sp.one ? (n ? 1 : -1) * u / 2 : 0));
+    const top = Math.round(oy + cyCell * k + (k - u) / 2 - sp.a * u);
+    rows.forEach((r, j) => [...r].forEach((ch, i) => {
+      if (ch === '.') return;
+      c.fillStyle = ch === 'W' ? '#fff' : '#000';
+      c.fillRect(left + i * u, top + j * u, u, u);
+    }));
+  });
 }
 
 // ---------- ui ----------
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
-const P = { grid: 3, cell: 20, gap: 3, pal: 0, dark: 0.2, jitter: 0.3, extras: 0.5,
+const P = { grid: 3, cell: 20, gap: 0, pal: 0, dark: 0.2, jitter: 0.3, extras: 0.5,
   mode: 'auto', top: 'auto', body: 'auto', face: 'auto',
-  blur: 0.6, blurMode: 'gauss', clip: 'off', eyes: 'pixel', eyeSize: 1, look: 'auto', bg: '#fbf5e6', line: '#ece4d2' };
+  blur: 0.6, blurMode: 'gauss', clip: 'on', eyes: 'pixel', eyeSize: 1, look: 'auto', bg: '#ffffff', line: '#ece4d2',
+  exSize: 480, exBg: 'color' };
 const defs = [
-  ['blur', 'размытие', 0, 4, 0.05], ['eyeSize', 'размер глаз', 0.5, 2, 0.05],
+  ['blur', 'размытие', 0, 4, 0.05], ['eyeSize', 'размер глаз', 0.5, 2, 0.5],
   ['grid', 'сетка', 1, 10, 1], ['cell', 'пиксель', 4, 48, 1], ['gap', 'зазор', 0, 20, 1],
   ['pal', 'цветов (0=авто)', 0, 7, 1], ['dark', 'тёмн. полоса', 0, 1, 0.05],
   ['jitter', 'шум', 0, 1, 0.05], ['extras', 'детали', 0, 1, 0.05],
 ];
 const selects = [
   ['blurMode', 'тип размытия', ['gauss', 'smooth', 'smooth+gauss']],
-  ['clip', 'в силуэте', ['off', 'on']],
+  ['clip', 'в силуэте', ['on', 'off']],
   ['eyes', 'глаза', ['mix', ...EYE_STYLES]],
-  ['look', 'зрачки', ['auto', 'left', 'right', 'center']],
+  ['look', 'зрачки', ['auto', 'left', 'right']],
   ['mode', 'заливка', ['auto', 'stripes', 'bands', 'gradient', 'mosaic']],
   ['top', 'макушка', ['auto', 'flat', 'spikes', 'dome', 'peak', 'ragged']],
   ['body', 'низ', ['auto', 'neck', 'round', 'shoulders']],
@@ -405,6 +366,15 @@ for (const [k, label] of [['bg', 'фон'], ['line', 'линии']]) {
   box.appendChild(row);
 }
 
+const exBox = document.getElementById('export');
+for (const [k, label, opts] of [['exSize', 'аватарка, px', [240, 480, 960, 1920]], ['exBg', 'фон', ['color', 'transparent']]]) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><select>${opts.map(v => `<option>${v}</option>`).join('')}</select><span></span>`;
+  const sel = row.querySelector('select'); sel.value = P[k];
+  sel.onchange = () => { P[k] = typeof P[k] === 'number' ? +sel.value : sel.value; };
+  exBox.appendChild(row);
+}
+
 const seedInp = document.getElementById('seed');
 let seed = randSeed(), overrides = {};
 seedInp.value = seed;
@@ -416,7 +386,7 @@ const small = document.createElement('canvas'); small.width = small.height = G;
 const sctx = small.getContext('2d');
 const layer = document.createElement('canvas'), lctx = layer.getContext('2d');
 
-function drawAvatar(c, av, ox, oy, cell) {
+function drawAvatar(c, av, ox, oy, cell, transparent = false) {
   const tile = G * cell;
   const img = sctx.createImageData(G, G);
   for (let y = 0; y < G; y++) for (let x = 0; x < G; x++) {
@@ -439,19 +409,37 @@ function drawAvatar(c, av, ox, oy, cell) {
     lctx.globalCompositeOperation = 'source-over';
   }
 
-  c.fillStyle = P.bg; c.fillRect(ox, oy, tile, tile);
+  if (!transparent) { c.fillStyle = P.bg; c.fillRect(ox, oy, tile, tile); }
   c.drawImage(layer, ox, oy);
   drawEyes(c, av, ox, oy, cell);
 }
 
-function render() {
-  const tile = G * P.cell, n = P.grid;
-  cv.width = cv.height = n * tile + (n - 1) * P.gap;
-  ctx.fillStyle = P.line; ctx.fillRect(0, 0, cv.width, cv.height);
+function drawSheet(canvas, cell, gap, transparent = false) {
+  const tile = G * cell, n = P.grid, c = canvas.getContext('2d');
+  canvas.width = canvas.height = n * tile + (n - 1) * gap;
+  if (!transparent) { c.fillStyle = P.line; c.fillRect(0, 0, canvas.width, canvas.height); }
   for (let i = 0; i < n * n; i++) {
-    const ox = (i % n) * (tile + P.gap), oy = Math.floor(i / n) * (tile + P.gap);
-    drawAvatar(ctx, genAvatar(tileSeed(i), P), ox, oy, P.cell);
+    const ox = (i % n) * (tile + gap), oy = Math.floor(i / n) * (tile + gap);
+    drawAvatar(c, genAvatar(tileSeed(i), P), ox, oy, cell, transparent);
   }
+}
+const render = () => drawSheet(cv, P.cell, P.gap);
+
+// export: avatar size is snapped to whole pixels per cell so the grid stays crisp
+const exCell = () => Math.max(1, Math.round(P.exSize / G));
+function exportAvatar(i) {
+  const c = document.createElement('canvas'), cell = exCell();
+  c.width = c.height = G * cell;
+  drawAvatar(c.getContext('2d'), genAvatar(tileSeed(i), P), 0, 0, cell, P.exBg === 'transparent');
+  download(c, `soft-head-${tileSeed(i).replace(/[^\w-]/g, '_')}.png`);
+}
+function exportSheet() {
+  const c = document.createElement('canvas'), cell = exCell();
+  drawSheet(c, cell, Math.round(P.gap * cell / P.cell), P.exBg === 'transparent');
+  download(c, `soft-heads-${seed}.png`);
+}
+async function exportAll() {
+  for (let i = 0; i < P.grid * P.grid; i++) { exportAvatar(i); await new Promise(r => setTimeout(r, 150)); }
 }
 
 function download(canvas, name) {
@@ -466,21 +454,19 @@ cv.addEventListener('click', e => {
   const col = Math.floor(px / step), row = Math.floor(py / step);
   if (col >= P.grid || row >= P.grid) return;
   const i = row * P.grid + col;
-  if (e.shiftKey) {
-    const c = document.createElement('canvas'), cell = Math.max(P.cell, 32);
-    c.width = c.height = G * cell;
-    drawAvatar(c.getContext('2d'), genAvatar(tileSeed(i), P), 0, 0, cell);
-    download(c, `soft-head-${tileSeed(i).replace(/[^\w-]/g, '_')}.png`);
-  } else { overrides[i] = randSeed(); render(); }
+  if (e.shiftKey) exportAvatar(i);
+  else { overrides[i] = randSeed(); render(); }
 });
 document.getElementById('bNew').onclick = newSet;
 document.getElementById('bDice').onclick = newSet;
-document.getElementById('bSave').onclick = () => download(cv, `soft-heads-${seed}.png`);
+document.getElementById('bSave').onclick = exportSheet;
+document.getElementById('bSaveAll').onclick = exportAll;
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
   if (e.code === 'Space') { e.preventDefault(); newSet(); }
   else if (e.code === 'KeyR') newSet();
-  else if (e.code === 'KeyS') download(cv, `soft-heads-${seed}.png`);
+  else if (e.code === 'KeyS') exportSheet();
+  else if (e.code === 'KeyA') exportAll();
 });
 render();
 </script>
