@@ -1,0 +1,1040 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painted Ridges</title>
+<style>
+  :root { --bg:#0e0e0e; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#e46fa6; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; background:#fff; }
+  #stage.checker { background: repeating-conic-gradient(#e6e6e6 0 25%, #fff 0 50%) 0 0/20px 20px; }
+  #cv { position:absolute; inset:0; width:100%; height:100%; display:block; }
+  #bar { position:absolute; left:0; bottom:0; height:2px; width:0; background:var(--acc); transition:opacity .4s; }
+  #panel { width:290px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 92px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  .pals { display:grid; grid-template-columns: repeat(4, 1fr); gap:5px; margin:6px 0; }
+  .pal { position:relative; border:1px solid #2c2c2c; background:#0c0c0c; padding:3px; cursor:pointer; min-width:0; }
+  .pal:hover { border-color:#555; }
+  .pal.on { border-color:var(--acc); }
+  .pal canvas { width:100%; height:22px; display:block; }
+  .pal span { display:block; font-size:10px; color:var(--dim); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pal.on span { color:var(--fg); }
+  .pal .x { position:absolute; top:-1px; right:3px; color:#ccc; font-weight:400; display:none; }
+  .pal:hover .x { display:block; }
+  .zhead { color:var(--dim); margin:10px 0 4px; }
+  .zhead b { color:var(--fg); font-weight:400; }
+  .zrow { display:grid; grid-template-columns: 44px 1fr 92px 20px; gap:5px; align-items:center; margin:3px 0; }
+  .zrow label { color:var(--dim); font-size:11px; }
+  .zrow canvas { width:100%; height:14px; display:block; }
+  .zrow select { padding:2px 3px; font-size:11px; }
+  .zrow button { padding:1px 0; flex:none; }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas><div id="bar"></div></div>
+<div id="panel">
+  <h1>Painted ridges</h1>
+  <div class="btns">
+    <button id="bNew" title="N">новый пейзаж</button>
+    <button id="bStyle" title="M">случайный стиль</button>
+    <button id="bRedraw" title="R">перемазать</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>seed</label><input type="text" id="seed"><span></span></div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Карта высот — «эродированный» value-noise с аналитическими производными, смешанный с ridged-шумом,
+    плюс несколько острых пиков с гребнями. Рельеф проецируется в перспективе и рисуется полосами
+    от дальних к ближним (painter's algorithm): сначала тёмная подложка полосы, потом тропы,
+    потом мазки — кусты с веерами светлых стволов, а на крутых и выпуклых местах голые розовые
+    склоны со штрихами по линии падения. Цвет — градиент-карта: освещённость выбирает тон,
+    низкочастотный шум — «зону» палитры, пестрота разбрасывает соседние зоны по кустам.
+    Туман ниже рваного уровня просто не рисуется — горы остаются вырезанными на фоне.<br><br>
+    Палитра — набор градиентов-зон плюс градиенты для голых склонов и теней. Плитку можно выбрать,
+    любую зону заменить, «сгенерировать» строит новую в OKLCH по цветовой схеме
+    (аналог, контраст, триада, сплит, радуга, моно). Разброс: каждый куст получает свой сдвиг тона
+    и яркости, зоны перемешиваются, цвет может зависеть от высоты и ориентации склона.<br><br>
+    N — новый · M — стиль · P — палитра · R — перемазать · S — PNG
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const mix = (a, b, t) => a + (b - a) * t;
+const smooth = (a, b, x) => { x = clamp((x - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); };
+const TAU = Math.PI * 2, DEG = Math.PI / 180;
+
+// ---------- noise ----------
+let NSEED = 0;
+function hashi(ix, iy) {
+  let h = (Math.imul(ix, 0x27d4eb2d) ^ Math.imul(iy, 0x165667b1) ^ NSEED) | 0;
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b);
+  h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return (h ^ (h >>> 16)) >>> 0;
+}
+const GX16 = new Float32Array(16), GY16 = new Float32Array(16);
+for (let k = 0; k < 16; k++) { GX16[k] = Math.cos(k / 16 * TAU + 0.2); GY16[k] = Math.sin(k / 16 * TAU + 0.2); }
+
+// градиентный шум, ~[-1, 1]
+function gnoise(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy;
+  const ux = fx * fx * fx * (fx * (fx * 6 - 15) + 10), uy = fy * fy * fy * (fy * (fy * 6 - 15) + 10);
+  let h = hashi(ix, iy) >>> 28; const a = GX16[h] * fx + GY16[h] * fy;
+  h = hashi(ix + 1, iy) >>> 28; const b = GX16[h] * (fx - 1) + GY16[h] * fy;
+  h = hashi(ix, iy + 1) >>> 28; const c = GX16[h] * fx + GY16[h] * (fy - 1);
+  h = hashi(ix + 1, iy + 1) >>> 28; const d = GX16[h] * (fx - 1) + GY16[h] * (fy - 1);
+  return 1.4 * (a + (b - a) * ux + (c - a) * uy + (a - b - c + d) * ux * uy);
+}
+// value noise с производными (для «эрозии» в духе iq)
+let NDX = 0, NDY = 0;
+function vnoised(x, y) {
+  const ix = Math.floor(x), iy = Math.floor(y), fx = x - ix, fy = y - iy;
+  const ux = fx * fx * fx * (fx * (fx * 6 - 15) + 10), uy = fy * fy * fy * (fy * (fy * 6 - 15) + 10);
+  const dux = 30 * fx * fx * (fx * (fx - 2) + 1), duy = 30 * fy * fy * (fy * (fy - 2) + 1);
+  const a = hashi(ix, iy) / 4294967296, b = hashi(ix + 1, iy) / 4294967296;
+  const c = hashi(ix, iy + 1) / 4294967296, d = hashi(ix + 1, iy + 1) / 4294967296;
+  const k1 = b - a, k2 = c - a, k4 = a - b - c + d;
+  NDX = 2 * dux * (k1 + k4 * uy); NDY = 2 * duy * (k2 + k4 * ux);
+  return -1 + 2 * (a + k1 * ux + k2 * uy + k4 * ux * uy);
+}
+function fbm(x, y, oct) {
+  let s = 0, a = 0.5;
+  for (let i = 0; i < oct; i++) {
+    s += a * gnoise(x, y); a *= 0.5;
+    const nx = 1.6 * x - 1.2 * y + 1.7; y = 1.2 * x + 1.6 * y - 3.1; x = nx;
+  }
+  return s;
+}
+function eroded(x, y, oct) {
+  let s = 0, b = 1, dx = 0, dy = 0;
+  for (let i = 0; i < oct; i++) {
+    const n = vnoised(x, y);
+    dx += NDX; dy += NDY;
+    s += b * n / (1 + dx * dx + dy * dy); b *= 0.5;
+    const nx = 1.6 * x - 1.2 * y; y = 1.2 * x + 1.6 * y; x = nx;
+  }
+  return s;
+}
+function ridged(x, y, oct) {
+  let s = 0, a = 0.55, w = 1;
+  for (let i = 0; i < oct; i++) {
+    let n = 1 - Math.abs(gnoise(x, y)); n *= n;
+    s += n * a * w; w = clamp(n * 1.5, 0, 1); a *= 0.5;
+    const nx = 1.6 * x - 1.2 * y + 5.3; y = 1.2 * x + 1.6 * y - 2.9; x = nx;
+  }
+  return s;
+}
+
+// ---------- palettes ----------
+// каждый градиент: тень → свет, 8 опорных цветов на t = 0..1
+const RAMPS = {
+  acid:    ['#0e0b35', '#25237a', '#4b3fbf', '#9a4cc8', '#e46fa6', '#f4a35a', '#eed84a', '#fbf6c4'],
+  lime:    ['#0b1f3a', '#16406e', '#1f7b8f', '#2fa66a', '#8cc63a', '#cfdc3a', '#f3e75a', '#fdf8cf'],
+  violet:  ['#0d0a33', '#1e2a8a', '#3b4ad0', '#7a5ae0', '#b77ce6', '#ec9fd2', '#f8c7c8', '#fff0ea'],
+  teal:    ['#071d33', '#0f3f6e', '#13709a', '#1fa3a8', '#4fc79a', '#a5e07c', '#e6f08a', '#fbfce0'],
+  ember:   ['#1c0a32', '#4a1a6e', '#8a2a86', '#d0485e', '#ef7a3a', '#f5a93c', '#f8d36a', '#fff1cc'],
+  moss:    ['#10143a', '#2a2f6e', '#3f6a5a', '#6f9a3a', '#b8b83a', '#e8c850', '#f6e08a', '#fdf6d8'],
+  rose:    ['#1a1350', '#3b2d9a', '#7b4fcf', '#b86fd8', '#e98fc0', '#f6ab9c', '#fbd0a8', '#fff1e0'],
+  peach:   ['#261040', '#5a2a86', '#a0489c', '#e0708a', '#f39a7a', '#f8bc8a', '#fcdcb0', '#fff5e6'],
+  coral:   ['#1a0f3a', '#4a1d63', '#8e2f6e', '#d64f6b', '#f07a6a', '#f8a383', '#fcc9a4', '#fff0dc'],
+  ocean:   ['#06122e', '#0b2a63', '#0d4d9a', '#1478c4', '#2aa6d8', '#6fcfe4', '#b5ecef', '#effcfb'],
+  magenta: ['#1c0833', '#4d0f5e', '#8e1686', '#c92aa0', '#ec5bb8', '#f58fcd', '#fbc2e2', '#fff0f7'],
+  gold:    ['#1e0f2a', '#4a2233', '#83402c', '#bd6a24', '#e09a26', '#f2c63d', '#f9e38a', '#fffbe0'],
+  mint:    ['#061f26', '#0b3f3f', '#11684f', '#1f9463', '#4dbf7c', '#8fe0a0', '#c9f3c8', '#f3fff1'],
+  sky:     ['#0c0f3d', '#1b2a7a', '#2f55b8', '#4f86de', '#7fb2ee', '#aed2f5', '#d6ebfb', '#f7fcff'],
+  rust:    ['#1a0a1f', '#43122a', '#7a1d2a', '#b3342a', '#dc5a2e', '#ef8a45', '#f7bb78', '#fde9c9'],
+  lilac:   ['#241a45', '#43347a', '#6a55a8', '#9380c8', '#b8a6dc', '#d4c4ea', '#eadff5', '#fbf7ff'],
+  forest:  ['#07140f', '#0f2a1d', '#17452a', '#246636', '#3a8a3f', '#6aae4a', '#a9d06a', '#e6f2b0'],
+  ice:     ['#141b33', '#2a3a5e', '#46628a', '#6b8fb0', '#98b8cf', '#c3d8e5', '#e3eef4', '#fbfdff'],
+  neon:    ['#050f14', '#0a2e2a', '#0b5e3a', '#10983e', '#3fd03a', '#9bf03a', '#e2fb5a', '#fbffd0'],
+  ink:     ['#0d0d14', '#22222f', '#3a3a4c', '#565669', '#777789', '#9d9dab', '#c6c6cf', '#f1f1f4'],
+  sand:    ['#1f1624', '#43303a', '#6e4f4a', '#9a7560', '#c39f7e', '#dcc3a0', '#eee0c6', '#fcf8ef'],
+  berry:   ['#140726', '#3a0d4f', '#6a1470', '#a01f7a', '#d23b7c', '#ee6f86', '#f8a5a5', '#fdd9cf'],
+  pmint:   ['#2b3a4a', '#3f5e66', '#5b8a86', '#7fb3a2', '#a6d6bf', '#c8ead6', '#e3f5ea', '#f8fdf9'],
+  ppink:   ['#3a2a4a', '#5c4070', '#86609a', '#b384ba', '#d8a6c9', '#ecc4d6', '#f7e0e8', '#fef6f8'],
+  pblue:   ['#26304a', '#3a4c78', '#5672a3', '#7c9bc6', '#a5c0e0', '#c9dcef', '#e4eef8', '#f9fbfe'],
+  pyellow: ['#3a3448', '#5e5462', '#877d6e', '#b3a877', '#d6cc8a', '#ebe3a8', '#f6f1cd', '#fefcf0'],
+};
+const RAMP_RU = {
+  acid: 'кислота', lime: 'лайм', violet: 'фиолет', teal: 'бирюза', ember: 'угли', moss: 'мох',
+  rose: 'роза', peach: 'персик', coral: 'коралл', ocean: 'океан', magenta: 'маджента', gold: 'золото',
+  mint: 'мята', sky: 'небо', rust: 'ржавчина', lilac: 'сирень', forest: 'хвоя', ice: 'лёд', neon: 'неон',
+  ink: 'графит', sand: 'песок', berry: 'ягоды', pmint: 'пастель·мята', ppink: 'пастель·роза',
+  pblue: 'пастель·синь', pyellow: 'пастель·лимон',
+};
+// zones — цветовые зоны местности, bare — голые склоны, shade — куда уходят тени
+const PRESETS = {
+  'кислота': { zones: ['lime', 'teal', 'violet', 'acid', 'lime'], bare: 'rose', shade: 'violet' },
+  'закат':   { zones: ['ember', 'acid', 'magenta', 'ember'], bare: 'peach', shade: 'violet' },
+  'лес':     { zones: ['teal', 'lime', 'forest', 'moss', 'lime'], bare: 'rose', shade: 'ocean' },
+  'сумерки': { zones: ['violet', 'teal', 'violet', 'acid'], bare: 'rose', shade: 'violet' },
+  'охра':    { zones: ['moss', 'ember', 'gold', 'moss'], bare: 'peach', shade: 'rust' },
+  'океан':   { zones: ['ocean', 'teal', 'mint', 'sky', 'ocean'], bare: 'lilac', shade: 'ocean' },
+  'осень':   { zones: ['rust', 'gold', 'ember', 'moss', 'gold'], bare: 'peach', shade: 'berry' },
+  'неон':    { zones: ['neon', 'magenta', 'ocean', 'neon'], bare: 'violet', shade: 'violet' },
+  'ягоды':   { zones: ['berry', 'magenta', 'coral', 'violet'], bare: 'rose', shade: 'violet' },
+  'тропики': { zones: ['neon', 'teal', 'coral', 'lime'], bare: 'peach', shade: 'ocean' },
+  'пастель': { zones: ['pmint', 'ppink', 'pblue', 'pyellow'], bare: 'ppink', shade: 'pblue' },
+  'зима':    { zones: ['ice', 'sky', 'lilac', 'ice'], bare: 'ice', shade: 'sky' },
+  'ретро':   { zones: ['coral', 'teal', 'gold', 'sand'], bare: 'sand', shade: 'ocean' },
+  'радуга':  { zones: ['ember', 'gold', 'lime', 'teal', 'ocean', 'violet', 'magenta'], bare: 'rose', shade: 'violet' },
+  'пустыня': { zones: ['sand', 'gold', 'coral', 'sand'], bare: 'peach', shade: 'rust' },
+  'графит':  { zones: ['ink', 'lilac', 'ink'], bare: 'ink', shade: 'ink' },
+};
+const clonePal = p => JSON.parse(JSON.stringify(p));
+let PAL = clonePal(PRESETS['кислота']), PALNAME = 'кислота';
+let SAVED = [];
+try { SAVED = JSON.parse(localStorage.getItem('ridges.palettes') || '[]'); } catch (e) { SAVED = []; }
+const storeSaved = () => { try { localStorage.setItem('ridges.palettes', JSON.stringify(SAVED)); } catch (e) {} };
+// ссылка на градиент — имя из RAMPS или сам массив (сгенерированный)
+const rampHex = ref => typeof ref === 'string' ? (RAMPS[ref] || RAMPS.ink) : ref;
+
+function hex2rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+const rgb2hex = c => '#' + c.map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
+function rgb2hsl([r, g, b]) {
+  r /= 255; g /= 255; b /= 255;
+  const mx = Math.max(r, g, b), mn = Math.min(r, g, b), l = (mx + mn) / 2;
+  if (mx === mn) return [0, 0, l];
+  const d = mx - mn, s = l > 0.5 ? d / (2 - mx - mn) : d / (mx + mn);
+  const h = mx === r ? (g - b) / d + (g < b ? 6 : 0) : mx === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h / 6, s, l];
+}
+function hsl2rgb([h, s, l]) {
+  if (!s) return [l * 255, l * 255, l * 255];
+  const f = (p, q, t) => { t = (t % 1 + 1) % 1; return t < 1 / 6 ? p + (q - p) * 6 * t : t < 1 / 2 ? q : t < 2 / 3 ? p + (q - p) * (2 / 3 - t) * 6 : p; };
+  const q = l < 0.5 ? l * (1 + s) : l + s - l * s, p = 2 * l - q;
+  return [f(p, q, h + 1 / 3) * 255, f(p, q, h) * 255, f(p, q, h - 1 / 3) * 255];
+}
+function adjust(hex, hue, sat) {
+  const [h, s, l] = rgb2hsl(hex2rgb(hex));
+  return hsl2rgb([h + hue / 360, clamp(s * sat, 0, 1), l]);
+}
+// поворот тона вокруг серой оси (как CSS hue-rotate) — дёшево для вариантов LUT
+function hueRot(c, deg) {
+  if (!deg) return c;
+  const a = deg * DEG, co = Math.cos(a), si = Math.sin(a), [r, g, b] = c;
+  return [
+    r * (0.213 + 0.787 * co - 0.213 * si) + g * (0.715 - 0.715 * co - 0.715 * si) + b * (0.072 - 0.072 * co + 0.928 * si),
+    r * (0.213 - 0.213 * co + 0.143 * si) + g * (0.715 + 0.285 * co + 0.140 * si) + b * (0.072 - 0.072 * co - 0.283 * si),
+    r * (0.213 - 0.213 * co - 0.787 * si) + g * (0.715 - 0.715 * co + 0.715 * si) + b * (0.072 + 0.928 * co + 0.072 * si)];
+}
+function sampleRamp(stops, t) {
+  const f = clamp(t, 0, 1) * (stops.length - 1), i = Math.min(stops.length - 2, f | 0), u = f - i;
+  const a = stops[i], b = stops[i + 1];
+  return [mix(a[0], b[0], u), mix(a[1], b[1], u), mix(a[2], b[2], u)];
+}
+
+// ---------- palette generator (OKLCH) ----------
+function oklch(L, C, h) {
+  const hr = h * DEG;
+  for (let it = 0; ; it++) {
+    const a = C * Math.cos(hr), b = C * Math.sin(hr);
+    const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+    const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+    const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+    const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+      -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+      -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+    if (it > 10 || rgb.every(v => v >= -0.002 && v <= 1.002))
+      return rgb.map(v => { v = clamp(v, 0, 1); return 255 * (v <= 0.0031308 ? 12.92 * v : 1.055 * Math.pow(v, 1 / 2.4) - 0.055); });
+    C *= 0.86;   // вне охвата sRGB — снижаем насыщенность, тон и светлота сохраняются
+  }
+}
+const towards = (h, target, amt) => { const d = ((target - h + 540) % 360) - 180; return h + Math.sign(d) * Math.min(Math.abs(d), amt); };
+// градиент: светлота растёт, насыщенность максимальна в середине; тон либо мягко «плывёт»
+// (тени к сине-фиолетовому, света к жёлтому), либо идёт широкой дугой через спектр
+function genRamp(h, rnd, o = {}) {
+  const sweep = o.sweep ?? rnd() < 0.35;
+  const span = sweep ? mix(90, 200, rnd()) * (rnd() < 0.5 ? -1 : 1) : 0;
+  const shift = mix(25, 70, rnd()), cmax = (o.chroma ?? mix(0.13, 0.21, rnd())) * (o.pastel ? 0.5 : 1);
+  const l0 = o.pastel ? mix(0.34, 0.44, rnd()) : mix(0.16, 0.26, rnd()), l1 = mix(0.94, 0.985, rnd());
+  const out = [];
+  for (let k = 0; k < 8; k++) {
+    const t = k / 7, L = mix(l0, l1, Math.pow(t, 0.9));
+    const C = cmax * Math.pow(Math.sin(Math.PI * mix(0.08, 0.92, t)), 0.6);
+    const hh = sweep ? h + span * (t - 0.5)
+      : t < 0.5 ? towards(h, 275, shift * (0.5 - t) * 2) : towards(h, 95, shift * (t - 0.5) * 2);
+    out.push(rgb2hex(oklch(L, C, (hh % 360 + 360) % 360)));
+  }
+  return out;
+}
+const SCHEMES = ['аналог', 'контраст', 'триада', 'сплит', 'радуга', 'моно'];
+function genPalette(rnd, scheme = SCHEMES[rnd() * SCHEMES.length | 0]) {
+  const h0 = rnd() * 360, nz = 3 + (rnd() * 3 | 0), pastel = rnd() < 0.15, hues = [];
+  const step = mix(18, 40, rnd());
+  for (let k = 0; k < nz; k++) {
+    const j = (rnd() - 0.5);
+    const h = scheme === 'аналог' ? h0 + (k - (nz - 1) / 2) * step
+      : scheme === 'контраст' ? h0 + (k % 2) * 180 + j * 30
+      : scheme === 'триада' ? h0 + (k % 3) * 120 + j * 20
+      : scheme === 'сплит' ? h0 + [0, 150, 210][k % 3] + j * 20
+      : scheme === 'радуга' ? h0 + k * 360 / nz
+      : h0 + j * 24;
+    hues.push((h % 360 + 360) % 360);
+  }
+  const bh = rnd() < 0.55 ? mix(315, 360, rnd()) : h0 + 180 + (rnd() - 0.5) * 60;
+  return {
+    zones: hues.map(h => genRamp(h, rnd, { pastel })),
+    bare: genRamp((bh % 360 + 360) % 360, rnd, { sweep: false, chroma: mix(0.09, 0.15, rnd()), pastel }),
+    shade: genRamp(mix(235, 305, rnd()), rnd, { sweep: false }),
+    scheme,
+  };
+}
+
+// ---------- colour LUT ----------
+// строки цвета заранее: [вариант оттенка][зона × тон]
+const TQ = 72, RS = 5, NV = 5;
+let VEGV = [], BAREV = [], VEG = [], BARE = [], CV = [], CB = [], NZ = 1;
+function buildLUT() {
+  const conv = ref => rampHex(ref).map(h => adjust(h, P.hue, P.sat));
+  const zones = PAL.zones.map(conv), bare = conv(PAL.bare), shade = conv(PAL.shade || PAL.zones[0]);
+  NZ = zones.length;
+  const nr = (NZ - 1) * RS + 1, bv = [], bb = [];
+  for (let ri = 0; ri < nr; ri++) {
+    const r = ri / RS, k0 = Math.min(NZ - 1, r | 0), k1 = Math.min(NZ - 1, k0 + 1), fr = r - k0;
+    for (let ti = 0; ti < TQ; ti++) {
+      const t = ti / (TQ - 1);
+      const a = sampleRamp(zones[k0], t), b = sampleRamp(zones[k1], t), sh = sampleRamp(shade, t);
+      const ks = P.shade * (1 - smooth(0.12, 0.72, t));
+      const c = [0, 1, 2].map(q => mix(mix(a[q], b[q], fr), sh[q], ks));
+      const br = sampleRamp(bare, t);
+      bv.push(c); bb.push([0, 1, 2].map(q => mix(c[q], br[q], P.bareMix)));
+    }
+  }
+  const str = c => `rgb(${clamp(c[0], 0, 255) | 0},${clamp(c[1], 0, 255) | 0},${clamp(c[2], 0, 255) | 0})`;
+  VEGV = []; BAREV = [];
+  for (let v = 0; v < NV; v++) {
+    const off = (v / (NV - 1) * 2 - 1) * P.hueJit;
+    VEGV.push(bv.map(c => str(hueRot(c, off)))); BAREV.push(bb.map(c => str(hueRot(c, off))));
+  }
+  VEG = CV = VEGV[NV >> 1]; BARE = CB = BAREV[NV >> 1];
+}
+const col = (lut, r, t) => lut[((r * RS + 0.5) | 0) * TQ + ((t < 0 ? 0 : t > 1 ? 1 : t) * (TQ - 1) + 0.5 | 0)];
+
+// ---------- params ----------
+const P = {
+  seed: 20260923, style: 0,
+  amp: 1, scale: 1, sharp: 0.55, warp: 0.8, peaks: 2, massif: 0.1,
+  pitch: 14, camY: 4.5, fov: 55, pan: 0, horizon: 0.22,
+  fog: 0.35, rag: 0.5, far: 0.5,
+  size: 1, dens: 1, forest: 0.2, treeline: 0.85,
+  sun: 200, elev: 35, contrast: 1, bright: 0,
+  hue: 0, sat: 1, shade: 0.3, bareMix: 0.8,
+  hueJit: 14, tjit: 0.16, vari: 0.22, zones: 1, hgt: 0.5, orient: 0.3,
+  trails: 2, bg: 'белый', quality: 'норма',
+};
+// kind: t — пересчитать рельеф, s — только стиль/отрисовку
+const SPEC = [
+  ['Рельеф', [
+    ['amp', 'высота', 0.4, 2, 0.01, 't'], ['scale', 'масштаб', 0.4, 2.5, 0.01, 't'],
+    ['sharp', 'острота', 0, 1, 0.01, 't'], ['warp', 'извилистость', 0, 2, 0.01, 't'],
+    ['peaks', 'пики', 0, 5, 1, 't'], ['massif', 'массивы', -0.6, 0.6, 0.01, 't'],
+  ]],
+  ['Камера', [
+    ['pitch', 'наклон °', 0, 40, 0.5, 't'], ['camY', 'высота', 1.5, 10, 0.1, 't'],
+    ['fov', 'угол °', 25, 90, 1, 't'], ['horizon', 'горизонт', 0, 0.6, 0.01, 't'],
+    ['pan', 'сдвиг', -30, 30, 0.1, 't'],
+  ]],
+  ['Туман', [
+    ['fog', 'уровень', 0, 1, 0.01, 's'], ['rag', 'рваность', 0, 1.5, 0.01, 's'], ['far', 'даль', 0, 1, 0.01, 's'],
+  ]],
+  ['Растительность', [
+    ['size', 'размер', 0.3, 3, 0.01, 's'], ['dens', 'плотность', 0.2, 3, 0.01, 's'],
+    ['forest', 'лес ↔ скалы', -1, 1, 0.01, 's'], ['treeline', 'граница леса', 0, 1.2, 0.01, 's'],
+  ]],
+  ['Палитра', [
+    ['@palette'],
+    ['hue', 'сдвиг тона', -180, 180, 1, 's'], ['sat', 'насыщенность', 0, 1.6, 0.01, 's'],
+    ['shade', 'тени в цвет', 0, 1, 0.01, 's'], ['bareMix', 'голые склоны', 0, 1, 0.01, 's'],
+  ]],
+  ['Разброс цвета', [
+    ['hueJit', 'оттенок ±°', 0, 90, 1, 's'], ['tjit', 'яркость ±', 0, 0.5, 0.01, 's'],
+    ['vari', 'пестрота', 0, 1, 0.01, 's'], ['zones', 'частота зон', 0.2, 3, 0.01, 's'],
+    ['hgt', 'по высоте', -1.5, 1.5, 0.01, 's'], ['orient', 'по склону', -1.5, 1.5, 0.01, 's'],
+  ]],
+  ['Свет', [
+    ['sun', 'солнце °', 0, 360, 1, 's'], ['elev', 'высота солнца', 5, 85, 1, 's'],
+    ['contrast', 'контраст', 0.3, 2, 0.01, 's'], ['bright', 'яркость', -0.35, 0.35, 0.01, 's'],
+  ]],
+  ['Прочее', [
+    ['trails', 'тропы', 0, 6, 1, 's'],
+    ['bg', 'фон', ['белый', 'бумага', 'ночь', 'прозрачный'], 's'],
+    ['quality', 'качество', ['черновик', 'норма', 'максимум'], 't'],
+  ]],
+];
+const BG = { 'белый': '#ffffff', 'бумага': '#f3eee2', 'ночь': '#15122b', 'прозрачный': null };
+
+// ---------- canvas ----------
+const cv = $('cv'), ctx = cv.getContext('2d'), stage = $('stage'), bar = $('bar');
+let W = 0, H = 0, DPR = 1, CW = 0, CH = 0;
+function resize() {
+  const r = stage.getBoundingClientRect();
+  const q = { 'черновик': 0.6, 'норма': 1, 'максимум': 1.5 }[P.quality];
+  DPR = Math.min(2, window.devicePixelRatio || 1) * (P.quality === 'черновик' ? 0.5 : P.quality === 'максимум' ? 1.5 : 1);
+  DPR = Math.max(0.75, DPR);
+  CW = r.width * q; CH = r.height * q;
+  W = Math.max(64, Math.round(r.width * DPR)); H = Math.max(64, Math.round(r.height * DPR));
+  cv.width = W; cv.height = H;
+}
+
+// ---------- terrain ----------
+function makeCam() {
+  const p = P.pitch * DEG;
+  const f = (Math.max(W, H * 1.25) / 2) / Math.tan(P.fov * DEG / 2);
+  return { cp: Math.cos(p), sp: Math.sin(p), f, cy: H * P.horizon + f * Math.tan(p),
+    camY: P.camY, cx: P.pan, zNear: 2, zFar: 44 };
+}
+
+function makeHeight(cam) {
+  const rng = mulberry(P.seed ^ 0x5bd1e995);
+  const ox = rng() * 400 - 200, oz = rng() * 400 - 200;
+  const sc = 0.19 / P.scale, A = 3.8 * P.amp;
+  const peaks = [];
+  for (let k = 0; k < P.peaks; k++) {
+    const z = k === 0 ? mix(9, 16, rng()) : mix(6, 28, rng());
+    const zc = z * cam.cp + cam.camY * cam.sp;
+    const fx = k === 0 ? mix(0.22, 0.78, rng()) : rng();
+    // вершина не должна вылезать за верх кадра: максимальная высота на этой глубине
+    const g = (cam.cy - H * 0.07) / cam.f;
+    const hMax = (cam.camY + z * (g * cam.cp - cam.sp) / (cam.cp + g * cam.sp)) / A - 0.35;
+    const h = k === 0 ? mix(1.0, 1.4, rng()) : mix(0.45, 0.95, rng());
+    peaks.push({ x: cam.cx + (fx * 2 - 1) * zc * (W / 2) / cam.f, z, r: mix(4, 8, rng()) * P.scale,
+      h: Math.max(0.15, Math.min(h, hMax)) });
+  }
+  const warp = P.warp, sharp = P.sharp, mb = P.massif;
+  return (X, Z) => {
+    const x = (X + ox) * sc, z = (Z + oz) * sc;
+    const wx = warp * fbm(x * 0.55 + 3.1, z * 0.55 + 7.7, 3);
+    const wz = warp * fbm(x * 0.55 - 5.3, z * 0.55 + 1.9, 3);
+    const qx = x + wx, qz = z + wz;
+    const m = smooth(-0.35, 0.5, fbm(qx * 0.32 + 13.1, qz * 0.32 - 4.2, 3) * 1.5 + mb);
+    const e = clamp(eroded(qx, qz, 8) * 0.5 + 0.5, 0, 1.2);
+    const r = ridged(qx * 0.85 + 2.3, qz * 0.85 - 8.1, 7);
+    // передний план ниже, большие горы — в глубине
+    let h = m * (0.3 + 0.7 * m) * mix(e, r * 1.15, sharp) * mix(0.42, 1, smooth(cam.zNear, 17, Z));
+    for (let k = 0; k < peaks.length; k++) {
+      const p = peaks[k];
+      const dx = X - p.x + wx / sc * 0.35, dz = Z - p.z + wz / sc * 0.35;
+      const d = Math.sqrt(dx * dx + dz * dz) / p.r;
+      if (d < 1) { const u = 1 - d; h += p.h * u * Math.sqrt(u) * (0.45 + 0.55 * r); }
+    }
+    return h * A;
+  };
+}
+
+let TR = null;   // кэш рельефа: сетка в пирамиде видимости, высоты, градиенты, проекция
+function* buildTerrain() {
+  const cam = makeCam(), hf = makeHeight(cam);
+  const C = Math.max(60, Math.round(CW / 2.6)), R = Math.max(60, Math.round(CH / 1.9));
+  const n = C * R;
+  const X = new Float32Array(n), Z = new Float32Array(n), Hh = new Float32Array(n);
+  const GXa = new Float32Array(n), GZa = new Float32Array(n), LAP = new Float32Array(n);
+  const SX = new Float32Array(n), SY = new Float32Array(n), ZC = new Float32Array(n);
+  const FDX = new Float32Array(n), FDY = new Float32Array(n);
+  const rowHalf = new Float32Array(R);
+  const { cp, sp, f, cy, camY, cx, zNear, zFar } = cam;
+  const proj = (x, y, z, k) => {
+    const dy = y - camY, zc = z * cp - dy * sp, yc = dy * cp + z * sp;
+    ZC[k] = zc; SX[k] = W / 2 + f * (x - cx) / zc; SY[k] = cy - f * yc / zc;
+  };
+  for (let j = 0; j < R; j++) {
+    const z = zFar * Math.pow(zNear / zFar, j / (R - 1));
+    const half = (z * cp + camY * sp) * (W / 2) / f * 1.3 + 0.4;
+    rowHalf[j] = half;
+    const dx = 2 * half / (C - 1), e = Math.max(dx * 0.75, 0.004), o = j * C;
+    for (let i = 0; i < C; i++) { const x = cx - half + i * dx; X[o + i] = x; Z[o + i] = z; Hh[o + i] = hf(x, z); }
+    for (let i = 0; i < C; i++) {
+      const k = o + i, x = X[k], h = Hh[k];
+      const hl = i > 0 ? Hh[k - 1] : h, hr = i < C - 1 ? Hh[k + 1] : h;
+      const hzp = hf(x, z + e), hzm = hf(x, z - e);
+      const gx = (hr - hl) / (i > 0 && i < C - 1 ? 2 * dx : dx), gz = (hzp - hzm) / (2 * e);
+      GXa[k] = gx; GZa[k] = gz;
+      LAP[k] = (i > 0 && i < C - 1 ? (hr + hl - 2 * h) / (dx * dx) : 0) + (hzp + hzm - 2 * h) / (e * e);
+      proj(x, h, z, k);
+      // экранное направление линии падения — для штрихов на голых склонах
+      const gl = Math.hypot(gx, gz);
+      if (gl < 1e-4 || ZC[k] <= 0.05) { FDX[k] = 0; FDY[k] = 1; continue; }
+      const st = 0.02 * z, x2 = x - gx / gl * st, z2 = z - gz / gl * st, y2 = h - gl * st;
+      const dy2 = y2 - camY, zc2 = z2 * cp - dy2 * sp, yc2 = dy2 * cp + z2 * sp;
+      let fx = W / 2 + f * (x2 - cx) / zc2 - SX[k], fy = cy - f * yc2 / zc2 - SY[k];
+      const fl = Math.hypot(fx, fy) || 1; fx /= fl; fy /= fl;
+      if (fy < 0) { fx = -fx; fy = -fy; }
+      FDX[k] = fx; FDY[k] = fy;
+    }
+    if ((j & 3) === 3) yield 0.35 * j / R;
+  }
+  return { cam, hf, C, R, X, Z, Hh, GX: GXa, GZ: GZa, LAP, SX, SY, ZC, FDX, FDY, rowHalf,
+    TT: new Float32Array(n), TB: new Float32Array(n), RR: new Float32Array(n), VG: new Float32Array(n), FF: new Float32Array(n) };
+}
+
+// ---------- fog, light, zones, vegetation ----------
+function fogAt(X, Z, cam) {
+  const A = 3.8 * P.amp;
+  let fh = P.fog * A * 0.55;
+  fh += P.rag * (fbm(X * 0.5 + 91.3, Z * 0.5 - 33.1, 3) * A * 0.22 + fbm(X * 2.7 - 11.9, Z * 2.7 + 57.3, 2) * A * 0.07);
+  const zf = (Z - cam.zNear) / (cam.zFar - cam.zNear);
+  fh += smooth(mix(1.05, 0.2, P.far), 1.02, zf) * A * 1.6;
+  fh += (1 - smooth(cam.zNear, cam.zNear + 3, Z)) * A * 1.6;
+  return fh;
+}
+
+let LSX = -1;   // экранная сторона света для бликов
+function* buildAttrs(tr) {
+  const { C, R, X, Z, Hh, GX, GZ, LAP, TT, TB, RR, VG, FF, cam } = tr;
+  const az = P.sun * DEG, el = P.elev * DEG;
+  const Lx = Math.cos(az) * Math.cos(el), Ly = Math.sin(el), Lz = Math.sin(az) * Math.cos(el);
+  LSX = clamp(Lx / (Math.hypot(Lx, Lz) || 1), -1, 1);
+  const A = 3.8 * P.amp, rs = 0.085 * P.zones, band = A * 0.045;
+  const ox = -Math.sin(az), oz = Math.cos(az);   // ось «поперёк солнца» для цвета по склону
+  for (let j = 0; j < R; j++) {
+    for (let i = 0, k = j * C; i < C; i++, k++) {
+      const gx = GX[k], gz = GZ[k], h = Hh[k], x = X[k], z = Z[k];
+      const d = (-gx * Lx + Ly - gz * Lz) / Math.sqrt(gx * gx + gz * gz + 1);
+      const cvx = Math.tanh(-LAP[k] * 0.1);
+      const t = 0.1 + 0.8 * clamp((d + 0.3) / 1.25, 0, 1) + cvx * 0.12;
+      TT[k] = clamp(0.5 + (t - 0.5) * P.contrast + P.bright, 0, 1);
+      const face = (-gx * ox - gz * oz) / Math.sqrt(gx * gx + gz * gz + 1);
+      RR[k] = clamp(fbm(x * rs + 71.3, z * rs - 19.7, 3) * 1.9 + 0.5 + (h / A - 0.4) * P.hgt + face * P.orient * 0.8, 0, 1) * (NZ - 1);
+      const slope = Math.sqrt(gx * gx + gz * gz);
+      const v = fbm(x * 0.42 + 31.7, z * 0.42 - 17.3, 3) * 1.1 + P.forest * 0.9 + 0.3
+        - smooth(1.1, 2.8, slope) * 0.7
+        - smooth(P.treeline - 0.08, P.treeline + 0.2, h / (A * 1.25))
+        - Math.max(0, cvx - 0.3) * 0.5;
+      VG[k] = smooth(-0.12, 0.12, v);
+      FF[k] = (h - fogAt(x, z, cam)) / band;
+    }
+    if ((j & 7) === 7) yield 0.35 + 0.1 * j / R;
+  }
+  // подложке — сглаженный свет, иначе на крутых склонах видны полосы-фасеты
+  TB.set(TT);
+  const tmp = new Float32Array(C * R);
+  for (let pass = 0; pass < 2; pass++) {
+    for (let j = 0; j < R; j++) for (let i = 0, k = j * C; i < C; i++, k++)
+      tmp[k] = (TB[i > 0 ? k - 1 : k] + TB[k] * 2 + TB[i < C - 1 ? k + 1 : k]) * 0.25;
+    for (let j = 0; j < R; j++) for (let i = 0, k = j * C; i < C; i++, k++)
+      TB[k] = (tmp[j > 0 ? k - C : k] + tmp[k] * 2 + tmp[j < R - 1 ? k + C : k]) * 0.25;
+  }
+}
+
+// ---------- trails ----------
+let DAB = null, DABBAND = null, DABHASH = null, HC = 16;
+function buildTrails(tr, rng) {
+  const { C, R, X, Z, Hh, GX, GZ, SX, SY, ZC, FF, RR, cam, hf } = tr;
+  const { cp, sp, f, cy, camY, cx, zNear, zFar } = cam;
+  const A = 3.8 * P.amp, n = C * R, lnr = Math.log(zNear / zFar);
+  DAB = { x: [], y: [], w: [], z: [], c0: [], c1: [] };
+  DABBAND = Array.from({ length: R }, () => []);
+  DABHASH = new Map(); HC = 16 * DPR;
+  const inFrame = (x, z) => {
+    if (z < zNear + 1.2 || z > zFar * 0.92) return false;
+    const half = (z * cp + camY * sp) * (W / 2) / f * 1.3;
+    return Math.abs(x - cx) < half;
+  };
+  for (let q = 0; q < P.trails; q++) {
+    let best = -1, bh = Infinity;
+    for (let a = 0; a < 80; a++) {
+      const k = rng() * n | 0;
+      if (FF[k] < 2 || ZC[k] <= 0.1) continue;
+      if (SX[k] < W * 0.06 || SX[k] > W * 0.94 || SY[k] < H * 0.2 || SY[k] > H * 0.98) continue;
+      if (Hh[k] < bh) { bh = Hh[k]; best = k; }
+    }
+    if (best < 0) continue;
+    let x = X[best], z = Z[best], h = Hh[best], th = Math.atan2(GZ[best], GX[best]);
+    const pts = [x, z, h];
+    let top = h, stall = 0;
+    for (let s = 0; s < 1600; s++) {
+      const Ls = 0.02 * z + 0.03;
+      let bs = -Infinity, ba = th;
+      for (let c = -3; c <= 3; c++) {
+        const a = th + c * 0.3, ca = Math.cos(a), sa = Math.sin(a);
+        const nx = x + ca * Ls, nz = z + sa * Ls;
+        if (!inFrame(nx, nz)) continue;
+        const hn = hf(nx, nz);
+        if (hn < fogAt(nx, nz, cam) + A * 0.03) continue;
+        const w = Ls * 0.8, side = (hf(nx - sa * w, nz + ca * w) + hf(nx + sa * w, nz - ca * w)) * 0.5;
+        const score = -Math.abs((hn - h) / Ls - 0.3) * 2 + (hn - side) / Ls * 1.5 - Math.abs(c) * 0.05 + (rng() - 0.5) * 0.15;
+        if (score > bs) { bs = score; ba = a; }
+      }
+      if (bs === -Infinity) break;
+      th = ba;
+      const st = 0.004 * z + 0.006;
+      x += Math.cos(th) * st; z += Math.sin(th) * st; h = hf(x, z);
+      pts.push(x, z, h);
+      if (h > top + 0.01) { top = h; stall = 0; } else if (++stall > 90) break;
+    }
+    if (pts.length < 60) continue;
+    const r0 = RR[best], c0 = col(BARE, r0, 0.58), c1 = col(BARE, r0, 0.88);
+    // разбиваем на мазки с шагом ~ треть ширины
+    let px = 0, py = 0, pz = 0;
+    for (let s = 0; s < pts.length - 3; s += 3) {
+      const x0 = pts[s], z0 = pts[s + 1], y0 = pts[s + 2], x1 = pts[s + 3], z1 = pts[s + 4], y1 = pts[s + 5];
+      const dy = y0 - camY, zc = z0 * cp - dy * sp;
+      if (zc <= 0.1) continue;
+      const w = clamp(f * 0.02 / zc, 1.3 * DPR, 10 * DPR);
+      const steps = Math.max(1, Math.ceil(f * Math.hypot(x1 - x0, z1 - z0, y1 - y0) / zc / (w * 0.3)));
+      for (let u = 0; u < steps; u++) {
+        const t = u / steps, X_ = mix(x0, x1, t), Z_ = mix(z0, z1, t), Y_ = mix(y0, y1, t);
+        const dyy = Y_ - camY, zcc = Z_ * cp - dyy * sp, ycc = dyy * cp + Z_ * sp;
+        px = W / 2 + f * (X_ - cx) / zcc; py = cy - f * ycc / zcc; pz = zcc;
+        const b = clamp(Math.floor((R - 1) * Math.log(Z_ / zFar) / lnr), 0, R - 2);
+        const id = DAB.x.length;
+        DAB.x.push(px); DAB.y.push(py); DAB.w.push(w * (0.85 + rng() * 0.3)); DAB.z.push(pz);
+        DAB.c0.push(c0); DAB.c1.push(c1);
+        DABBAND[b].push(id);
+        const key = ((py / HC) | 0) * 8192 + ((px / HC) | 0);
+        let arr = DABHASH.get(key); if (!arr) DABHASH.set(key, arr = []); arr.push(id);
+      }
+    }
+  }
+}
+function trailHit(x, y, z, s) {
+  if (!DABHASH.size) return false;
+  const gx = (x / HC) | 0, gy = (y / HC) | 0;
+  for (let dy = -1; dy <= 1; dy++) for (let dx = -1; dx <= 1; dx++) {
+    const arr = DABHASH.get((gy + dy) * 8192 + gx + dx);
+    if (!arr) continue;
+    for (let q = 0; q < arr.length; q++) {
+      const id = arr[q];
+      if (Math.abs(DAB.z[id] - z) > z * 0.05) continue;
+      const rr = DAB.w[id] * 0.7 + s * 0.3, ex = DAB.x[id] - x, ey = DAB.y[id] - y;
+      if (ex * ex + ey * ey < rr * rr) return true;
+    }
+  }
+  return false;
+}
+
+// ---------- brush stamps ----------
+const BX = new Float32Array(8), BY = new Float32Array(8), BRd = new Float32Array(8);
+function circ(x, y, r) { ctx.moveTo(x + r, y); ctx.arc(x, y, r, 0, TAU); }
+
+// дерево: тёмная масса, веер светлых стволов, крона, блик со стороны солнца
+function tree(x, y, s, r, t, rnd) {
+  const wide = 0.7 + rnd() * 0.7, n = 3 + (rnd() * (2 + wide * 2) | 0), cy = y - s * (1.05 - wide * 0.15);
+  for (let k = 0; k < n; k++) {
+    const a = rnd() * TAU, d = rnd() * s * 0.3;
+    BX[k] = x + Math.cos(a) * d * 1.35 * wide; BY[k] = cy + Math.sin(a) * d * 0.8 - (k === 0 ? s * 0.12 : 0);
+    BRd[k] = s * (0.22 + rnd() * 0.15);
+  }
+  const ox = -LSX * s * 0.08, oy = s * 0.1;
+  ctx.fillStyle = col(CV, r, t - 0.36); ctx.beginPath();
+  for (let k = 0; k < n; k++) circ(BX[k] + ox, BY[k] + oy, BRd[k] * 1.12);
+  ctx.moveTo(x + s * 0.32, y - s * 0.4); ctx.ellipse(x, y - s * 0.4, s * 0.32, s * 0.4, 0, 0, TAU);
+  ctx.fill();
+  ctx.fillStyle = col(CV, r, t); ctx.beginPath();
+  for (let k = 0; k < n; k++) circ(BX[k], BY[k] - s * 0.1, BRd[k]);
+  ctx.fill();
+  const nb = 2 + (rnd() * 3 | 0);
+  ctx.strokeStyle = col(CV, r, Math.max(t + 0.45, 0.86)); ctx.lineWidth = Math.max(0.6, s * 0.05);
+  ctx.beginPath();
+  for (let q = 0; q < nb; q++) {
+    const ex = x + ((q + 0.5) / nb - 0.5) * s * 0.8 + (rnd() - 0.5) * s * 0.12;
+    const ey = cy - s * (0.02 + rnd() * 0.2);
+    ctx.moveTo(x + (rnd() - 0.5) * s * 0.06, y); ctx.quadraticCurveTo(x, y - s * 0.45, ex, ey);
+  }
+  ctx.stroke();
+  ctx.fillStyle = col(CV, r, t + 0.2); ctx.beginPath();
+  const nl = Math.min(n, 1 + (rnd() * 2 | 0));
+  for (let k = 0; k < nl; k++) circ(BX[k] + LSX * BRd[k] * 0.35, BY[k] - s * 0.1 - BRd[k] * 0.4, BRd[k] * 0.45);
+  ctx.fill();
+}
+function bush(x, y, s, r, t) {
+  ctx.fillStyle = col(CV, r, t - 0.34); ctx.beginPath(); circ(x - LSX * s * 0.08, y - s * 0.38, s * 0.46); ctx.fill();
+  ctx.fillStyle = col(CV, r, t); ctx.beginPath(); circ(x, y - s * 0.46, s * 0.38); ctx.fill();
+  if (s > 3 * DPR) { ctx.fillStyle = col(CV, r, t + 0.2); ctx.beginPath(); circ(x + LSX * s * 0.14, y - s * 0.58, s * 0.16); ctx.fill(); }
+}
+// голый склон: штрихи вдоль линии падения
+function grass(x, y, s, r, t, fx, fy, rnd) {
+  const px = -fy, py = fx;
+  ctx.lineWidth = Math.max(0.6, s * 0.16);
+  ctx.strokeStyle = col(CB, r, t + 0.12); ctx.beginPath();
+  for (let q = 0; q < 3; q++) {
+    const o = (rnd() - 0.5) * s * 0.9, len = s * (0.5 + rnd() * 0.7);
+    const x0 = x + px * o, y0 = y + py * o - s * 0.3;
+    ctx.moveTo(x0, y0); ctx.lineTo(x0 + fx * len, y0 + fy * len);
+  }
+  ctx.stroke();
+  ctx.strokeStyle = col(CB, r, t - 0.2); ctx.beginPath();
+  const o = (rnd() - 0.5) * s, len = s * (0.4 + rnd() * 0.5), x0 = x + px * o, y0 = y + py * o - s * 0.2;
+  ctx.moveTo(x0, y0); ctx.lineTo(x0 + fx * len, y0 + fy * len);
+  ctx.stroke();
+}
+
+// ---------- paint ----------
+let STAMPS = 0;
+const SMAX = 60000;
+const S_X = new Float32Array(SMAX), S_Y = new Float32Array(SMAX), S_S = new Float32Array(SMAX),
+  S_R = new Float32Array(SMAX), S_T = new Float32Array(SMAX), S_FX = new Float32Array(SMAX),
+  S_FY = new Float32Array(SMAX), S_K = new Uint8Array(SMAX), S_V = new Uint8Array(SMAX);
+let ORDER = new Uint32Array(SMAX);
+
+function* paint(tr) {
+  const { C, R, SX, SY, ZC, TT, TB, RR, VG, FF, FDX, FDY } = tr;
+  const rng = mulberry((P.seed * 31 + P.style * 7919) | 0);
+  buildTrails(tr, rng);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, W, H);
+  if (BG[P.bg]) { ctx.fillStyle = BG[P.bg]; ctx.fillRect(0, 0, W, H); }
+  ctx.lineCap = 'round'; ctx.lineJoin = 'round';
+  const unit = tr.cam.f / 120, pad = 60 * DPR * P.size, vari = P.vari * (NZ - 1) * 0.9;
+  const sizeAt = zc => clamp(P.size * unit * Math.pow(10 / zc, 0.72), 1.6 * DPR, 44 * DPR);
+  const QA = new Float32Array(C);
+  STAMPS = 0;
+  for (let b = 0; b < R - 1; b++) {
+    const j0 = b * C, j1 = j0 + C;
+    // 1. подложка полосы
+    let cur = null;
+    ctx.lineWidth = 1.1;
+    for (let i = 0; i < C - 1; i++) {
+      QA[i] = 0;
+      const a = j0 + i, bb = a + 1, c = j1 + i + 1, d = j1 + i;
+      if (ZC[a] <= 0.05 || ZC[bb] <= 0.05 || ZC[c] <= 0.05 || ZC[d] <= 0.05) continue;
+      const fmax = Math.max(FF[a], FF[bb], FF[c], FF[d]);
+      if (fmax <= 0) continue;
+      const xa = SX[a], ya = SY[a], xb = SX[bb], yb = SY[bb], xc = SX[c], yc = SY[c], xd = SX[d], yd = SY[d];
+      if (Math.max(xa, xb, xc, xd) < -pad || Math.min(xa, xb, xc, xd) > W + pad ||
+          Math.min(ya, yb, yc, yd) > H + pad || Math.max(ya, yb, yc, yd) < -pad) continue;
+      const area = 0.5 * ((xa * yb - xb * ya) + (xb * yc - xc * yb) + (xc * yd - xd * yc) + (xd * ya - xa * yd));
+      if (area <= 0) continue;           // обращена от камеры — всё равно закроется ближним
+      QA[i] = area;
+      if (Math.min(FF[a], FF[bb], FF[c], FF[d]) < 1) continue;
+      const t = (TB[a] + TB[bb] + TB[c] + TB[d]) * 0.25, r = (RR[a] + RR[bb] + RR[c] + RR[d]) * 0.25;
+      const v = (VG[a] + VG[bb] + VG[c] + VG[d]) * 0.25;
+      const color = v > 0.5 ? col(VEG, r, t - 0.3) : col(BARE, r, t - 0.04);
+      if (color !== cur) {
+        if (cur) { ctx.fill(); ctx.stroke(); }
+        cur = color; ctx.fillStyle = color; ctx.strokeStyle = color; ctx.beginPath();
+      }
+      ctx.moveTo(xa, ya); ctx.lineTo(xb, yb); ctx.lineTo(xc, yc); ctx.lineTo(xd, yd); ctx.closePath();
+    }
+    if (cur) { ctx.fill(); ctx.stroke(); }
+
+    // 2. тропы этой полосы
+    const dabs = DABBAND[b];
+    if (dabs.length) {
+      for (let pass = 0; pass < 2; pass++) {
+        let cc = null;
+        ctx.beginPath();
+        for (const id of dabs) {
+          const c = pass ? DAB.c1[id] : DAB.c0[id];
+          if (c !== cc) { if (cc) ctx.fill(); cc = c; ctx.fillStyle = c; ctx.beginPath(); }
+          circ(DAB.x[id], DAB.y[id], DAB.w[id] * (pass ? 0.3 : 0.55));
+        }
+        if (cc) ctx.fill();
+      }
+    }
+
+    // 3. мазки
+    let ns = 0;
+    for (let i = 0; i < C - 1; i++) {
+      const area = QA[i];
+      if (!area) continue;
+      const a = j0 + i, bb = a + 1, c = j1 + i + 1, d = j1 + i;
+      const s0 = sizeAt((ZC[a] + ZC[c]) * 0.5);
+      const vq = (VG[a] + VG[bb] + VG[c] + VG[d]) * 0.25;
+      const want = area / (s0 * s0) * P.dens * (1.1 + 0.9 * vq);
+      let cnt = want | 0; if (rng() < want - cnt) cnt++;
+      for (let q = 0; q < cnt && ns < SMAX; q++) {
+        const u = rng(), v = rng();
+        const wa = (1 - u) * (1 - v), wb = u * (1 - v), wc = u * v, wd = (1 - u) * v;
+        const ff = FF[a] * wa + FF[bb] * wb + FF[c] * wc + FF[d] * wd;
+        if (ff < 1 && rng() > ff) continue;
+        const x = SX[a] * wa + SX[bb] * wb + SX[c] * wc + SX[d] * wd;
+        const y = SY[a] * wa + SY[bb] * wb + SY[c] * wc + SY[d] * wd;
+        const s = s0 * (0.72 + rng() * 0.56);
+        if (x < -s * 2 || x > W + s * 2 || y - s * 1.6 > H || y < -s) continue;
+        const z = ZC[a] * wa + ZC[bb] * wb + ZC[c] * wc + ZC[d] * wd;
+        if (trailHit(x, y, z, s)) continue;
+        const vg = VG[a] * wa + VG[bb] * wb + VG[c] * wc + VG[d] * wd;
+        let r = RR[a] * wa + RR[bb] * wb + RR[c] * wc + RR[d] * wd;
+        r = clamp(r + (rng() - 0.5) * 2 * vari, 0, NZ - 1);
+        S_X[ns] = x; S_Y[ns] = y; S_S[ns] = s; S_R[ns] = r;
+        S_T[ns] = TT[a] * wa + TT[bb] * wb + TT[c] * wc + TT[d] * wd + (rng() - 0.5) * 2 * P.tjit;
+        S_V[ns] = rng() * NV | 0;
+        const veg = rng() < vg;
+        if (veg) S_K[ns] = s > 4.2 * DPR ? 0 : 1;
+        else if (rng() < 0.06) { S_K[ns] = 0; S_S[ns] = Math.max(s * 0.65, 4.3 * DPR); }
+        else {
+          S_K[ns] = 2;
+          S_FX[ns] = FDX[a] * wa + FDX[bb] * wb + FDX[c] * wc + FDX[d] * wd;
+          S_FY[ns] = FDY[a] * wa + FDY[bb] * wb + FDY[c] * wc + FDY[d] * wd;
+          const fl = Math.hypot(S_FX[ns], S_FY[ns]) || 1; S_FX[ns] /= fl; S_FY[ns] /= fl;
+        }
+        ns++;
+      }
+    }
+    for (let k = 0; k < ns; k++) ORDER[k] = k;
+    const ord = ORDER.subarray(0, ns).sort((p, q) => S_Y[p] - S_Y[q]);
+    for (let k = 0; k < ns; k++) {
+      const id = ord[k], kind = S_K[id];
+      CV = VEGV[S_V[id]]; CB = BAREV[S_V[id]];
+      if (kind === 0) tree(S_X[id], S_Y[id], S_S[id], S_R[id], S_T[id], rng);
+      else if (kind === 1) bush(S_X[id], S_Y[id], S_S[id], S_R[id], S_T[id]);
+      else grass(S_X[id], S_Y[id], S_S[id], S_R[id], S_T[id], S_FX[id], S_FY[id], rng);
+    }
+    STAMPS += ns;
+    if (b & 1) yield 0.45 + 0.55 * b / R;
+  }
+}
+
+// ---------- job runner ----------
+let job = null, pumping = false, schedT = 0, t0 = 0;
+function* run() {
+  t0 = performance.now();
+  NSEED = Math.imul(P.seed | 0, 0x9e3779b1) ^ 0x2c1b3c6d;
+  buildLUT();
+  if (!TR) TR = yield* buildTerrain();
+  yield* buildAttrs(TR);
+  yield* paint(TR);
+}
+function start() {
+  job = run();
+  bar.style.opacity = 1;
+  if (!pumping) { pumping = true; requestAnimationFrame(pump); }
+}
+function pump() {
+  const ts = performance.now();
+  let prog = 0;
+  while (job) {
+    const r = job.next();
+    if (r.done) { job = null; finish(); break; }
+    prog = r.value;
+    if (performance.now() - ts > 26) break;
+  }
+  if (job) { bar.style.width = (prog * 100).toFixed(1) + '%'; requestAnimationFrame(pump); }
+  else pumping = false;
+}
+function finish() {
+  bar.style.width = '100%'; bar.style.opacity = 0;
+  $('status').textContent = `сетка ${TR.C}×${TR.R} · мазков ${STAMPS.toLocaleString('ru')}\n` +
+    `${W}×${H}px · ${Math.round(performance.now() - t0)} мс`;
+}
+function schedule(kind, delay = 90) {
+  if (kind === 't') TR = null;
+  clearTimeout(schedT);
+  schedT = setTimeout(start, delay);
+}
+
+// ---------- ui ----------
+const inputs = {};
+function fmt(v, step) { return step >= 1 ? String(Math.round(v)) : (+v).toFixed(step < 0.1 ? 2 : 1); }
+function buildUI() {
+  const root = $('controls');
+  for (const [title, items] of SPEC) {
+    const h = document.createElement('h2'); h.textContent = title; root.appendChild(h);
+    for (const it of items) {
+      if (it[0] === '@palette') { root.appendChild(paletteBlock()); continue; }
+      const row = document.createElement('div'); row.className = 'row';
+      const lab = document.createElement('label'); lab.textContent = it[1]; row.appendChild(lab);
+      const key = it[0];
+      if (Array.isArray(it[2])) {
+        const sel = document.createElement('select');
+        for (const o of it[2]) { const op = document.createElement('option'); op.value = op.textContent = o; sel.appendChild(op); }
+        sel.value = P[key];
+        sel.onchange = () => {
+          P[key] = sel.value;
+          if (key === 'quality') resize();
+          if (key === 'bg') stage.classList.toggle('checker', !BG[P.bg]);
+          schedule(it[3]);
+        };
+        row.appendChild(sel); row.appendChild(document.createElement('span'));
+        inputs[key] = { set: v => { sel.value = v; } };
+      } else {
+        const [, , mn, mx, step, kind] = it;
+        const inp = document.createElement('input'); inp.type = 'range'; inp.min = mn; inp.max = mx; inp.step = step; inp.value = P[key];
+        const out = document.createElement('output'); out.textContent = fmt(P[key], step);
+        inp.oninput = () => {
+          P[key] = +inp.value; out.textContent = fmt(P[key], step);
+          if (key === 'hue' || key === 'sat') buildZoneEditor();
+          schedule(kind, 160);
+        };
+        row.appendChild(inp); row.appendChild(out);
+        inputs[key] = { set: v => { inp.value = v; out.textContent = fmt(v, step); } };
+      }
+      root.appendChild(row);
+    }
+  }
+  $('seed').value = P.seed;
+  $('seed').onchange = () => { P.seed = parseInt($('seed').value, 10) || 0; P.style = 0; schedule('t'); };
+}
+function setP(key, v) { P[key] = v; inputs[key]?.set(v); }
+
+function newLandscape() {
+  P.seed = Math.random() * 1e9 | 0; P.style = 0; $('seed').value = P.seed;
+  schedule('t', 0);
+}
+// ---------- palette ui ----------
+function drawRamps(cvs, ramps, adj) {
+  const g = cvs.getContext('2d'), w = cvs.width, h = cvs.height, n = ramps.length;
+  g.clearRect(0, 0, w, h);
+  ramps.forEach((ref, k) => {
+    const stops = rampHex(ref).map(x => adj ? adjust(x, P.hue, P.sat) : hex2rgb(x));
+    const y0 = Math.round(k * h / n), y1 = Math.round((k + 1) * h / n);
+    for (let x = 0; x < w; x++) {
+      const c = sampleRamp(stops, mix(0.06, 1, x / (w - 1)));
+      g.fillStyle = `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`; g.fillRect(x, y0, 1, y1 - y0);
+    }
+  });
+}
+function paletteBlock() {
+  const blk = document.createElement('div');
+  blk.innerHTML = `<div class="pals" id="pals"></div>
+    <div class="btns"><button id="bGenPal" title="P">сгенерировать</button><button id="bKeepPal">сохранить</button></div>
+    <div id="zed"></div>`;
+  blk.querySelector('#bGenPal').onclick = generatePalette;
+  blk.querySelector('#bKeepPal').onclick = savePalette;
+  return blk;
+}
+function buildPalettes() {
+  const box = $('pals'); box.innerHTML = '';
+  const add = (name, pal, saved) => {
+    const d = document.createElement('div'); d.className = 'pal' + (name === PALNAME ? ' on' : ''); d.title = name;
+    const c = document.createElement('canvas'); c.width = 120; c.height = 44; d.appendChild(c);
+    const s = document.createElement('span'); s.textContent = name; d.appendChild(s);
+    if (saved) {
+      const x = document.createElement('b'); x.className = 'x'; x.textContent = '×'; x.title = 'удалить';
+      x.onclick = e => { e.stopPropagation(); SAVED = SAVED.filter(p => p.name !== name); storeSaved(); buildPalettes(); };
+      d.appendChild(x);
+    }
+    d.onclick = () => { PAL = clonePal(pal); PALNAME = name; refreshPaletteUI(); schedule('s', 0); };
+    box.appendChild(d);
+    drawRamps(c, [...pal.zones, pal.bare], false);
+  };
+  for (const [name, pal] of Object.entries(PRESETS)) add(name, pal, false);
+  for (const p of SAVED) add(p.name, p, true);
+}
+function rampSelect(ref, onChange) {
+  const sel = document.createElement('select');
+  if (typeof ref !== 'string') sel.add(new Option('генерация', '~'));
+  for (const k of Object.keys(RAMPS)) sel.add(new Option(RAMP_RU[k] || k, k));
+  sel.value = typeof ref === 'string' ? ref : '~';
+  sel.onchange = () => { if (sel.value !== '~') onChange(sel.value); };
+  return sel;
+}
+function buildZoneEditor() {
+  const box = $('zed'); box.innerHTML = '';
+  const head = document.createElement('div'); head.className = 'zhead';
+  head.innerHTML = `палитра: <b></b>`;
+  head.querySelector('b').textContent = PALNAME + (PAL.scheme ? ` · ${PAL.scheme}` : '');
+  box.appendChild(head);
+  const row = (label, ref, onChange, onDel) => {
+    const r = document.createElement('div'); r.className = 'zrow';
+    const l = document.createElement('label'); l.textContent = label; r.appendChild(l);
+    const c = document.createElement('canvas'); c.width = 160; c.height = 16; r.appendChild(c);
+    r.appendChild(rampSelect(ref, onChange));
+    if (onDel) { const b = document.createElement('button'); b.textContent = '×'; b.title = 'убрать зону'; b.onclick = onDel; r.appendChild(b); }
+    else r.appendChild(document.createElement('span'));
+    box.appendChild(r);
+    drawRamps(c, [ref], true);
+  };
+  PAL.zones.forEach((ref, k) => row(`зона ${k + 1}`, ref, v => { PAL.zones[k] = v; edited(); },
+    PAL.zones.length > 1 ? () => { PAL.zones.splice(k, 1); edited(); } : null));
+  row('голые', PAL.bare, v => { PAL.bare = v; edited(); });
+  row('тени', PAL.shade || PAL.zones[0], v => { PAL.shade = v; edited(); });
+  const btns = document.createElement('div'); btns.className = 'btns';
+  const mk = (text, title, fn) => { const b = document.createElement('button'); b.textContent = text; b.title = title; b.onclick = fn; btns.appendChild(b); return b; };
+  const keys = Object.keys(RAMPS);
+  mk('+ зона', 'добавить случайную зону', () => { PAL.zones.push(keys[Math.random() * keys.length | 0]); edited(); })
+    .disabled = PAL.zones.length >= 7;
+  mk('перемешать', 'переставить зоны местами', () => {
+    const z = PAL.zones;
+    for (let i = z.length - 1; i > 0; i--) { const j = Math.random() * (i + 1) | 0; [z[i], z[j]] = [z[j], z[i]]; }
+    edited();
+  });
+  box.appendChild(btns);
+}
+function refreshPaletteUI() { buildPalettes(); buildZoneEditor(); }
+function edited() { PALNAME = 'своя'; delete PAL.scheme; delete PAL.name; refreshPaletteUI(); schedule('s', 0); }
+function generatePalette() {
+  PAL = genPalette(Math.random); PALNAME = 'генерация';
+  refreshPaletteUI(); schedule('s', 0);
+}
+function savePalette() {
+  let n = 1; while (SAVED.some(p => p.name === `моя ${n}`)) n++;
+  const p = clonePal(PAL); p.name = `моя ${n}`;
+  SAVED.push(p); storeSaved();
+  PALNAME = p.name; refreshPaletteUI();
+}
+
+function randomStyle() {
+  const R = Math.random;
+  if (R() < 0.5) { PAL = genPalette(R); PALNAME = 'генерация'; }
+  else {
+    const all = [...Object.entries(PRESETS), ...SAVED.map(p => [p.name, p])];
+    const [name, pal] = all[R() * all.length | 0];
+    PAL = clonePal(pal); PALNAME = name;
+  }
+  setP('hue', R() < 0.7 ? 0 : Math.round((R() - 0.5) * 120));
+  setP('sun', Math.round(mix(150, 250, R())));
+  setP('elev', Math.round(mix(20, 55, R())));
+  setP('fog', +mix(0.2, 0.55, R()).toFixed(2));
+  setP('rag', +mix(0.2, 1, R()).toFixed(2));
+  setP('forest', +mix(-0.15, 0.6, R()).toFixed(2));
+  setP('zones', +mix(0.6, 1.8, R()).toFixed(2));
+  setP('vari', +mix(0.1, 0.6, R()).toFixed(2));
+  setP('hueJit', Math.round(mix(0, 45, R() * R())));
+  setP('shade', +mix(0, 0.7, R()).toFixed(2));
+  setP('hgt', +mix(-0.6, 1.2, R()).toFixed(2));
+  setP('orient', +mix(-0.9, 0.9, R()).toFixed(2));
+  setP('trails', R() * 4 | 0);
+  refreshPaletteUI();
+  schedule('s', 0);
+}
+function save() {
+  cv.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = `ridges-${P.seed}-${P.style}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+$('bNew').onclick = newLandscape;
+$('bStyle').onclick = randomStyle;
+$('bRedraw').onclick = () => { P.style++; schedule('s', 0); };
+$('bSave').onclick = save;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n' || k === 'т') newLandscape();
+  else if (k === 'm' || k === 'ь') randomStyle();
+  else if (k === 'r' || k === 'к') { P.style++; schedule('s', 0); }
+  else if (k === 's' || k === 'ы') save();
+  else if (k === 'p' || k === 'з') generatePalette();
+});
+let rsT = 0, lastSize = '';
+new ResizeObserver(() => {
+  const r = stage.getBoundingClientRect(), key = `${Math.round(r.width)}x${Math.round(r.height)}`;
+  if (key === lastSize) return;
+  lastSize = key;
+  clearTimeout(rsT); rsT = setTimeout(() => { resize(); schedule('t', 0); }, 150);
+}).observe(stage);
+
+buildUI();
+refreshPaletteUI();
+resize();
+lastSize = `${Math.round(stage.getBoundingClientRect().width)}x${Math.round(stage.getBoundingClientRect().height)}`;
+schedule('t', 0);
+</script>
+</body>
+</html>
