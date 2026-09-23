@@ -24,6 +24,12 @@
   button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
   button:hover { border-color:var(--acc); }
   button.on { border-color:var(--acc); color:var(--acc); }
+  [hidden] { display:none !important; }
+  #stage { position:relative; }
+  #drop { position:absolute; inset:12px; border:1px dashed var(--acc); color:var(--acc); display:none;
+    align-items:center; justify-content:center; background:rgba(0,0,0,.65); pointer-events:none; letter-spacing:.08em; }
+  body.dragging #drop { display:flex; }
+  #photoName { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
   #info { margin-top:10px; color:var(--dim); white-space:pre; font-size:11px; }
   .hint { color:#555; margin-top:12px; }
   @media (max-width: 700px) {
@@ -34,7 +40,7 @@
 </style>
 </head>
 <body>
-<div id="stage"><canvas id="cv"></canvas></div>
+<div id="stage"><canvas id="cv"></canvas><div id="drop">отпусти фото — будет плата</div></div>
 <div id="panel">
   <h1>PCB Portraits</h1>
   <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
@@ -46,16 +52,20 @@
   <div id="controls"></div>
   <div class="row"><label>палитра</label><select id="pal"></select><span></span></div>
   <div class="row"><label>формат</label><select id="format"></select><span></span></div>
-  <div class="btns"><button id="bFrame" title="B">рамка платы</button></div>
+  <div class="btns"><button id="bFrame" title="B">рамка платы</button><button id="bPhoto" title="F">фото…</button></div>
+  <div class="row" id="photoRow" hidden><label>фото</label><span id="photoName"></span><button id="bNoPhoto" title="Esc">✕</button></div>
   <div id="info"></div>
   <div class="hint">
     Space / клик — новый портрет<br>
     A — автосмена<br>
     P — следующая палитра<br>
     B — рамка платы<br>
-    S — сохранить PNG
+    S — сохранить PNG<br>
+    F или перетащить файл — плата из фото<br>
+    Esc — вернуть генератор
   </div>
 </div>
+<input type="file" id="file" accept="image/*" hidden>
 <script>
 // ---------- rng ----------
 function hashStr(s) {
@@ -110,7 +120,7 @@ const CTRL = [
   ['pour',    'заливка',   0, 2, 0.05],
   ['parts',   'детали',    0, 2, 0.05],
 ];
-const FORMATS = { a: ['A · 1:√2', Math.SQRT1_2], p34: ['3:4', 3 / 4], p45: ['4:5', 4 / 5], sq: ['1:1', 1], st: ['9:16', 9 / 16] };
+const FORMATS = { a: ['A · 1:√2', Math.SQRT1_2], p34: ['3:4', 3 / 4], p45: ['4:5', 4 / 5], sq: ['1:1', 1], st: ['9:16', 9 / 16], ph: ['как у фото', 0] };
 
 // copper colours: top/bot traces, pour & hatch planes, via ring/hole, SMD pads, silkscreen
 const PAL = {
@@ -346,9 +356,65 @@ function transpose(fp) {
   return t;
 }
 
-function buildScene(seed) {
-  const rng = makeRng(seed);
-  const NX = P.res, NY = Math.max(24, Math.round(NX / FORMATS[P.format][1]));
+// ---------- photo ----------
+// luminance per cell: cover-fit crop (biased to the top, where faces are), stretched to the full range
+function photoTone(img, NX, NY) {
+  const k = 3, cw = NX * k, ch = NY * k;
+  const cnv = document.createElement('canvas'); cnv.width = cw; cnv.height = ch;
+  const g = cnv.getContext('2d', { willReadFrequently: true });
+  const iw = img.naturalWidth, ih = img.naturalHeight, sc = Math.max(cw / iw, ch / ih);
+  g.drawImage(img, (cw - iw * sc) / 2, (ch - ih * sc) * 0.35, iw * sc, ih * sc);
+  const d = g.getImageData(0, 0, cw, ch).data, L = new Float32Array(NX * NY);
+  for (let y = 0; y < ch; y++) for (let x = 0; x < cw; x++) {
+    const q = 4 * (y * cw + x);
+    L[((y / k) | 0) * NX + ((x / k) | 0)] += (0.2126 * d[q] + 0.7152 * d[q + 1] + 0.0722 * d[q + 2]) / (255 * k * k);
+  }
+  const srt = Float32Array.from(L).sort();
+  const lo = srt[Math.floor(L.length * 0.02)], hi = srt[Math.floor(L.length * 0.98)];
+  for (let i = 0; i < L.length; i++) L[i] = clamp((L[i] - lo) / Math.max(0.05, hi - lo));
+  return L;
+}
+// structure tensor: per cell, the orientation along which the picture changes least (its contours)
+// and how pronounced that orientation is (0 = flat, 1 = strong edge)
+function photoFlow(L, NX, NY) {
+  const N = NX * NY;
+  const blur = (src, r) => {
+    const tmp = new Float32Array(N), out = new Float32Array(N);
+    for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+      let s = 0, n = 0;
+      for (let k = Math.max(0, i - r); k <= Math.min(NX - 1, i + r); k++) { s += src[j * NX + k]; n++; }
+      tmp[j * NX + i] = s / n;
+    }
+    for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+      let s = 0, n = 0;
+      for (let k = Math.max(0, j - r); k <= Math.min(NY - 1, j + r); k++) { s += tmp[k * NX + i]; n++; }
+      out[j * NX + i] = s / n;
+    }
+    return out;
+  };
+  const B = blur(L, 1), xx = new Float32Array(N), xy = new Float32Array(N), yy = new Float32Array(N);
+  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+    const gx = B[j * NX + Math.min(NX - 1, i + 1)] - B[j * NX + Math.max(0, i - 1)];
+    const gy = B[Math.min(NY - 1, j + 1) * NX + i] - B[Math.max(0, j - 1) * NX + i];
+    const c = j * NX + i;
+    xx[c] = gx * gx; xy[c] = gx * gy; yy[c] = gy * gy;
+  }
+  const r = Math.max(2, Math.round(NX / 40));
+  const Sxx = blur(xx, r), Sxy = blur(xy, r), Syy = blur(yy, r);
+  const ang = new Float32Array(N), coh = new Float32Array(N);
+  for (let c = 0; c < N; c++) {
+    ang[c] = 0.5 * Math.atan2(2 * Sxy[c], Sxx[c] - Syy[c]) + Math.PI / 2;
+    coh[c] = Math.hypot(Sxx[c] - Syy[c], 2 * Sxy[c]);
+  }
+  const top = Math.max(1e-6, Float32Array.from(coh).sort()[Math.floor(N * 0.9)]);
+  for (let c = 0; c < N; c++) coh[c] = clamp(coh[c] / top);
+  return { ang, coh };
+}
+
+function buildScene(seed, photo) {
+  const rng = makeRng(seed + (photo ? ':photo' : ''));
+  const ratio = FORMATS[P.format][1] || (photo ? clamp(photo.img.naturalWidth / photo.img.naturalHeight, 0.5, 2) : 3 / 4);
+  const NX = P.res, NY = Math.max(24, Math.round(NX / ratio));
   const N = NX * NY, p = PITCH, DW = NX * p, DH = NY * p, Ar = NX / NY;
   const f = makeFigure(rng, Ar), nz = makeNoise(rng);
   const fbm = (x, y) => nz(x, y) * 0.65 + nz(x * 2.1 + 17.3, y * 2.1 + 5.1) * 0.35;
@@ -357,9 +423,9 @@ function buildScene(seed) {
   const un = i => (i + 0.5) / NY;             // cell index → normalised coordinate (height = 1)
   const cc = v => Math.floor(v * NY);         // normalised coordinate → cell index
 
-  // ---- sample the figure
-  const reg = new Uint8Array(N), tone = new Float32Array(N);
-  for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
+  // ---- sample the figure (a photo has no regions: every cell is background, tone does the work)
+  const reg = new Uint8Array(N), tone = photo ? photoTone(photo.img, NX, NY) : new Float32Array(N);
+  if (!photo) for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
     const [r, t] = sample(f, un(i), un(j));
     reg[at(i, j)] = r; tone[at(i, j)] = t;
   }
@@ -368,7 +434,8 @@ function buildScene(seed) {
   const cls = new Uint8Array(N);
   for (let c = 0; c < N; c++) {
     const r = reg[c], t = tone[c];
-    cls[c] = r === HAIR ? C_HAIR : r === BODY ? C_BODY : r === BG ? C_BG
+    cls[c] = photo ? (t > hi ? C_POUR : t > lo ? C_HATCH : C_FACE)
+      : r === HAIR ? C_HAIR : r === BODY ? C_BODY : r === BG ? C_BG
       : t > hi ? C_POUR : t > lo ? C_HATCH : r === FACE ? C_FACE : C_NECK;
   }
 
@@ -408,61 +475,63 @@ function buildScene(seed) {
         if (((i - ex) / rx) ** 2 + ((j - ey) / ry) ** 2 < 1) keep(i, j);
   };
 
-  const E = [-1, 1].map(s => {
-    const a = Math.max(2, Math.round(f.eyeRX * NY));
-    return { s, ex: cc(eyeX(f, s)), ey: cc(f.eyeY), a, h: clamp(Math.round(f.eyeRY * NY), 1, a - 1) };
-  });
-  for (const e of E) keepEllipse(e.ex, e.ey - e.h / 2 + 0.5, e.a + 1.3, e.h / 2 + 1.7);
-  const flick = rng.chance(0.6), lowerLid = rng.chance(0.65);
-  for (const { s, ex, ey, a, h } of E) {
-    const lid = [[ex - a, ey], [ex - a + h, ey - h], [ex + a - h, ey - h], [ex + a, ey]];
-    const o = [ex + s * (a + 2), ey - 2];
-    if (flick) s < 0 ? lid.unshift(o) : lid.push(o);
-    feature(lid, 0.55);
-    if (flick) fvia(o[0], o[1], 0.34, 0.13);
-    if (lowerLid && a >= 3) feature([[ex - a + 2, ey + 1], [ex + a - 2, ey + 1]], 0.3);
-    const ir = Math.max(0.7, h / 2 + 0.1);
-    viaAt(ex + f.gaze * Math.max(0, a - h / 2 - 1), ey - (h - 1) / 2, ir, ir * 0.45, { iris: true });
-  }
-  if (f.glasses) {
-    for (const e of E) {
-      const Rx = e.a + 2, Ry = Math.max(e.h + 1, 3), k = Math.min(Ry - 1, Math.round(Rx * 0.45));
-      const gx = e.ex, gy = e.ey - Math.floor(e.h / 2);
-      e.g = { Rx, Ry, k, gx, gy }; e.gTop = gy - Ry;
-      feature([[gx - Rx + k, gy - Ry], [gx + Rx - k, gy - Ry], [gx + Rx, gy - Ry + k], [gx + Rx, gy + Ry - k],
-               [gx + Rx - k, gy + Ry], [gx - Rx + k, gy + Ry], [gx - Rx, gy + Ry - k], [gx - Rx, gy - Ry + k],
-               [gx - Rx + k, gy - Ry]], 0.45);
+  if (!photo) {
+    const E = [-1, 1].map(s => {
+      const a = Math.max(2, Math.round(f.eyeRX * NY));
+      return { s, ex: cc(eyeX(f, s)), ey: cc(f.eyeY), a, h: clamp(Math.round(f.eyeRY * NY), 1, a - 1) };
+    });
+    for (const e of E) keepEllipse(e.ex, e.ey - e.h / 2 + 0.5, e.a + 1.3, e.h / 2 + 1.7);
+    const flick = rng.chance(0.6), lowerLid = rng.chance(0.65);
+    for (const { s, ex, ey, a, h } of E) {
+      const lid = [[ex - a, ey], [ex - a + h, ey - h], [ex + a - h, ey - h], [ex + a, ey]];
+      const o = [ex + s * (a + 2), ey - 2];
+      if (flick) s < 0 ? lid.unshift(o) : lid.push(o);
+      feature(lid, 0.55);
+      if (flick) fvia(o[0], o[1], 0.34, 0.13);
+      if (lowerLid && a >= 3) feature([[ex - a + 2, ey + 1], [ex + a - 2, ey + 1]], 0.3);
+      const ir = Math.max(0.7, h / 2 + 0.1);
+      viaAt(ex + f.gaze * Math.max(0, a - h / 2 - 1), ey - (h - 1) / 2, ir, ir * 0.45, { iris: true });
     }
-    const [L, R] = E.map(e => e.g), by = L.gy - L.Ry + L.k;
-    if (R.gx - R.Rx > L.gx + L.Rx) feature([[L.gx + L.Rx, by], [R.gx - R.Rx, by]], 0.45);
-    const fl = cc(f.fcx - f.frx) - 1, fr = cc(f.fcx + f.frx) + 1;
-    if (fl < L.gx - L.Rx) feature([[L.gx - L.Rx, by], [fl, by]], 0.45);
-    if (fr > R.gx + R.Rx) feature([[R.gx + R.Rx, by], [fr, by]], 0.45);
-  }
-  const browStyle = rng.int(0, 2), browThick = rng.chance(0.4), browW = rng.range(0.5, 0.7);
-  for (const e of E) {
-    const { s, ex, ey, a, h } = e;
-    let by = Math.min(cc(f.browY), ey - h - 2);
-    if (e.gTop !== undefined) by = Math.min(by, e.gTop - 2);
-    const inner = ex - s * (a - 1), outer = ex + s * (a + 1);
-    feature(browStyle === 0 ? [[inner, by + 1], [inner + s, by], [outer - 2 * s, by], [outer, by + 2]]
-          : browStyle === 1 ? [[inner, by], [outer - s, by], [outer, by + 1]]
-          : [[inner, by + 2], [inner + 2 * s, by], [outer, by]], browW);
-    if (browThick && a >= 3) feature([[inner + 2 * s, by - 1], [outer - 3 * s, by - 1]], 0.35);
-  }
-  {
-    const ns = -f.light, nx = cc(f.nx), ny = cc(f.noseY), top = Math.min(E[0].ey, ny - 2);
-    feature([[nx + ns, top], [nx + ns, ny - 1], [nx, ny], [nx - 2 * ns, ny]], 0.42);
-    fvia(nx - 2 * ns, ny, 0.36, 0.14);
-    fvia(nx + 2 * ns, ny, 0.36, 0.14);
-  }
-  {
-    const mx = cc(f.nx), my = cc(f.mouthY), ma = Math.max(2, Math.round(f.mouthRX * NY)), c = f.smile, ac = Math.abs(c);
-    keepEllipse(mx, my + 0.8, ma + 1.6, 2.4);
-    feature([[mx - ma, my - c], [mx - ma + ac, my], [mx + ma - ac, my], [mx + ma, my - c]], 0.5);
-    fvia(mx - ma, my - c, 0.34, 0.13); fvia(mx + ma, my - c, 0.34, 0.13);
-    if (rng.chance(0.6)) pads.push({ x: (mx + 0.5) * p, y: (my + 2.5) * p, w: Math.max(1, 2 * ma - 2) * p * 0.75, h: 0.9 * p, r: 0.4 * p });
-    else if (ma >= 3) feature([[mx - ma + 2, my + 2], [mx + ma - 2, my + 2]], 0.3);
+    if (f.glasses) {
+      for (const e of E) {
+        const Rx = e.a + 2, Ry = Math.max(e.h + 1, 3), k = Math.min(Ry - 1, Math.round(Rx * 0.45));
+        const gx = e.ex, gy = e.ey - Math.floor(e.h / 2);
+        e.g = { Rx, Ry, k, gx, gy }; e.gTop = gy - Ry;
+        feature([[gx - Rx + k, gy - Ry], [gx + Rx - k, gy - Ry], [gx + Rx, gy - Ry + k], [gx + Rx, gy + Ry - k],
+                 [gx + Rx - k, gy + Ry], [gx - Rx + k, gy + Ry], [gx - Rx, gy + Ry - k], [gx - Rx, gy - Ry + k],
+                 [gx - Rx + k, gy - Ry]], 0.45);
+      }
+      const [L, R] = E.map(e => e.g), by = L.gy - L.Ry + L.k;
+      if (R.gx - R.Rx > L.gx + L.Rx) feature([[L.gx + L.Rx, by], [R.gx - R.Rx, by]], 0.45);
+      const fl = cc(f.fcx - f.frx) - 1, fr = cc(f.fcx + f.frx) + 1;
+      if (fl < L.gx - L.Rx) feature([[L.gx - L.Rx, by], [fl, by]], 0.45);
+      if (fr > R.gx + R.Rx) feature([[R.gx + R.Rx, by], [fr, by]], 0.45);
+    }
+    const browStyle = rng.int(0, 2), browThick = rng.chance(0.4), browW = rng.range(0.5, 0.7);
+    for (const e of E) {
+      const { s, ex, ey, a, h } = e;
+      let by = Math.min(cc(f.browY), ey - h - 2);
+      if (e.gTop !== undefined) by = Math.min(by, e.gTop - 2);
+      const inner = ex - s * (a - 1), outer = ex + s * (a + 1);
+      feature(browStyle === 0 ? [[inner, by + 1], [inner + s, by], [outer - 2 * s, by], [outer, by + 2]]
+            : browStyle === 1 ? [[inner, by], [outer - s, by], [outer, by + 1]]
+            : [[inner, by + 2], [inner + 2 * s, by], [outer, by]], browW);
+      if (browThick && a >= 3) feature([[inner + 2 * s, by - 1], [outer - 3 * s, by - 1]], 0.35);
+    }
+    {
+      const ns = -f.light, nx = cc(f.nx), ny = cc(f.noseY), top = Math.min(E[0].ey, ny - 2);
+      feature([[nx + ns, top], [nx + ns, ny - 1], [nx, ny], [nx - 2 * ns, ny]], 0.42);
+      fvia(nx - 2 * ns, ny, 0.36, 0.14);
+      fvia(nx + 2 * ns, ny, 0.36, 0.14);
+    }
+    {
+      const mx = cc(f.nx), my = cc(f.mouthY), ma = Math.max(2, Math.round(f.mouthRX * NY)), c = f.smile, ac = Math.abs(c);
+      keepEllipse(mx, my + 0.8, ma + 1.6, 2.4);
+      feature([[mx - ma, my - c], [mx - ma + ac, my], [mx + ma - ac, my], [mx + ma, my - c]], 0.5);
+      fvia(mx - ma, my - c, 0.34, 0.13); fvia(mx + ma, my - c, 0.34, 0.13);
+      if (rng.chance(0.6)) pads.push({ x: (mx + 0.5) * p, y: (my + 2.5) * p, w: Math.max(1, 2 * ma - 2) * p * 0.75, h: 0.9 * p, r: 0.4 * p });
+      else if (ma >= 3) feature([[mx - ma + 2, my + 2], [mx + ma - 2, my + 2]], 0.3);
+    }
   }
 
   // ---- clean up the zones
@@ -515,9 +584,17 @@ function buildScene(seed) {
 
   // ---- per-cell density (how many traces a cell invites) and flow angle
   const dens = new Float32Array(N), angTop = new Float32Array(N), angBot = new Float32Array(N);
-  const ox = f.cx, oy = f.hy + 0.08;
+  const ox = f.cx, oy = f.hy + 0.08, flow = photo && photoFlow(tone, NX, NY);
   for (let c = 0; c < N; c++) {
     const x = un(c % NX), y = un((c / NX) | 0);
+    if (flow) {
+      // traces follow the contours of the picture; where it is flat, a slow noise field takes over
+      const nA = 2 * fbm(x * 2 + 3, y * 2 + 11) * Math.PI * P.wiggle, fA = 2 * flow.ang[c], k = flow.coh[c];
+      angTop[c] = 0.5 * Math.atan2(lerp(Math.sin(nA), Math.sin(fA), k), lerp(Math.cos(nA), Math.cos(fA), k));
+      angBot[c] = angTop[c] + Math.PI / 2;
+      dens[c] = cls[c] === C_FACE ? clamp((tone[c] - 0.04) / (lo - 0.04)) : 0;
+      continue;
+    }
     const bgA = Math.atan2(y - oy, x - ox) + fbm(x * 2.2 + 3, y * 2.2 + 11) * 1.3 * P.wiggle;
     angBot[c] = bgA + Math.PI / 2;
     switch (cls[c]) {
@@ -536,7 +613,7 @@ function buildScene(seed) {
         angTop[c] = bgA;
     }
   }
-  const bottomOK = c => !edge[c] && (reg[c] === BG || reg[c] === BODY);
+  const bottomOK = photo ? c => !edge[c] && cls[c] === C_FACE : c => !edge[c] && (reg[c] === BG || reg[c] === BODY);
 
   // ---- vias
   const endVia = (L, pt, nb) => {
@@ -562,7 +639,8 @@ function buildScene(seed) {
     for (let j = j0 - 1; j <= j0 + h; j++) for (let i = i0 - 1; i <= i0 + w; i++) {
       if (!inb(i, j)) return false;
       const c = at(i, j);
-      if (occ[0][c] || occ[1][c] || edge[c] || (cls[c] !== C_BG && cls[c] !== C_BODY)) return false;
+      if (occ[0][c] || occ[1][c] || edge[c]) return false;
+      if (photo ? cls[c] !== C_FACE || dens[c] > 0.35 : cls[c] !== C_BG && cls[c] !== C_BODY) return false;
     }
     return true;
   };
@@ -606,7 +684,7 @@ function buildScene(seed) {
   for (let k = nBig; k < nComp; k++) placeComp(rng.wpick(['rc', 'sot', 'tp', 'fid', 'soic'], [6, 2, 2, 0.6, 0.8]));
 
   // a via fence along the silhouette
-  if (rng.chance(0.55)) {
+  if (!photo && rng.chance(0.55)) {
     const vg = new Uint8Array(N);
     for (let j = 0; j < NY; j++) for (let i = 0; i < NX; i++) {
       const c = at(i, j);
@@ -644,7 +722,8 @@ function buildScene(seed) {
       if (tryMove(w, d)) return true;
       w.plan = null;
     }
-    const a = (w.L ? angBot : angTop)[at(w.i, w.j)];
+    let a = (w.L ? angBot : angTop)[at(w.i, w.j)];
+    if (photo && Math.abs(wrapA(a - w.d * Q)) > Math.PI / 2) a += Math.PI;   // photo flow has no sign, keep going forward
     const td = Math.abs(wrapA(a - w.d * Q)) < Q / 2 + 0.15 ? w.d : qdir(a);
     const df = ddiff(w.d, td);
     if (df && w.run >= w.minRun && tryMove(w, (w.d + Math.sign(df) + 8) % 8)) return true;
@@ -713,7 +792,7 @@ function buildScene(seed) {
     bot:      { spawn: 0.035, bus: 5, th: 0,   life: () => rng.int(8, 60), pv: 0.2 },
   };
   const bundle = (i0, j0, L, cl, cfg) => {
-    const d = qdir((L ? angBot : angTop)[at(i0, j0)]);
+    const d = qdir((L ? angBot : angTop)[at(i0, j0)] + (photo && rng.chance(0.5) ? Math.PI : 0));
     let n = d & 1 ? (d + 1) % 8 : (d + 2) % 8;
     if (rng.chance(0.5)) n = (n + 4) % 8;
     const nb = 1 + Math.floor(Math.pow(rng(), 1.5) * cfg.bus * P.bus);
@@ -749,6 +828,11 @@ function buildScene(seed) {
     [C_BODY]: (x, y) => Math.hypot(x - f.cx, y - f.yS),
     [C_BG]:   (x, y, c) => dist[c] / NY,
   };
+  if (photo) {
+    // photo: one trace class, strong edges get routed first
+    CFG[C_FACE] = { spawn: 0.45, bus: 5, th: 1, life: () => 999, pv: 0.45, sw: true, meander: true };
+    KEY[C_FACE] = (x, y, c) => 1 - flow.coh[c];
+  }
   for (const cl of [C_HAIR, C_FACE, C_NECK, C_BODY, C_BG]) {
     const cand = [], key = new Float32Array(N), cfg = CFG[cl];
     for (let c = 0; c < N; c++) if (cls[c] === cl) { cand.push(c); key[c] = KEY[cl](un(c % NX), un((c / NX) | 0), c) + rng() * 0.08; }
@@ -762,7 +846,7 @@ function buildScene(seed) {
   // stitching vias in empty background
   for (let k = Math.round(P.parts * N / 400); k > 0; k--) {
     const i = rng.int(1, NX - 2), j = rng.int(1, NY - 2), c = at(i, j);
-    if (cls[c] !== C_BG && cls[c] !== C_HATCH || reg[c] !== BG) continue;
+    if (photo ? cls[c] !== C_FACE || dens[c] > 0.4 : cls[c] !== C_BG && cls[c] !== C_HATCH || reg[c] !== BG) continue;
     let ok = true;
     for (let dj = -1; dj <= 1 && ok; dj++) for (let di = -1; di <= 1; di++)
       if (occ[0][at(i + di, j + dj)] || occ[1][at(i + di, j + dj)]) { ok = false; break; }
@@ -926,10 +1010,10 @@ function pixelRender(sc, pal) {
 const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
 const stage = document.getElementById('stage');
 const seedInp = document.getElementById('seed');
-let seed = randSeed(), scene = null, auto = null;
+let seed = randSeed(), scene = null, photo = null, auto = null;
 
 function regen() {
-  scene = buildScene(seed);
+  scene = buildScene(seed, photo);
   const st = scene.stats;
   document.getElementById('info').textContent = `${scene.NX}×${scene.NY} клеток\nдорожек ${st.traces} · переходов ${st.vias} · площадок ${st.pads}`;
   draw();
@@ -962,7 +1046,7 @@ function save() {
     render(g, scene, s);
   }
   const a = document.createElement('a');
-  a.download = `pcb-${seed.replace(/[^\w-]/g, '_')}-${P.pal}.png`;
+  a.download = `pcb-${seed.replace(/[^\w-]/g, '_')}-${P.pal}${photo ? '-photo' : ''}.png`;
   a.href = c.toDataURL('image/png'); a.click();
 }
 function toggleAuto() {
@@ -973,6 +1057,24 @@ function setPal(k) {
   P.pal = k; palSel.value = k;
   document.documentElement.style.setProperty('--acc', PAL[k].pour === '#ffffff' ? '#bbbbbb' : PAL[k].top);
   draw();
+}
+function loadPhoto(file) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const url = URL.createObjectURL(file), img = new Image();
+  img.onload = () => {
+    if (photo) URL.revokeObjectURL(photo.url);
+    photo = { img, url, name: file.name };
+    document.getElementById('photoRow').hidden = false;
+    document.getElementById('photoName').textContent = file.name;
+    regen();
+  };
+  img.src = url;
+}
+function dropPhoto() {
+  if (!photo) return;
+  URL.revokeObjectURL(photo.url); photo = null;
+  document.getElementById('photoRow').hidden = true;
+  regen();
 }
 function toggleFrame() {
   P.frame = !P.frame;
@@ -1003,7 +1105,14 @@ document.getElementById('bDice').onclick = newPortrait;
 document.getElementById('bAuto').onclick = toggleAuto;
 document.getElementById('bSave').onclick = save;
 document.getElementById('bFrame').onclick = toggleFrame;
+const fileInp = document.getElementById('file');
+fileInp.onchange = () => { loadPhoto(fileInp.files[0]); fileInp.value = ''; };
+document.getElementById('bPhoto').onclick = () => fileInp.click();
+document.getElementById('bNoPhoto').onclick = dropPhoto;
 cv.addEventListener('click', newPortrait);
+addEventListener('dragover', e => { e.preventDefault(); document.body.classList.add('dragging'); });
+addEventListener('dragleave', e => { if (!e.relatedTarget) document.body.classList.remove('dragging'); });
+addEventListener('drop', e => { e.preventDefault(); document.body.classList.remove('dragging'); loadPhoto(e.dataTransfer.files[0]); });
 addEventListener('keydown', e => {
   if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
   if (e.target.tagName === 'SELECT') return;
@@ -1012,6 +1121,8 @@ addEventListener('keydown', e => {
   else if (e.code === 'KeyS') save();
   else if (e.code === 'KeyA') toggleAuto();
   else if (e.code === 'KeyB') toggleFrame();
+  else if (e.code === 'KeyF') fileInp.click();
+  else if (e.code === 'Escape') dropPhoto();
   else if (e.code === 'KeyP') { const ks = Object.keys(PAL); setPal(ks[(ks.indexOf(P.pal) + 1) % ks.length]); }
 });
 let rt;
