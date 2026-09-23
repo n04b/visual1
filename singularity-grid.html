@@ -1,0 +1,497 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Сингулярность · сетка</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0a47ff; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  canvas:active { cursor: grabbing; }
+  #hint {
+    position: fixed; left: 16px; bottom: 14px;
+    font: 12px/1.4 -apple-system, system-ui, sans-serif; letter-spacing: .02em;
+    color: rgba(255, 255, 255, .55); pointer-events: none; mix-blend-mode: difference;
+    transition: opacity 1s ease;
+  }
+  #panel {
+    position: fixed; top: 14px; right: 14px; width: 238px; max-height: calc(100vh - 28px);
+    overflow-y: auto; padding: 12px 13px 13px; border-radius: 12px;
+    background: rgba(10, 12, 24, .66); backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border: 1px solid rgba(170, 180, 230, .16);
+    font: 11px/1.3 -apple-system, system-ui, sans-serif; color: rgba(232, 234, 248, .92);
+    user-select: none; transition: opacity .35s ease, transform .35s ease;
+    box-shadow: 0 12px 40px rgba(0,0,0,.45);
+    scrollbar-width: thin; scrollbar-color: rgba(170,180,230,.25) transparent;
+  }
+  #panel.hidden { opacity: 0; transform: translateX(12px); pointer-events: none; }
+  #panel h1 { margin: 0 0 8px; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+    color: rgba(215, 222, 255, .9); display: flex; justify-content: space-between; align-items: center; }
+  #panel h1 span { font-weight: 400; color: rgba(190, 198, 235, .45); font-size: 10px; }
+  #panel h2 { margin: 14px 0 2px; padding-top: 10px; border-top: 1px solid rgba(170,180,230,.12);
+    font-size: 10px; font-weight: 500; letter-spacing: .1em; text-transform: uppercase;
+    color: rgba(190, 198, 235, .5); }
+  .row { margin: 8px 0; }
+  .row label { display: flex; justify-content: space-between; margin-bottom: 4px; color: rgba(210, 215, 240, .72); }
+  .row label b { font-weight: 500; color: rgba(200, 212, 255, .95); font-variant-numeric: tabular-nums; }
+  .row input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 3px; margin: 0;
+    border-radius: 3px; background: rgba(170, 180, 230, .22); outline: none; }
+  .row input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 13px; height: 13px;
+    border-radius: 50%; background: #dfe5ff; cursor: pointer; box-shadow: 0 0 8px rgba(150,170,255,.6); }
+  .row input[type=range]::-moz-range-thumb { width: 13px; height: 13px; border: 0;
+    border-radius: 50%; background: #dfe5ff; cursor: pointer; }
+  select { width: 100%; padding: 5px 6px; border-radius: 7px; border: 1px solid rgba(170,180,230,.2);
+    background: rgba(170,180,230,.1); color: rgba(232,234,248,.95); font: 11px -apple-system, system-ui, sans-serif; outline: none; }
+  select option { background: #151827; }
+  .colors { display: grid; grid-template-columns: repeat(3, 1fr); gap: 7px; margin-top: 8px; }
+  .colors label { display: flex; flex-direction: column; gap: 4px; color: rgba(210, 215, 240, .72); }
+  .colors input { width: 100%; height: 24px; padding: 0; border: 1px solid rgba(170,180,230,.2);
+    border-radius: 6px; background: none; cursor: pointer; }
+  .colors input::-webkit-color-swatch-wrapper { padding: 2px; }
+  .colors input::-webkit-color-swatch { border: 0; border-radius: 4px; }
+  .btns { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 10px; }
+  .btns button { flex: 1 1 30%; padding: 7px 0; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(170, 180, 230, .18); background: rgba(170, 180, 230, .1);
+    color: rgba(228, 232, 252, .92); font: 11px/1 -apple-system, system-ui, sans-serif; letter-spacing: .02em;
+    transition: background .15s; }
+  .btns button:hover { background: rgba(175, 190, 245, .24); }
+</style>
+</head>
+<body>
+<canvas id="cv"></canvas>
+<div id="hint">тяни — наклон и поворот · колесо — дистанция · пробел — пауза · R — случайно · S — PNG · H — панель</div>
+
+<div id="panel">
+  <h1>Сингулярность <span>H — скрыть</span></h1>
+  <div class="row"><label>Пресет</label><select id="preset"></select></div>
+
+  <h2>Форма</h2>
+  <div class="row"><label>Профиль</label>
+    <select id="profile">
+      <option value="well">Колодец 1/rⁿ</option>
+      <option value="wormhole">Червоточина</option>
+      <option value="sheet">Резиновый лист</option>
+    </select>
+  </div>
+  <div id="g-shape"></div>
+
+  <h2>Движение</h2>
+  <div id="g-motion"></div>
+
+  <h2>Камера</h2>
+  <div id="g-camera"></div>
+
+  <h2>Стиль</h2>
+  <div id="g-style"></div>
+  <div class="colors" id="colors"></div>
+
+  <div class="btns">
+    <button id="bPlay">пауза</button>
+    <button id="bRand">случайно</button>
+    <button id="bReset">сброс</button>
+    <button id="bSave">PNG</button>
+    <button id="bHide">скрыть</button>
+  </div>
+</div>
+
+<script>
+const TAU = Math.PI * 2;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const clamp = (v, a, b) => Math.max(a, Math.min(b, v));
+const rnd = (a, b) => a + Math.random() * (b - a);
+
+// ---------- параметры ----------
+const DEFAULTS = {
+  profile: 'well',
+  throat: 1.35,    // радиус горла b
+  depth: 1.7,      // глубина
+  steep: 1.5,      // крутизна профиля
+  radius: 30,      // внешний радиус сетки
+  rings: 26,       // число колец
+  spokes: 32,      // число спиц
+  bottom: 0.4,     // как глубоко сетка уходит в горло (доля b)
+
+  infall: 0.35,    // колец в секунду (минус — наружу)
+  spin: 0.03,      // оборотов в секунду
+  twist: 0,        // закрутка спиц в спираль
+  waves: 0,        // гравитационные волны
+  waveLen: 1.6,    // длина волны
+  breathe: 0,      // дыхание глубины
+
+  tilt: 46,        // наклон камеры от вертикали, °
+  dist: 4.6,       // дистанция
+  fov: 72,         // угол обзора, °
+  shift: 0.12,     // сдвиг центра по вертикали
+  look: 0.8,       // куда смотрит камера (в глубину)
+
+  line: 4.6,       // толщина линий, px
+  persp: 0.55,     // толщина зависит от перспективы
+  shade: 0,        // объёмное затенение
+  fog: 0,          // туман в глубине
+  grain: 0.06,     // зерно
+  bg: '#0a47ff',
+  lineCol: '#ececec',
+  deepCol: '#001c8c',
+};
+const P = { ...DEFAULTS };
+
+const PRESETS = {
+  'Оригинал': {},
+  'Горизонт': { fog: 0.45, shade: 0.35, rings: 36, spokes: 48, line: 3.2, depth: 1.8, bottom: 0.18 },
+  'Червоточина': { profile: 'wormhole', throat: 1.2, depth: 0.9, steep: 1, radius: 8.5, rings: 40, spokes: 36, tilt: 70, dist: 24, fov: 36, look: 3.3, shift: 0.02, fog: 0.3, shade: 0.3, line: 3, infall: 0.5 },
+  'Вихрь': { twist: 1.4, spin: 0.08, infall: 0.7, rings: 34, spokes: 30, fog: 0.3, shade: 0.2 },
+  'Резиновый лист': { profile: 'sheet', depth: 1.4, steep: 1, throat: 2.2, radius: 26, rings: 30, spokes: 32, tilt: 55, dist: 9, look: 0.5, waves: 0.35, spin: 0.02, infall: 0.25, shade: 0.2 },
+  'Ночь': { bg: '#05060b', lineCol: '#7ff4ff', deepCol: '#000000', fog: 0.6, shade: 0.5, line: 2.2, persp: 0.8, grain: 0.1, rings: 40, spokes: 60 },
+  'Бумага': { bg: '#efebe2', lineCol: '#161616', deepCol: '#8a8476', shade: 0.25, fog: 0.2, line: 2.6, grain: 0.12 },
+  'Кислота': { bg: '#ff2d7a', lineCol: '#e9ff3a', deepCol: '#3a0020', twist: 0.8, waves: 0.25, fog: 0.4, line: 5 },
+};
+
+// [ключ, подпись, min, max, step, знаков]
+const GROUPS = {
+  'g-shape': [
+    ['throat', 'Горло', 0.3, 3, 0.05, 2],
+    ['depth', 'Глубина', 0.2, 4, 0.05, 2],
+    ['steep', 'Крутизна', 0.4, 3, 0.05, 2],
+    ['radius', 'Радиус сетки', 4, 60, 0.5, 1],
+    ['rings', 'Кольца', 6, 70, 1, 0],
+    ['spokes', 'Спицы', 6, 96, 1, 0],
+    ['bottom', 'Дно горла', 0.05, 0.9, 0.01, 2],
+  ],
+  'g-motion': [
+    ['infall', 'Падение', -1.5, 1.5, 0.01, 2],
+    ['spin', 'Вращение', -0.3, 0.3, 0.005, 3],
+    ['twist', 'Закрутка', -3, 3, 0.05, 2],
+    ['waves', 'Волны', 0, 1, 0.01, 2],
+    ['waveLen', 'Длина волны', 0.4, 5, 0.05, 2],
+    ['breathe', 'Дыхание', 0, 1, 0.01, 2],
+  ],
+  'g-camera': [
+    ['tilt', 'Наклон °', 0, 85, 0.5, 0],
+    ['dist', 'Дистанция', 3, 30, 0.1, 1],
+    ['fov', 'Угол обзора °', 15, 110, 1, 0],
+    ['look', 'Взгляд вглубь', 0, 2, 0.01, 2],
+    ['shift', 'Сдвиг центра', -0.5, 0.5, 0.01, 2],
+  ],
+  'g-style': [
+    ['line', 'Толщина линий', 0.5, 12, 0.1, 1],
+    ['persp', 'Перспектива линий', 0, 1, 0.01, 2],
+    ['shade', 'Объём', 0, 1, 0.01, 2],
+    ['fog', 'Туман в глубине', 0, 1.5, 0.01, 2],
+    ['grain', 'Зерно', 0, 0.4, 0.01, 2],
+  ],
+};
+const COLORS = [['bg', 'Фон'], ['lineCol', 'Линии'], ['deepCol', 'Бездна']];
+
+// ---------- UI ----------
+const inputs = {};
+for (const [gid, list] of Object.entries(GROUPS)) {
+  const host = document.getElementById(gid);
+  for (const [key, label, min, max, step, dec] of list) {
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label');
+    const val = document.createElement('b');
+    lab.append(label, val);
+    const inp = document.createElement('input');
+    Object.assign(inp, { type: 'range', min, max, step });
+    inp.addEventListener('input', () => { P[key] = parseFloat(inp.value); val.textContent = P[key].toFixed(dec); });
+    row.append(lab, inp); host.append(row);
+    inputs[key] = { set: () => { inp.value = P[key]; val.textContent = (+P[key]).toFixed(dec); } };
+  }
+}
+const colorHost = document.getElementById('colors');
+for (const [key, label] of COLORS) {
+  const lab = document.createElement('label');
+  const inp = document.createElement('input'); inp.type = 'color';
+  inp.addEventListener('input', () => { P[key] = inp.value; if (key === 'bg') document.body.style.background = inp.value; });
+  lab.append(label, inp); colorHost.append(lab);
+  inputs[key] = { set: () => { inp.value = P[key]; } };
+}
+const profileSel = document.getElementById('profile');
+profileSel.addEventListener('change', () => { P.profile = profileSel.value; });
+inputs.profile = { set: () => { profileSel.value = P.profile; } };
+
+const presetSel = document.getElementById('preset');
+for (const name of Object.keys(PRESETS)) presetSel.add(new Option(name, name));
+presetSel.addEventListener('change', () => applyPreset(presetSel.value));
+
+function refreshUI() {
+  for (const k in inputs) inputs[k].set();
+  document.body.style.background = P.bg;
+}
+function applyPreset(name) {
+  Object.assign(P, DEFAULTS, PRESETS[name]);
+  refreshUI();
+}
+refreshUI();
+
+let playing = true;
+const bPlay = document.getElementById('bPlay');
+function togglePlay() { playing = !playing; bPlay.textContent = playing ? 'пауза' : 'пуск'; }
+bPlay.onclick = togglePlay;
+document.getElementById('bReset').onclick = () => { presetSel.value = 'Оригинал'; applyPreset('Оригинал'); yaw = 0; };
+document.getElementById('bRand').onclick = randomize;
+document.getElementById('bSave').onclick = savePNG;
+const panel = document.getElementById('panel');
+const togglePanel = () => panel.classList.toggle('hidden');
+document.getElementById('bHide').onclick = togglePanel;
+
+function randomize() {
+  P.profile = ['well', 'well', 'wormhole', 'sheet'][Math.floor(Math.random() * 4)];
+  P.throat = rnd(0.6, 1.6);
+  P.depth = P.profile === 'wormhole' ? rnd(0.5, 1.1) : rnd(0.8, 2.6);
+  P.steep = rnd(0.8, 2);
+  P.rings = Math.round(rnd(16, 48));
+  P.spokes = Math.round(rnd(16, 64));
+  P.bottom = rnd(0.15, 0.5);
+  P.infall = rnd(0.1, 0.8);
+  P.spin = rnd(-0.08, 0.08);
+  P.twist = Math.random() < 0.4 ? rnd(-2, 2) : 0;
+  P.waves = Math.random() < 0.3 ? rnd(0.1, 0.5) : 0;
+  P.tilt = rnd(35, 70);
+  P.fov = rnd(45, 80);
+  P.shade = Math.random() < 0.5 ? rnd(0, 0.5) : 0;
+  P.fog = Math.random() < 0.5 ? rnd(0, 0.6) : 0;
+  const h = Math.random() * 360;
+  P.bg = hsl2hex(h, rnd(60, 100), rnd(35, 55));
+  P.lineCol = Math.random() < 0.6 ? '#ececec' : hsl2hex((h + 180) % 360, 90, 75);
+  P.deepCol = hsl2hex(h, 90, 12);
+  refreshUI();
+}
+
+// ---------- цвета ----------
+function hex2rgb(h) { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; }
+function hsl2hex(h, s, l) {
+  s /= 100; l /= 100;
+  const f = n => { const k = (n + h / 30) % 12; const c = l - s * Math.min(l, 1 - l) * Math.max(-1, Math.min(k - 3, 9 - k, 1));
+    return Math.round(c * 255).toString(16).padStart(2, '0'); };
+  return '#' + f(0) + f(8) + f(4);
+}
+const mix = (a, b, t) => [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2] + (b[2] - a[2]) * t];
+const css = c => `rgb(${c[0] | 0},${c[1] | 0},${c[2] | 0})`;
+
+// ---------- холст ----------
+let W = 0, H = 0, DPR = 1;
+function resize() {
+  DPR = Math.min(2, window.devicePixelRatio || 1);
+  W = innerWidth; H = innerHeight;
+  cv.width = W * DPR; cv.height = H * DPR;
+}
+addEventListener('resize', resize); resize();
+
+// зерно — заранее сгенерированная текстура
+const grainCv = document.createElement('canvas');
+grainCv.width = grainCv.height = 256;
+{
+  const g = grainCv.getContext('2d'), id = g.createImageData(256, 256);
+  for (let i = 0; i < id.data.length; i += 4) {
+    const v = Math.random() * 255; id.data[i] = id.data[i + 1] = id.data[i + 2] = v; id.data[i + 3] = 255;
+  }
+  g.putImageData(id, 0, 0);
+}
+const grainPat = ctx.createPattern(grainCv, 'repeat');
+
+// ---------- профиль воронки ----------
+// v — непрерывный индекс кольца: 0 = внешний край, N = дно горла.
+function profileAt(v, N, D, t, out) {
+  const b = P.throat;
+  let r, z;
+  if (P.profile === 'wormhole') {
+    // катеноид: r = b·ch(w), верхний лист → горло → нижний лист
+    const Vmax = Math.acosh(Math.max(1.0001, P.radius / b));
+    const w = Vmax * (1 - 2 * v / N);
+    r = b * Math.cosh(w);
+    z = D * b * (w - Vmax) * P.steep;
+  } else if (P.profile === 'sheet') {
+    // продавленная масса на резиновом листе, точка сингулярности в центре
+    r = P.radius * Math.pow(Math.max(0, 1 - v / N), 1.6);
+    z = -2.2 * D / Math.sqrt(1 + Math.pow(r / b, 2 * P.steep));
+  } else {
+    // потенциальный колодец z = −D·(b/r)^n, кольца — геометрическая прогрессия
+    const rIn = b * P.bottom;
+    r = P.radius * Math.pow(rIn / P.radius, v / N);
+    z = -D * Math.pow(b / r, P.steep);
+  }
+  if (P.waves > 0) {
+    const k = TAU / P.waveLen;
+    z += P.waves * 0.35 * Math.sin(r * k - t * 3.2) / (1 + r * 0.12);
+  }
+  out.r = r; out.z = z;
+}
+
+// ---------- сетка ----------
+let gx, gy, gd, wx, wy, wz, cap = 0;
+const tmp = { r: 0, z: 0 };
+const L = (() => { const l = [-0.45, -0.55, 0.7], n = Math.hypot(...l); return l.map(x => x / n); })();
+
+let t = 0, flow = 0, yaw = 0, last = performance.now();
+
+function frame(now) {
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if (playing) { t += dt; flow += dt * P.infall; }
+  render();
+  requestAnimationFrame(frame);
+}
+
+function render() {
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  const bg = hex2rgb(P.bg), lc = hex2rgb(P.lineCol), dc = hex2rgb(P.deepCol);
+  ctx.fillStyle = P.bg; ctx.fillRect(0, 0, W, H);
+
+  const N = Math.max(2, Math.round(P.rings));
+  const S = Math.max(3, Math.round(P.spokes));
+  const SR = 3;                                   // подразбиение между кольцами
+  const SA = Math.max(2, Math.ceil(192 / S));     // подразбиение между спицами
+  const rows = (N + 1) * SR + 1, cols = S * SA;
+  const n = rows * cols;
+  if (n > cap) {
+    cap = n;
+    gx = new Float32Array(n); gy = new Float32Array(n); gd = new Float32Array(n);
+    wx = new Float32Array(n); wy = new Float32Array(n); wz = new Float32Array(n);
+  }
+
+  const phase = ((flow % 1) + 1) % 1;
+  const D = P.depth * (1 + P.breathe * 0.35 * Math.sin(t * 1.3));
+  const rot = t * P.spin * TAU + yaw;
+
+  // камера
+  const T = P.tilt * Math.PI / 180, cT = Math.cos(T), sT = Math.sin(T);
+  const F = (Math.min(W, H) * 0.5) / Math.tan(P.fov * Math.PI / 360);
+  const cx = W / 2, cy = H / 2 + P.shift * H;
+  const tz = -D * P.look;                         // точка, куда смотрит камера
+  const dist = P.dist;
+
+  for (let i = 0; i < rows; i++) {
+    const v = -1 + phase + i / SR;
+    profileAt(v, N, D, t, tmp);
+    const r = tmp.r, z = tmp.z;
+    const tw = P.twist * (v / N) * Math.PI;
+    const pz = z - tz;
+    for (let c = 0; c < cols; c++) {
+      const a = c / cols * TAU + rot + tw + Math.PI / 2;
+      const x = r * Math.cos(a), y = r * Math.sin(a);
+      const k = i * cols + c;
+      wx[k] = x; wy[k] = y; wz[k] = z;
+      const up = y * cT + pz * sT;
+      const dep = y * sT - pz * cT + dist;
+      gd[k] = dep;
+      const s = F / Math.max(dep, 1e-3);
+      gx[k] = cx + x * s; gy[k] = cy - up * s;
+    }
+  }
+
+  // ячейки: отсечь невидимые, отсортировать от дальних к ближним
+  const cells = [];
+  const m = 60;
+  for (let band = 0; band <= N; band++) {
+    const r0 = band * SR, r1 = r0 + SR;
+    for (let j = 0; j < S; j++) {
+      const c0 = j * SA, c1 = ((j + 1) * SA) % cols;
+      const k00 = r0 * cols + c0, k01 = r0 * cols + c1, k10 = r1 * cols + c0, k11 = r1 * cols + c1;
+      const d0 = gd[k00], d1 = gd[k01], d2 = gd[k10], d3 = gd[k11];
+      if (d0 < 0.05 || d1 < 0.05 || d2 < 0.05 || d3 < 0.05) continue;
+      const mnx = Math.min(gx[k00], gx[k01], gx[k10], gx[k11]), mxx = Math.max(gx[k00], gx[k01], gx[k10], gx[k11]);
+      const mny = Math.min(gy[k00], gy[k01], gy[k10], gy[k11]), mxy = Math.max(gy[k00], gy[k01], gy[k10], gy[k11]);
+      if (mxx < -m || mnx > W + m || mxy < -m || mny > H + m) continue;
+      cells.push({ band, j, d: (d0 + d1 + d2 + d3) * 0.25 });
+    }
+  }
+  cells.sort((a, b) => b.d - a.d);
+
+  ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  const depthRef = Math.max(0.3, D * 2);
+  for (const cell of cells) {
+    const r0 = cell.band * SR, r1 = r0 + SR;
+    const c0 = cell.j * SA;
+
+    // крайние полосы плавно появляются/исчезают, чтобы поток колец был бесшовным
+    let alpha = 1;
+    if (cell.band === 0) alpha = phase;
+    else if (cell.band === N) alpha = 1 - phase;
+    if (alpha <= 0.002) continue;
+
+    // цвет: туман по глубине + затенение по нормали
+    const kA = r0 * cols + c0, kB = r1 * cols + ((c0 + SA) % cols);
+    const kC = r1 * cols + c0, kD = r0 * cols + ((c0 + SA) % cols);
+    const zc = (wz[kA] + wz[kB] + wz[kC] + wz[kD]) * 0.25;
+    const fog = P.fog > 0 ? 1 - Math.exp(-P.fog * Math.max(0, -zc) / depthRef * 1.6) : 0;
+    let fill = mix(bg, dc, fog);
+    if (P.shade > 0) {
+      const ax = wx[kB] - wx[kA], ay = wy[kB] - wy[kA], az = wz[kB] - wz[kA];
+      const bx = wx[kC] - wx[kD], by = wy[kC] - wy[kD], bz = wz[kC] - wz[kD];
+      const nx = ay * bz - az * by, ny = az * bx - ax * bz, nz = ax * by - ay * bx;
+      const nl = Math.hypot(nx, ny, nz) || 1;
+      const lum = Math.abs(nx * L[0] + ny * L[1] + nz * L[2]) / nl;
+      fill = mix(fill, [0, 0, 0], P.shade * (1 - lum) * 0.85);
+    }
+    const stroke = mix(lc, dc, fog * 0.92);
+
+    const persp = dist / cell.d;
+    ctx.lineWidth = P.line * (1 - P.persp + P.persp * clamp(persp, 0.15, 3));
+    ctx.globalAlpha = alpha;
+    ctx.fillStyle = css(fill);
+    ctx.strokeStyle = css(stroke);
+
+    ctx.beginPath();
+    for (let s = 0; s <= SA; s++) { const k = r0 * cols + (c0 + s) % cols; s ? ctx.lineTo(gx[k], gy[k]) : ctx.moveTo(gx[k], gy[k]); }
+    for (let s = 1; s <= SR; s++) { const k = (r0 + s) * cols + (c0 + SA) % cols; ctx.lineTo(gx[k], gy[k]); }
+    for (let s = SA - 1; s >= 0; s--) { const k = r1 * cols + (c0 + s) % cols; ctx.lineTo(gx[k], gy[k]); }
+    for (let s = SR - 1; s >= 1; s--) { const k = (r0 + s) * cols + c0; ctx.lineTo(gx[k], gy[k]); }
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+  }
+  ctx.globalAlpha = 1;
+
+  if (P.grain > 0) {
+    ctx.save();
+    ctx.globalCompositeOperation = 'overlay';
+    ctx.globalAlpha = P.grain;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.fillStyle = grainPat;
+    ctx.translate((Math.random() * 256) | 0, (Math.random() * 256) | 0);
+    ctx.fillRect(-256, -256, cv.width + 256, cv.height + 256);
+    ctx.restore();
+  }
+}
+
+// ---------- мышь / клавиатура ----------
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY }; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  drag = { x: e.clientX, y: e.clientY };
+  yaw += dx * 0.006;
+  P.tilt = clamp(P.tilt - dy * 0.25, 0, 85);
+  inputs.tilt.set();
+});
+const endDrag = () => { drag = null; };
+cv.addEventListener('pointerup', endDrag);
+cv.addEventListener('pointercancel', endDrag);
+cv.addEventListener('wheel', e => {
+  e.preventDefault();
+  P.dist = clamp(P.dist * Math.exp(e.deltaY * 0.0012), 3, 30);
+  inputs.dist.set();
+}, { passive: false });
+
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'SELECT' || e.metaKey || e.ctrlKey) return;
+  if (e.code === 'Space') { e.preventDefault(); togglePlay(); }
+  else if (e.code === 'KeyR') randomize();
+  else if (e.code === 'KeyS') savePNG();
+  else if (e.code === 'KeyH') togglePanel();
+});
+
+function savePNG() {
+  const a = document.createElement('a');
+  a.download = `singularity-${Date.now()}.png`;
+  a.href = cv.toDataURL('image/png');
+  a.click();
+}
+
+setTimeout(() => { document.getElementById('hint').style.opacity = 0; }, 6000);
+requestAnimationFrame(frame);
+</script>
+</body>
+</html>

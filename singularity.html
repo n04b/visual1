@@ -1,0 +1,409 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Сингулярность</title>
+<style>
+  :root { --bg:#0e0e0e; --panel:#141414; --fg:#ddd; --dim:#777; --acc:#4d7cff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; background:#04070f; }
+  #cv { position:absolute; inset:0; width:100%; height:100%; display:block; cursor:crosshair; }
+  #panel { width:288px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:16px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 96px 1fr 42px; align-items:center; gap:6px; margin:5px 0; }
+  .row label { color:var(--dim); overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .row output { text-align:right; color:var(--fg); }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=color] { width:100%; height:22px; padding:0; border:1px solid #333; background:#0c0c0c; cursor:pointer; }
+  input[type=checkbox] { accent-color:var(--acc); }
+  select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 44%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  .cols { display:grid; grid-template-columns: 1fr 1fr; gap:6px 10px; }
+  .cc { display:grid; grid-template-columns: 1fr; gap:2px; }
+  .cc span { color:var(--dim); }
+  .chk { display:flex; align-items:center; gap:8px; margin:6px 0; color:var(--dim); cursor:pointer; }
+  .hint { color:#555; margin-top:14px; }
+  @media (max-width: 720px) { body { flex-direction:column; } #stage { height:60vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Сингулярность</h1>
+  <div class="btns">
+    <button id="bPlay" title="пробел">пауза</button>
+    <button id="bRand" title="R">случайно</button>
+    <button id="bReset">сброс</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+
+  <h2>Воронка</h2>
+  <div id="geo"></div>
+
+  <h2>Движение</h2>
+  <div id="mov"></div>
+
+  <h2>Камера</h2>
+  <div id="cam"></div>
+
+  <h2>Стиль</h2>
+  <div id="sty"></div>
+  <div class="cols" id="colors"></div>
+  <label class="chk"><input type="checkbox" id="cGlow" checked> свечение горизонта</label>
+  <label class="chk"><input type="checkbox" id="cParticles" checked> падающие частицы</label>
+  <label class="chk"><input type="checkbox" id="cChroma"> хроматическая аберрация</label>
+
+  <div class="hint">
+    Полярная сетка (кольца + спицы) навёрнута на воронку гравитационного колодца:
+    высота <b>z(R) = −depth · (b/R)^steep</b>, так что у горла радиус <b>b</b> кривизна
+    обрывается в глубокую узкую шахту. Точки крутятся по азимуту, кольца «падают»
+    внутрь по геометрической прогрессии, поверхность наклонена и спроецирована
+    в перспективе. Свет у горизонта — радиальный градиент, частицы по спирали
+    сваливаются в горло.<br><br>
+    пробел — пауза · R — случайно · S — PNG · тащи мышь — наклон/поворот · колесо — зум
+  </div>
+</div>
+
+<script>
+const TAU = Math.PI * 2;
+const cv = document.getElementById('cv');
+const ctx = cv.getContext('2d');
+const clamp = (v,a,b)=>Math.max(a,Math.min(b,v));
+const lerp = (a,b,t)=>a+(b-a)*t;
+const R = (a=1,b)=> b===undefined ? Math.random()*a : a+Math.random()*(b-a);
+
+// ---------- parameters ----------
+const P = {
+  throat:   0.34,   // b — радиус горла (доля Rmax)
+  steep:    1.55,   // крутизна воронки
+  rmax:     1.9,    // внешний радиус сетки (мир)
+  rings:    22,     // число колец
+  spokes:   36,     // число спиц
+  innerK:   0.12,   // как глубоко в горло тянуть кольца (доля b)
+  depth:    2.2,    // глубина колодца
+
+  spin:     0.10,   // скорость вращения
+  infall:   0.35,   // скорость падения колец внутрь
+  wobble:   0.0,    // покачивание горла
+  pulse:    0.0,    // пульсация глубины
+
+  tilt:     58,     // наклон камеры, град
+  dist:     3.4,    // дистанция камеры
+  focal:    2.6,    // фокус (зум перспективы)
+
+  line:     2.4,    // толщина линий
+  fade:     0.9,    // затухание дальних линий
+  bg:      '#0b3cff',
+  lineCol: '#eef1ff',
+  glowCol: '#8fb4ff',
+  glowAmt: 0.9,     // яркость свечения
+};
+const DEFAULTS = JSON.parse(JSON.stringify(P));
+
+// slider metadata: [key, label, min, max, step, fmt]
+const SLIDERS = {
+  geo: [
+    ['throat','горло b', 0.08, 0.6, 0.01, v=>v.toFixed(2)],
+    ['steep','крутизна', 0.5, 3, 0.05, v=>v.toFixed(2)],
+    ['depth','глубина', 0.6, 4, 0.05, v=>v.toFixed(2)],
+    ['rmax','радиус', 1.1, 2.6, 0.05, v=>v.toFixed(2)],
+    ['rings','кольца', 6, 44, 1, v=>v|0],
+    ['spokes','спицы', 6, 80, 1, v=>v|0],
+    ['innerK','дно горла', 0.03, 0.4, 0.01, v=>v.toFixed(2)],
+  ],
+  mov: [
+    ['spin','вращение', -0.6, 0.6, 0.01, v=>v.toFixed(2)],
+    ['infall','падение', 0, 1.2, 0.01, v=>v.toFixed(2)],
+    ['wobble','покачивание', 0, 1, 0.01, v=>v.toFixed(2)],
+    ['pulse','пульсация', 0, 1, 0.01, v=>v.toFixed(2)],
+  ],
+  cam: [
+    ['tilt','наклон°', 20, 85, 1, v=>v|0],
+    ['dist','дистанция', 2, 6, 0.05, v=>v.toFixed(2)],
+    ['focal','фокус', 1.4, 4, 0.05, v=>v.toFixed(2)],
+  ],
+  sty: [
+    ['line','линия', 0.5, 6, 0.1, v=>v.toFixed(1)],
+    ['fade','затухание', 0, 1, 0.02, v=>v.toFixed(2)],
+    ['glowAmt','свет', 0, 2, 0.05, v=>v.toFixed(2)],
+  ],
+};
+
+// ---------- build UI ----------
+function buildGroup(id){
+  const host = document.getElementById(id);
+  host.innerHTML = '';
+  for (const [key,label,min,max,step,fmt] of SLIDERS[id]){
+    const row = document.createElement('div'); row.className='row';
+    const l = document.createElement('label'); l.textContent = label;
+    const inp = document.createElement('input'); inp.type='range';
+    inp.min=min; inp.max=max; inp.step=step; inp.value=P[key];
+    const out = document.createElement('output'); out.textContent = fmt(P[key]);
+    inp.addEventListener('input', ()=>{ P[key]=parseFloat(inp.value); out.textContent=fmt(P[key]); });
+    inp.dataset.key = key; inp._fmt = fmt;
+    row.append(l,inp,out); host.append(row);
+  }
+}
+['geo','mov','cam','sty'].forEach(buildGroup);
+
+// colors
+const COLS = [['bg','фон'],['lineCol','линии'],['glowCol','свет']];
+const colorHost = document.getElementById('colors');
+for (const [key,label] of COLS){
+  const wrap = document.createElement('label'); wrap.className='cc';
+  const s = document.createElement('span'); s.textContent = label;
+  const c = document.createElement('input'); c.type='color'; c.value=P[key]; c.dataset.key=key;
+  c.addEventListener('input', ()=>{ P[key]=c.value; });
+  wrap.append(s,c); colorHost.append(wrap);
+}
+
+const cGlow = document.getElementById('cGlow');
+const cParticles = document.getElementById('cParticles');
+const cChroma = document.getElementById('cChroma');
+
+function refreshUI(){
+  document.querySelectorAll('input[type=range]').forEach(inp=>{
+    const k = inp.dataset.key; if (k in P){ inp.value=P[k]; if(inp._fmt){ inp.nextElementSibling.textContent=inp._fmt(P[k]); } }
+  });
+  document.querySelectorAll('input[type=color]').forEach(c=>{ c.value=P[c.dataset.key]; });
+}
+
+// ---------- canvas sizing ----------
+let W=0,H=0,DPR=1;
+function resize(){
+  const st = document.getElementById('stage');
+  DPR = Math.min(2, window.devicePixelRatio||1);
+  W = st.clientWidth; H = st.clientHeight;
+  cv.width = W*DPR; cv.height = H*DPR;
+  cv.style.width=W+'px'; cv.style.height=H+'px';
+  ctx.setTransform(DPR,0,0,DPR,0,0);
+}
+window.addEventListener('resize', resize); resize();
+
+// ---------- geometry ----------
+// funnel height as function of world radius r; b = throat radius (world units).
+// Bounded gravity-well: deepest = -depth at centre, flattens to 0 far out.
+// `steep` sharpens the walls near the throat.
+function zFunc(r, b){
+  const x = r / b;
+  return -P.depth * Math.pow(1 + Math.pow(x, 2*P.steep), -0.5);
+}
+
+// spin about Z, tilt about X (look-down camera), perspective project
+function project(r, a, z, cosT, sinT, spin){
+  const aa = a + spin;
+  const x = r*Math.cos(aa);
+  const y = r*Math.sin(aa);
+  const ry =  y*cosT + z*sinT;      // vertical in view
+  const rz = -y*sinT + z*cosT;      // into the scene
+  const zc = rz + P.dist + P.focal;
+  const s = P.focal / Math.max(0.2, zc);
+  return { x: W/2 + x*s*minDim*0.44,
+           y: H/2 - ry*s*minDim*0.44 + H*0.04,
+           s, depth: zc };
+}
+let minDim = 800;
+
+// ---------- particles ----------
+let particles = [];
+function seedParticles(n){
+  particles = [];
+  for (let i=0;i<n;i++) particles.push(newParticle());
+}
+function newParticle(){
+  return { a: R(TAU), r: R(0.9,1.0)*P.rmax, spd: R(0.25,0.7), av: R(1.2,3.0), life: R(0.3,1) };
+}
+
+// ---------- render ----------
+let t=0, last=performance.now(), playing=true, infallPhase=0;
+
+function hexA(hex, a){
+  const h = hex.replace('#','');
+  const r=parseInt(h.substring(0,2),16), g=parseInt(h.substring(2,4),16), b=parseInt(h.substring(4,6),16);
+  return `rgba(${r},${g},${b},${a})`;
+}
+
+function frame(now){
+  const dt = Math.min(0.05, (now-last)/1000); last=now;
+  if (playing){ t += dt; infallPhase += dt*P.infall; }
+  minDim = Math.min(W,H);
+
+  const b = P.throat * P.rmax;
+  const wob = P.wobble ? Math.sin(t*1.7)*P.wobble*0.18 : 0;
+  const puls = P.pulse ? (1 + Math.sin(t*1.1)*P.pulse*0.35) : 1;
+  const depth0 = P.depth; P.depth = depth0 * puls;
+  const bEff = b * (1 + wob);
+
+  const tiltR = P.tilt*Math.PI/180;
+  const cosT = Math.cos(tiltR), sinT = Math.sin(tiltR);
+  const spin = t*P.spin*TAU*0.16;
+
+  // background
+  ctx.fillStyle = P.bg;
+  ctx.fillRect(0,0,W,H);
+
+  // throat centre in screen space (r -> 0 along funnel)
+  const throatPt = project(0.0001, 0, zFunc(0.0001,bEff), cosT, sinT, spin);
+
+  // horizon glow
+  if (cGlow.checked && P.glowAmt>0){
+    const gr = ctx.createRadialGradient(throatPt.x, throatPt.y, 2, throatPt.x, throatPt.y, minDim*0.5);
+    const gA = clamp(P.glowAmt,0,2);
+    gr.addColorStop(0, hexA(P.glowCol, 0.9*gA));
+    gr.addColorStop(0.12, hexA(P.glowCol, 0.55*gA));
+    gr.addColorStop(0.4, hexA(P.glowCol, 0.12*gA));
+    gr.addColorStop(1, hexA(P.glowCol, 0));
+    ctx.globalCompositeOperation = 'screen';
+    ctx.fillStyle = gr; ctx.fillRect(0,0,W,H);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+
+  // radii list (geometric from rmax down into throat), with infall phase drift
+  const N = Math.round(P.rings);
+  const rInner = bEff * P.innerK;
+  const ratio = rInner / P.rmax;
+  const radii = [];
+  for (let i=0;i<=N;i++){
+    let f = (i + (infallPhase % 1)) / N;      // 0..~1, drifts inward
+    radii.push(P.rmax * Math.pow(ratio, f));
+  }
+
+  const Na = Math.round(P.spokes);
+  const chroma = cChroma.checked;
+
+  function strokeGrid(offA, colHex, alphaMul){
+    // rings
+    for (let i=0;i<radii.length;i++){
+      const r = radii[i];
+      const z = zFunc(r, bEff);
+      // depth-based fade: deeper (more into throat) fades
+      const df = clamp((r - rInner)/(P.rmax - rInner), 0, 1);
+      const alpha = alphaMul * lerp(1-P.fade, 1, Math.pow(df,0.6));
+      ctx.beginPath();
+      const SEG = 96;
+      for (let k=0;k<=SEG;k++){
+        const a = k/SEG*TAU;
+        const p = project(r, a, z, cosT, sinT, spin+offA);
+        if (k===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+      }
+      ctx.strokeStyle = hexA(colHex, clamp(alpha,0,1));
+      ctx.lineWidth = P.line * lerp(0.7,1.15,df);
+      ctx.stroke();
+    }
+    // spokes
+    for (let j=0;j<Na;j++){
+      const a = j/Na*TAU;
+      ctx.beginPath();
+      const SEG = 60;
+      for (let k=0;k<=SEG;k++){
+        const f = k/SEG;
+        const r = P.rmax * Math.pow(ratio, f);
+        const z = zFunc(r, bEff);
+        const p = project(r, a, z, cosT, sinT, spin+offA);
+        if (k===0) ctx.moveTo(p.x,p.y); else ctx.lineTo(p.x,p.y);
+      }
+      ctx.strokeStyle = hexA(colHex, clamp(alphaMul*0.9,0,1));
+      ctx.lineWidth = P.line*0.9;
+      ctx.stroke();
+    }
+  }
+
+  ctx.lineJoin='round'; ctx.lineCap='round';
+  if (chroma){
+    ctx.globalCompositeOperation='screen';
+    strokeGrid(0.010, '#ff3b3b', 0.5);
+    strokeGrid(-0.010, '#3bff8a', 0.5);
+    strokeGrid(0.0, '#3b7bff', 0.5);
+    ctx.globalCompositeOperation='source-over';
+    strokeGrid(0.0, P.lineCol, 0.75);
+  } else {
+    strokeGrid(0.0, P.lineCol, 1.0);
+  }
+
+  // particles spiralling in
+  if (cParticles.checked){
+    if (particles.length===0) seedParticles(140);
+    ctx.globalCompositeOperation='screen';
+    for (const pt of particles){
+      if (playing){
+        pt.a += pt.av*dt*(0.4 + 0.8*(1 - pt.r/P.rmax));
+        pt.r -= pt.spd*dt*(0.15 + 0.9*(1 - pt.r/P.rmax));
+        if (pt.r <= rInner*0.9){ Object.assign(pt, newParticle()); }
+      }
+      const z = zFunc(pt.r, bEff);
+      const p = project(pt.r, pt.a, z, cosT, sinT, spin);
+      const df = clamp((pt.r - rInner)/(P.rmax - rInner),0,1);
+      const sz = lerp(2.4, 0.6, df) * p.s;
+      ctx.fillStyle = hexA(P.glowCol, clamp(0.9*(1-df)+0.2,0,1));
+      ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(0.4,sz), 0, TAU); ctx.fill();
+    }
+    ctx.globalCompositeOperation='source-over';
+  }
+
+  P.depth = depth0; // restore (pulse)
+  requestAnimationFrame(frame);
+}
+requestAnimationFrame(frame);
+
+// ---------- interaction ----------
+let drag=false, px=0, py=0;
+cv.addEventListener('pointerdown', e=>{ drag=true; px=e.clientX; py=e.clientY; cv.setPointerCapture(e.pointerId); });
+cv.addEventListener('pointerup', ()=>drag=false);
+cv.addEventListener('pointermove', e=>{
+  if(!drag) return;
+  const dx=e.clientX-px, dy=e.clientY-py; px=e.clientX; py=e.clientY;
+  P.tilt = clamp(P.tilt - dy*0.2, 20, 85);
+  P.spin = clamp(P.spin + dx*0.0006, -0.6, 0.6);
+  refreshUI();
+});
+cv.addEventListener('wheel', e=>{
+  e.preventDefault();
+  P.focal = clamp(P.focal * (e.deltaY>0?0.96:1.04), 1.4, 4);
+  refreshUI();
+}, {passive:false});
+
+// ---------- buttons ----------
+const bPlay=document.getElementById('bPlay');
+bPlay.onclick = ()=>{ playing=!playing; bPlay.textContent = playing?'пауза':'играть'; };
+document.getElementById('bReset').onclick = ()=>{ Object.assign(P, JSON.parse(JSON.stringify(DEFAULTS))); refreshUI(); seedParticles(140); };
+document.getElementById('bRand').onclick = randomize;
+document.getElementById('bSave').onclick = ()=>{
+  const a=document.createElement('a'); a.download='singularity.png'; a.href=cv.toDataURL('image/png'); a.click();
+};
+
+function randomize(){
+  P.throat = R(0.14,0.5); P.steep = R(0.8,2.6); P.depth = R(1.2,3.4);
+  P.rings = Math.round(R(12,34)); P.spokes = Math.round(R(16,60));
+  P.spin = R(-0.35,0.45); P.infall = R(0.1,0.9);
+  P.wobble = Math.random()<0.5?0:R(0.2,0.8); P.pulse = Math.random()<0.6?0:R(0.2,0.7);
+  P.tilt = R(38,74); P.focal = R(2,3.4);
+  // palette
+  const pals = [
+    ['#0b3cff','#eef1ff','#8fb4ff'], ['#050512','#ff7ad9','#ff3ea5'],
+    ['#02110c','#7dffce','#22e6a0'], ['#120306','#ffd27a','#ff8a3c'],
+    ['#0a0014','#c9a3ff','#8a5bff'], ['#000','#ffffff','#66d9ff'],
+  ];
+  const pl = pals[Math.floor(R(pals.length))];
+  P.bg=pl[0]; P.lineCol=pl[1]; P.glowCol=pl[2];
+  refreshUI(); seedParticles(140);
+}
+
+// ---------- keyboard ----------
+window.addEventListener('keydown', e=>{
+  if (e.code==='Space'){ e.preventDefault(); bPlay.click(); }
+  else if (e.key==='r'||e.key==='R'){ randomize(); }
+  else if (e.key==='s'||e.key==='S'){ document.getElementById('bSave').click(); }
+});
+
+seedParticles(140);
+</script>
+</body>
+</html>

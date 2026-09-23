@@ -1,0 +1,365 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Стеклянный куб</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
+  canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
+  canvas:active { cursor: grabbing; }
+  #hint {
+    position: fixed; left: 16px; bottom: 14px;
+    font: 12px/1.4 -apple-system, system-ui, sans-serif; letter-spacing: .02em;
+    color: rgba(230, 232, 255, .5); pointer-events: none;
+    transition: opacity 1s ease;
+  }
+  #panel {
+    position: fixed; top: 14px; right: 14px; width: 218px;
+    padding: 12px 13px 13px; border-radius: 12px;
+    background: rgba(14, 15, 22, .62); backdrop-filter: blur(14px);
+    border: 1px solid rgba(150, 160, 210, .14);
+    font: 11px/1.3 -apple-system, system-ui, sans-serif; color: rgba(228, 230, 245, .92);
+    user-select: none; transition: opacity .35s ease, transform .35s ease;
+    box-shadow: 0 12px 40px rgba(0,0,0,.5);
+  }
+  #panel.hidden { opacity: 0; transform: translateX(12px); pointer-events: none; }
+  #panel h1 { margin: 0 0 10px; font-size: 12px; font-weight: 600; letter-spacing: .04em;
+    color: rgba(200, 210, 255, .8); display:flex; justify-content:space-between; align-items:center; }
+  #panel h1 span { font-weight: 400; color: rgba(180,190,230,.45); font-size:10px; }
+  .row { margin: 9px 0; }
+  .row label { display: flex; justify-content: space-between; margin-bottom: 4px;
+    color: rgba(205, 210, 235, .7); }
+  .row label b { font-weight: 500; color: rgba(190, 205, 255, .95); font-variant-numeric: tabular-nums; }
+  .row input[type=range] { -webkit-appearance: none; appearance: none; width: 100%; height: 3px;
+    border-radius: 3px; background: rgba(150, 160, 210, .22); outline: none; }
+  .row input[type=range]::-webkit-slider-thumb { -webkit-appearance: none; width: 13px; height: 13px;
+    border-radius: 50%; background: #cdd6ff; cursor: pointer; box-shadow: 0 0 8px rgba(150,170,255,.6); }
+  .btns { display: flex; gap: 7px; margin-top: 12px; }
+  .btns button { flex: 1; padding: 7px 0; border-radius: 8px; cursor: pointer;
+    border: 1px solid rgba(150, 160, 210, .18); background: rgba(150, 160, 210, .1);
+    color: rgba(225, 230, 250, .9); font: 11px/1 -apple-system, system-ui, sans-serif; letter-spacing:.02em;
+    transition: background .15s; }
+  .btns button:hover { background: rgba(160, 175, 235, .22); }
+</style>
+<script type="importmap">
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.169.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.169.0/examples/jsm/"
+} }
+</script>
+</head>
+<body>
+<div id="panel">
+  <h1>Стеклянный куб <span>параметры</span></h1>
+  <div id="controls"></div>
+  <div class="btns">
+    <button id="rnd">случайно</button>
+    <button id="reset">сброс</button>
+  </div>
+</div>
+<div id="hint">тяни — вращать · колесо — зум · пробел — случайно · R — автоворащение · S — PNG · H — панель</div>
+
+<script type="module">
+import * as THREE from 'three';
+import { EffectComposer } from 'three/addons/postprocessing/EffectComposer.js';
+import { RenderPass } from 'three/addons/postprocessing/RenderPass.js';
+import { UnrealBloomPass } from 'three/addons/postprocessing/UnrealBloomPass.js';
+import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
+
+// ---------- parameters ----------
+const P = {
+  ior:      { label: 'Преломление', min: 1.15, max: 2.4,  step: 0.01, val: 1.52 },
+  disp:     { label: 'Дисперсия',   min: 0,    max: 0.22, step: 0.005, val: 0.055 },
+  bounces:  { label: 'Отражения',   min: 1,    max: 7,    step: 1,    val: 4, int: true },
+  bevel:    { label: 'Фаска',       min: 0,    max: 0.28, step: 0.01, val: 0.06 },
+  lightInt: { label: 'Свет',        min: 0.4,  max: 4.0,  step: 0.05, val: 1.9 },
+  lightSoft:{ label: 'Мягкость',    min: 0,    max: 1,    step: 0.02, val: 0.55 },
+  ambient:  { label: 'Ambient',     min: 0,    max: 0.6,  step: 0.02, val: 0.12 },
+  absorb:   { label: 'Плотность',   min: 0,    max: 0.5,  step: 0.01, val: 0.05 },
+  exposure: { label: 'Экспозиция',  min: 0.3,  max: 2.5,  step: 0.05, val: 1.15 },
+  bloom:    { label: 'Свечение',    min: 0,    max: 1.4,  step: 0.02, val: 0.55 },
+  spin:     { label: 'Вращение',    min: 0,    max: 1,    step: 0.02, val: 0.28 },
+  zoom:     { label: 'Дистанция',   min: 5.0,  max: 15.0, step: 0.1,  val: 8.5 },
+};
+const DEF = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, v.val]));
+
+// ---------- renderer / scene ----------
+const renderer = new THREE.WebGLRenderer({ antialias: true, preserveDrawingBuffer: true });
+renderer.setPixelRatio(Math.min(devicePixelRatio, 1.75));
+renderer.setSize(innerWidth, innerHeight);
+renderer.toneMapping = THREE.ACESFilmicToneMapping;
+document.body.appendChild(renderer.domElement);
+
+const scene = new THREE.Scene();
+const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+
+const uniforms = {
+  uRes:      { value: new THREE.Vector2(innerWidth, innerHeight) },
+  uRot:      { value: new THREE.Matrix3() },
+  uRotInv:   { value: new THREE.Matrix3() },
+  uDist:     { value: DEF.zoom },
+  uFov:      { value: 0.42 },
+  uIOR:      { value: DEF.ior },
+  uDisp:     { value: DEF.disp },
+  uBounces:  { value: DEF.bounces },
+  uBevel:    { value: DEF.bevel },
+  uLightInt: { value: DEF.lightInt },
+  uLightSoft:{ value: DEF.lightSoft },
+  uAmbient:  { value: DEF.ambient },
+  uAbsorb:   { value: DEF.absorb },
+  uExposure: { value: DEF.exposure },
+};
+
+const frag = /* glsl */`
+precision highp float;
+varying vec2 vUv;
+uniform vec2 uRes;
+uniform mat3 uRot, uRotInv;
+uniform float uDist, uFov, uIOR, uDisp, uBevel, uLightInt, uLightSoft, uAmbient, uAbsorb, uExposure;
+uniform int uBounces;
+
+const vec3 HALF = vec3(1.0);
+
+float sdBox(vec3 p){
+  vec3 q = abs(p) - HALF + uBevel;
+  return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0) - uBevel;
+}
+vec3 calcN(vec3 p){
+  vec2 e = vec2(0.0006, 0.0);
+  return normalize(vec3(
+    sdBox(p+e.xyy) - sdBox(p-e.xyy),
+    sdBox(p+e.yxy) - sdBox(p-e.yxy),
+    sdBox(p+e.yyx) - sdBox(p-e.yyx)));
+}
+float fres(float c, float f0){ return f0 + (1.0 - f0) * pow(1.0 - c, 5.0); }
+
+// world-space studio environment (only seen through the glass)
+vec3 env(vec3 d){
+  vec3 c = vec3(0.0);
+  vec3 L1 = normalize(vec3(0.30, 0.78, 0.52));
+  float s = mix(0.86, 0.0, uLightSoft);
+  c += vec3(1.0) * smoothstep(s, 1.0, dot(d, L1)) * uLightInt;
+  vec3 L2 = normalize(vec3(-0.72, 0.28, -0.22));
+  c += vec3(0.5, 0.68, 1.0) * smoothstep(0.35, 1.0, dot(d, L2)) * uLightInt * 0.4;
+  vec3 L3 = normalize(vec3(0.15, -0.6, 0.55));
+  c += vec3(1.0, 0.82, 0.66) * smoothstep(0.5, 1.0, dot(d, L3)) * uLightInt * 0.28;
+  c += mix(vec3(0.012, 0.016, 0.035), vec3(0.05, 0.05, 0.085), d.y * 0.5 + 0.5) * uAmbient;
+  return c;
+}
+
+// march from just-inside point to the far surface
+float marchIn(vec3 pos, vec3 dir, out vec3 hp){
+  float t = 0.02;
+  for(int i = 0; i < 96; i++){
+    vec3 q = pos + dir * t;
+    float d = sdBox(q);
+    if(d > -0.0015){ hp = q; return t; }
+    t += max(-d, 0.004);
+    if(t > 12.0) break;
+  }
+  hp = pos + dir * t; return t;
+}
+
+// one chromatic channel of the transmitted path
+float trans(vec3 p, vec3 rd, vec3 n, float ior, vec3 chan){
+  vec3 dir = refract(rd, n, 1.0 / ior);
+  vec3 pos = p + dir * 0.01;
+  float path = 0.0;
+  for(int b = 0; b < 8; b++){
+    if(b >= uBounces) break;
+    vec3 hp; float len = marchIn(pos, dir, hp);
+    path += len;
+    vec3 oN = calcN(hp);
+    vec3 od = refract(dir, oN, ior);       // glass -> air
+    if(dot(od, od) < 0.0001){              // total internal reflection
+      dir = reflect(dir, oN);
+      pos = hp + dir * 0.01;
+      continue;
+    }
+    float e = dot(env(uRot * od), chan);
+    return e * exp(-uAbsorb * path);
+  }
+  return dot(env(uRot * dir), chan) * exp(-uAbsorb * path);
+}
+
+void main(){
+  vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
+  vec3 roW = vec3(0.0, 0.0, uDist);
+  vec3 rdW = normalize(vec3(uv * uFov, -1.0));
+  // into cube-local space
+  vec3 ro = uRotInv * roW;
+  vec3 rd = uRotInv * rdW;
+
+  // ray-march to the entry surface
+  float t = 0.0; bool hit = false; vec3 p;
+  for(int i = 0; i < 96; i++){
+    p = ro + rd * t;
+    float d = sdBox(p);
+    if(d < 0.001){ hit = true; break; }
+    t += d;
+    if(t > 20.0) break;
+  }
+  if(!hit){ gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+
+  vec3 n  = calcN(p);
+  vec3 wN = uRot * n;
+  float F = fres(clamp(dot(-rdW, wN), 0.0, 1.0), 0.04);
+  vec3 refl = env(reflect(rdW, wN)) * F;
+
+  vec3 tr;
+  tr.r = trans(p, rd, n, uIOR - uDisp, vec3(1.0, 0.0, 0.0));
+  tr.g = trans(p, rd, n, uIOR,          vec3(0.0, 1.0, 0.0));
+  tr.b = trans(p, rd, n, uIOR + uDisp,  vec3(0.0, 0.0, 1.0));
+
+  vec3 col = refl + tr * (1.0 - F);
+  col *= uExposure;
+  gl_FragColor = vec4(col, 1.0);
+}
+`;
+
+const mat = new THREE.ShaderMaterial({
+  uniforms,
+  vertexShader: `varying vec2 vUv; void main(){ vUv = uv; gl_Position = vec4(position, 1.0); }`,
+  fragmentShader: frag,
+});
+scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
+
+// ---------- post ----------
+const composer = new EffectComposer(renderer);
+composer.addPass(new RenderPass(scene, cam));
+const bloom = new UnrealBloomPass(new THREE.Vector2(innerWidth, innerHeight), DEF.bloom, 0.5, 0.72);
+composer.addPass(bloom);
+composer.addPass(new OutputPass());
+
+// ---------- orientation ----------
+let q = new THREE.Quaternion().setFromEuler(new THREE.Euler(-0.50, 0.62, 0.10, 'XYZ'));
+const m3 = new THREE.Matrix3();
+const m4 = new THREE.Matrix4();
+function syncRot(){
+  m4.makeRotationFromQuaternion(q);
+  m3.setFromMatrix4(m4);
+  uniforms.uRot.value.copy(m3);
+  uniforms.uRotInv.value.copy(m3).transpose();
+}
+syncRot();
+
+// ---------- interaction ----------
+const el = renderer.domElement;
+let drag = false, px = 0, py = 0, moved = false;
+const _q = new THREE.Quaternion(), _e = new THREE.Euler();
+el.addEventListener('pointerdown', e => { drag = true; moved = false; px = e.clientX; py = e.clientY; el.setPointerCapture(e.pointerId); });
+el.addEventListener('pointerup',   () => drag = false);
+el.addEventListener('pointermove', e => {
+  if(!drag) return;
+  const dx = e.clientX - px, dy = e.clientY - py; px = e.clientX; py = e.clientY;
+  if(Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+  _e.set(dy * 0.006, dx * 0.006, 0, 'XYZ');
+  _q.setFromEuler(_e);
+  q.premultiply(_q).normalize();
+});
+el.addEventListener('wheel', e => {
+  e.preventDefault();
+  const v = P.zoom;
+  v.val = Math.min(v.max, Math.max(v.min, v.val + e.deltaY * 0.0016 * (v.max - v.min)));
+  uniforms.uDist.value = v.val;
+  syncUI('zoom');
+}, { passive: false });
+
+// ---------- UI ----------
+const controls = document.getElementById('controls');
+const refs = {};
+for(const [k, s] of Object.entries(P)){
+  const row = document.createElement('div'); row.className = 'row';
+  const lab = document.createElement('label');
+  const val = document.createElement('b');
+  lab.textContent = s.label; lab.appendChild(val);
+  const inp = document.createElement('input');
+  inp.type = 'range'; inp.min = s.min; inp.max = s.max; inp.step = s.step; inp.value = s.val;
+  inp.addEventListener('input', () => { s.val = parseFloat(inp.value); apply(k); });
+  row.appendChild(lab); row.appendChild(inp); controls.appendChild(row);
+  refs[k] = { inp, val };
+  syncUI(k);
+}
+function fmt(k, v){ return P[k].int ? String(v) : v.toFixed(2); }
+function syncUI(k){ refs[k].inp.value = P[k].val; refs[k].val.textContent = fmt(k, P[k].val); }
+function apply(k){
+  const v = P[k].val;
+  switch(k){
+    case 'ior': uniforms.uIOR.value = v; break;
+    case 'disp': uniforms.uDisp.value = v; break;
+    case 'bounces': uniforms.uBounces.value = v; break;
+    case 'bevel': uniforms.uBevel.value = v; break;
+    case 'lightInt': uniforms.uLightInt.value = v; break;
+    case 'lightSoft': uniforms.uLightSoft.value = v; break;
+    case 'ambient': uniforms.uAmbient.value = v; break;
+    case 'absorb': uniforms.uAbsorb.value = v; break;
+    case 'exposure': uniforms.uExposure.value = v; break;
+    case 'bloom': bloom.strength = v; break;
+    case 'zoom': uniforms.uDist.value = v; break;
+  }
+  syncUI(k);
+}
+
+document.getElementById('reset').addEventListener('click', () => {
+  for(const [k, s] of Object.entries(P)){ s.val = DEF[k]; apply(k); }
+  q.setFromEuler(new THREE.Euler(-0.50, 0.62, 0.10, 'XYZ'));
+});
+const R = (a, b) => a + Math.random() * (b - a);
+document.getElementById('rnd').addEventListener('click', randomize);
+function randomize(){
+  P.ior.val = R(1.35, 2.1);
+  P.disp.val = R(0.02, 0.16);
+  P.bounces.val = Math.round(R(2, 6));
+  P.bevel.val = R(0.02, 0.22);
+  P.lightInt.val = R(1.3, 2.8);
+  P.lightSoft.val = R(0.2, 0.85);
+  P.ambient.val = R(0.05, 0.28);
+  P.absorb.val = R(0.0, 0.2);
+  for(const k of ['ior','disp','bounces','bevel','lightInt','lightSoft','ambient','absorb']) apply(k);
+  q.setFromEuler(new THREE.Euler(R(-1, 1), R(-Math.PI, Math.PI), R(-0.4, 0.4), 'XYZ'));
+}
+
+// ---------- keys ----------
+const panel = document.getElementById('panel');
+const hint = document.getElementById('hint');
+let autoOn = true;
+addEventListener('keydown', e => {
+  const k = e.key.toLowerCase();
+  if(k === 'h'){ panel.classList.toggle('hidden'); }
+  else if(k === 'r'){ autoOn = !autoOn; }
+  else if(k === ' '){ e.preventDefault(); randomize(); }
+  else if(k === 's'){
+    renderer.domElement.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = 'cube.png'; a.click();
+    });
+  }
+});
+setTimeout(() => hint.style.opacity = '0', 6000);
+addEventListener('pointerdown', () => { hint.style.opacity = '0'; });
+
+// ---------- loop ----------
+const spinAxis = new THREE.Vector3(0.15, 1.0, 0.05).normalize();
+const spinQ = new THREE.Quaternion();
+let last = performance.now();
+function tick(now){
+  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  if(autoOn && !drag && P.spin.val > 0.001){
+    spinQ.setFromAxisAngle(spinAxis, P.spin.val * dt * 0.7);
+    q.premultiply(spinQ).normalize();
+  }
+  syncRot();
+  composer.render();
+  requestAnimationFrame(tick);
+}
+requestAnimationFrame(tick);
+
+addEventListener('resize', () => {
+  renderer.setSize(innerWidth, innerHeight);
+  composer.setSize(innerWidth, innerHeight);
+  uniforms.uRes.value.set(innerWidth, innerHeight);
+});
+</script>
+</body>
+</html>
