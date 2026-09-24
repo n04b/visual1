@@ -1,0 +1,1210 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suprematist People</title>
+<style>
+  :root { --bg:#111; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#e0432f; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262626, #121212 72%); }
+  #cv { display:block; cursor:pointer; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #panel { width:280px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 84px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Suprematist People</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bAuto" title="A">auto</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>композиция</label><select id="comp"></select><span></span></div>
+  <div class="row"><label>фон</label><select id="bg"></select><span></span></div>
+  <div class="row"><label>палитра</label><select id="pal"></select><span></span></div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <h2>Параметры</h2>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Безликие фигуры позднего Малевича: яйцевидная голова, фигура расколота по оси на два цвета,
+    плоские поля, растяжки-градиенты, кракелюр.<br><br>
+    Space / клик — новые люди<br>
+    A — автосмена<br>
+    S — сохранить PNG (2×)<br>
+    C / B / P — следующая композиция / фон / палитра
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+// weighted pick driven by a single roll in [0,1)
+function wp(v, items, ws) {
+  let s = 0; for (const w of ws) s += w;
+  v *= s;
+  for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i];
+  return items[items.length - 1];
+}
+function rngFrom(a) {
+  const n = mulberry32(a);
+  const r = () => n();
+  r.range = (x, y) => x + (y - x) * n();
+  r.int = (x, y) => x + Math.floor(n() * (y - x + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => wp(n(), items, ws);
+  r.sub = () => rngFrom((n() * 4294967296) >>> 0);   // independent stream, costs one roll
+  return r;
+}
+const makeRng = s => rngFrom(hashStr(s));
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+function hash1(i) {
+  let h = Math.imul(i ^ 0x9e3779b9, 0x85ebca6b); h ^= h >>> 13;
+  h = Math.imul(h, 0xc2b2ae35); h ^= h >>> 16;
+  return (h >>> 0) / 4294967296;
+}
+function vnoise2(x, y, sd) {
+  const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
+  const h = (i, j) => hash1((Math.imul(i, 73856093) ^ Math.imul(j, 19349663)) + sd);
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  return lerp(lerp(h(xi, yi), h(xi + 1, yi), u), lerp(h(xi, yi + 1), h(xi + 1, yi + 1), u), v);
+}
+// periodic value noise (period N) for closed outlines
+function pnoise(x, N, sd) {
+  const i = Math.floor(x), f = x - i, t = f * f * (3 - 2 * f), m = k => ((k % N) + N) % N;
+  return lerp(hash1(m(i) * 7 + sd), hash1(m(i + 1) * 7 + sd), t) * 2 - 1;
+}
+
+// ---------- params ----------
+const P = { comp: 'auto', bg: 'auto', pal: 'auto', format: 'auto',
+  count: 3, split: 0.7, grad: 0.5, face: 0.35, hand: 1, brush: 1, cracks: 0.25, canvas: 0.5 };
+const CTRL = [
+  ['count',  'в группе', 2, 5, 1],
+  ['split',  'раскол',   0, 1, 0.05],
+  ['grad',   'растяжка', 0, 1, 0.05],
+  ['face',   'лица',     0, 1, 0.05],
+  ['hand',   'рука',     0, 3, 0.05],
+  ['brush',  'мазок',    0, 2.5, 0.05],
+  ['cracks', 'кракелюр', 0, 1, 0.05],
+  ['canvas', 'холст',    0, 1, 0.05],
+];
+const COMPS = { auto: 'авто', head: 'голова', bust: 'бюст', torso: 'торс', figure: 'фигура', group: 'группа' };
+const BGS = { auto: 'авто', flat: 'плоский', fields: 'поля', persp: 'перспектива', grid: 'сетка', stripes: 'полосы' };
+const FORMATS = { auto: ['авто', 0], p34: ['3:4', 3 / 4], p45: ['4:5', 4 / 5], p23: ['2:3', 2 / 3], a: ['1:√2', Math.SQRT1_2],
+  p35: ['3:5', 3 / 5], sq: ['1:1', 1], w65: ['6:5', 6 / 5], w43: ['4:3', 4 / 3] };
+
+// ---------- pigments ----------
+const PIG = {
+  white: '#efebdf', ivory: '#f1e6cb', cream: '#ece2c6', pale: '#dde2e5',
+  black: '#1b1a19', grey: '#8c8f93',
+  red: '#d0301f', crimson: '#a4282a', orange: '#e6632a', pink: '#e2848b',
+  yellow: '#f1c01d', ochre: '#cf942f', brown: '#8a5a35',
+  blue: '#2447a6', navy: '#1f2b62', cobalt: '#3a62c2', sky: '#7fa5db', paleblue: '#c4d3e9', icy: '#a8bfd7',
+  green: '#2e8a4c', teal: '#1f9a8b', mint: '#9ccfb9', violet: '#6b5ead', lilac: '#8e86c3',
+};
+const DK = '#1c1b1a';
+const PALS = {
+  peasant: { name: 'крестьяне',
+    cloth: { white: 6, red: 3, black: 3, blue: 2.4, yellow: 1.1, green: 0.9, pink: 0.5, grey: 0.6 },
+    head: { white: 5, black: 1.6, red: 1.6, grey: 0.4 },
+    hand: { black: 3, red: 2.5, white: 2, grey: 0.7, yellow: 0.4 },
+    leg: { white: 2, red: 2, black: 2, blue: 1.4, yellow: 1.4, pink: 0.8, grey: 0.6 },
+    field: { red: 3, yellow: 3, green: 3, black: 2, white: 2, blue: 1.5, pink: 1.5, teal: 0.8, orange: 1 },
+    flat: ['cobalt', 'icy', 'pale', 'green', 'blue'],
+    sky: [['cobalt', 'paleblue'], ['blue', 'white'], ['navy', 'sky'], ['violet', 'paleblue']],
+    split: 1, shade: 0.12, glow: 0.1 },
+  sport: { name: 'спортсмены',
+    cloth: { red: 3, black: 2.4, yellow: 2.4, ochre: 1.4, blue: 3, teal: 1.8, violet: 1.8, white: 1.6, grey: 0.9, orange: 1.6, green: 1 },
+    head: { white: 4, red: 2, black: 1.5, blue: 1.5, yellow: 0.6 },
+    hand: { yellow: 2, orange: 1.5, blue: 1.5, red: 1.2, white: 1, black: 1 },
+    leg: { red: 2, black: 2, white: 2, blue: 1.5, yellow: 1.5, grey: 1, ochre: 1 },
+    field: { red: 2, teal: 3, black: 1.5, white: 1.5, blue: 2, yellow: 2, orange: 2, green: 1 },
+    flat: ['cream', 'pale', 'ivory'],
+    sky: [['cream', 'ivory'], ['pale', 'white'], ['sky', 'white']],
+    split: 1.3, shade: 0, glow: 0 },
+  late: { name: 'поздний',
+    cloth: { orange: 2.4, red: 1.8, pink: 2, yellow: 2.4, white: 2, blue: 1.2, ivory: 1.4, sky: 0.9, green: 0.6, lilac: 0.6 },
+    head: { ivory: 3, white: 2, grey: 1, pink: 0.6 },
+    hand: { white: 2, black: 1.5, ivory: 1, grey: 1, red: 0.8 },
+    leg: { white: 2, black: 1.5, blue: 1.5, ivory: 1, grey: 1, red: 0.8 },
+    field: { yellow: 2, pink: 2, ochre: 2, teal: 1.5, green: 1.5, white: 2, black: 1, mint: 1.2 },
+    flat: ['cobalt', 'blue', 'sky', 'mint'],
+    sky: [['cobalt', 'white'], ['blue', 'paleblue'], ['cobalt', 'cream']],
+    split: 0.35, shade: 0.75, glow: 0.8 },
+  primary: { name: 'основные',
+    cloth: { red: 3, blue: 3, yellow: 2.6, black: 2.6, white: 3.4 },
+    head: { white: 4, black: 2, red: 2, yellow: 0.8, blue: 0.8 },
+    hand: { black: 2, red: 2, white: 2, yellow: 1, blue: 1 },
+    leg: { black: 2, red: 2, white: 2, yellow: 1.5, blue: 1.5 },
+    field: { red: 3, yellow: 3, blue: 3, black: 2, white: 2.5 },
+    flat: ['cobalt', 'pale', 'ivory', 'yellow'],
+    sky: [['blue', 'white'], ['cobalt', 'paleblue']],
+    split: 1.1, shade: 0.05, glow: 0 },
+};
+const PAL_NAMES = { auto: 'авто', ...Object.fromEntries(Object.entries(PALS).map(([k, v]) => [k, v.name])) };
+const HAIR = { black: 3, red: 1.4, orange: 1.1, brown: 1, yellow: 0.7, white: 0.4, grey: 0.4 };
+const HEAD2 = { white: 2, red: 2, black: 2, blue: 1, grey: 0.8, yellow: 0.5 };
+const SCARF = { white: 3, red: 1, black: 1, blue: 0.6, yellow: 0.4 };
+const NECK = { red: 3, black: 2, blue: 2, white: 1, grey: 1, yellow: 0.5 };
+const ACC = { red: 3, black: 2.5, blue: 2, yellow: 1.2, white: 1, orange: 1, green: 0.8 };
+const GRIDC = { blue: 2.5, navy: 1.4, green: 2.5, cream: 2, grey: 1.4, yellow: 1.5, pink: 1.1, red: 0.7, black: 0.7, sky: 1, ivory: 1, teal: 0.8 };
+const VSTRIPE = { white: 2, ochre: 2, black: 2, green: 1.4, cream: 1, red: 0.6, teal: 1, sky: 0.6 };
+
+const rgb = h => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(3, 5), 16), parseInt(h.slice(5, 7), 16)];
+const rgba = (h, a) => { const [r, g, b] = rgb(h); return `rgba(${r},${g},${b},${a})`; };
+const mix = (h1, h2, t) => { const a = rgb(h1), b = rgb(h2);
+  return '#' + a.map((v, i) => Math.round(lerp(v, b[i], t)).toString(16).padStart(2, '0')).join(''); };
+const lumOf = h => { const [r, g, b] = rgb(h); return (0.3 * r + 0.59 * g + 0.11 * b) / 255; };
+const cdist = (a, b) => { const x = rgb(a), y = rgb(b); return Math.hypot(x[0] - y[0], x[1] - y[1], x[2] - y[2]); };
+const nearNames = names => Object.keys(PIG).filter(k => names.some(n =>
+  cdist(PIG[k], PIG[n]) < 95 || (lumOf(PIG[k]) < 0.2 && lumOf(PIG[n]) < 0.2)));
+const reddish = h => { const [r, g, b] = rgb(h); return r > 150 && g < 140 && b < 150; };
+// pigment name by weights, one roll, skipping avoided names
+function pc(roll, w, avoid = []) {
+  let s = 0, last = null;
+  for (const k in w) if (!avoid.includes(k)) { s += w[k]; last = k; }
+  if (!last) return Object.keys(w)[0];
+  let v = roll * s;
+  for (const k in w) { if (avoid.includes(k)) continue; if ((v -= w[k]) < 0) return k; }
+  return last;
+}
+
+// ---------- geometry ----------
+const rectPts = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+const half = (x, side) => side > 0 ? [x, -1e4, 1e4, 1e4] : [-1e4, -1e4, x, 1e4];
+const isect = (a, b) => [Math.max(a[0], b[0]), Math.max(a[1], b[1]), Math.min(a[2], b[2]), Math.min(a[3], b[3])];
+function bbox(pts) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const [x, y] of pts) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  return [x0, y0, x1, y1];
+}
+function rot(pts, cx, cy, a) {
+  const c = Math.cos(a), s = Math.sin(a);
+  return pts.map(([x, y]) => [cx + (x - cx) * c - (y - cy) * s, cy + (x - cx) * s + (y - cy) * c]);
+}
+function inPoly(pts, x, y) {
+  let ins = false;
+  for (let i = 0, j = pts.length - 1; i < pts.length; j = i++) {
+    const [xi, yi] = pts[i], [xj, yj] = pts[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) ins = !ins;
+  }
+  return ins;
+}
+// polygon with filleted corners (radius per vertex)
+function rpoly(pts, r = 0, step = 3) {
+  const n = pts.length, out = [];
+  for (let i = 0; i < n; i++) {
+    const p = pts[i], ri = Array.isArray(r) ? r[i] || 0 : r;
+    if (ri <= 0) { out.push(p); continue; }
+    const a = pts[(i + n - 1) % n], b = pts[(i + 1) % n];
+    let ax = a[0] - p[0], ay = a[1] - p[1], bx = b[0] - p[0], by = b[1] - p[1];
+    const la = Math.hypot(ax, ay), lb = Math.hypot(bx, by);
+    if (la < 1e-6 || lb < 1e-6) { out.push(p); continue; }
+    ax /= la; ay /= la; bx /= lb; by /= lb;
+    const ang = Math.acos(clamp(ax * bx + ay * by, -1, 1));
+    if (ang < 1e-3 || ang > Math.PI - 1e-3) { out.push(p); continue; }
+    const tn = Math.tan(ang / 2), t = Math.min(ri / tn, la * 0.5, lb * 0.5), rr = t * tn;
+    const hx = ax + bx, hy = ay + by, hl = Math.hypot(hx, hy), d = rr / Math.sin(ang / 2);
+    const cx = p[0] + hx / hl * d, cy = p[1] + hy / hl * d;
+    const a0 = Math.atan2(p[1] + ay * t - cy, p[0] + ax * t - cx);
+    let da = Math.atan2(p[1] + by * t - cy, p[0] + bx * t - cx) - a0;
+    while (da > Math.PI) da -= 2 * Math.PI;
+    while (da < -Math.PI) da += 2 * Math.PI;
+    const k = Math.max(2, Math.ceil(Math.abs(da) * rr / step));
+    for (let j = 0; j <= k; j++) { const q = a0 + da * j / k; out.push([cx + Math.cos(q) * rr, cy + Math.sin(q) * rr]); }
+  }
+  return out;
+}
+function egg(cx, cy, rx, ry, k = 0, n = 96) {
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const t = i / n * Math.PI * 2, s = Math.sin(t);
+    out.push([cx + rx * Math.cos(t) * (1 - k * s), cy + ry * s]);
+  }
+  return out;
+}
+// hand-painted outline: densify, then push along the normal by periodic noise
+function wob(pts, amp, sd) {
+  if (amp <= 0) return pts;
+  const d = [], n0 = pts.length;
+  for (let i = 0; i < n0; i++) {
+    const a = pts[i], b = pts[(i + 1) % n0];
+    const k = Math.max(1, Math.ceil(Math.hypot(b[0] - a[0], b[1] - a[1]) / 5));
+    for (let j = 0; j < k; j++) d.push([lerp(a[0], b[0], j / k), lerp(a[1], b[1], j / k)]);
+  }
+  const n = d.length, cum = [0];
+  for (let i = 1; i <= n; i++) cum.push(cum[i - 1] + Math.hypot(d[i % n][0] - d[i - 1][0], d[i % n][1] - d[i - 1][1]));
+  const per = cum[n];
+  if (per < 4) return d;
+  amp = Math.min(amp, per * 0.008);
+  const N1 = Math.max(2, Math.round(per / 60)), N2 = Math.max(3, Math.round(per / 13));
+  const out = [];
+  for (let i = 0; i < n; i++) {
+    const a = d[(i + n - 1) % n], b = d[(i + 1) % n];
+    const nx = b[1] - a[1], ny = a[0] - b[0], nl = Math.hypot(nx, ny) || 1, s = cum[i] / per;
+    const o = amp * (pnoise(s * N1, N1, sd) * 0.85 + pnoise(s * N2, N2, sd + 3) * 0.3);
+    out.push([d[i][0] + nx / nl * o, d[i][1] + ny / nl * o]);
+  }
+  return out;
+}
+function zigzag(x0, x1, y0, bh, th, n) {
+  const pts = [[x0, y0], [x1, y0]];
+  for (let i = n; i > 0; i--) pts.push([x0 + (x1 - x0) * i / n, y0 + bh], [x0 + (x1 - x0) * (i - 0.5) / n, y0 + bh + th]);
+  pts.push([x0, y0 + bh]);
+  return pts;
+}
+function mitten(hx, hy, w, l, d) {        // d: thumb direction
+  const M = ([x, y]) => [hx + x * d, hy + y];
+  return [
+    [[-w / 2, -0.08], [w / 2, -0.08], [w / 2, l * 0.8], [w * 0.15, l], [-w * 0.3, l * 0.96], [-w / 2, l * 0.76]].map(M),
+    [[w * 0.28, l * 0.05], [w * 0.9, l * 0.36], [w * 0.84, l * 0.56], [w * 0.36, l * 0.5]].map(M),
+  ];
+}
+const MIT_R = w => [[0, 0, w * 0.3, w * 0.35, w * 0.35, w * 0.3], [w * 0.12, w * 0.16, w * 0.16, w * 0.12]];
+function shoe(fx, fy, d, k) {             // d: toe direction
+  return [[-0.2, -0.1], [0.16, -0.1], [0.2, 0.05], [0.5, 0.13], [0.54, 0.3], [-0.24, 0.3]]
+    .map(([x, y]) => [fx + x * d * k, fy + y * k]);
+}
+const SHOE_R = [0.03, 0.03, 0.08, 0.1, 0.1, 0.12];
+function almond(ex, ey, w, h) {
+  const pts = [], n = 14;
+  for (let i = 0; i <= n; i++) { const t = -1 + 2 * i / n; pts.push([ex + t * w / 2, ey - h / 2 * (1 - t * t)]); }
+  for (let i = n - 1; i > 0; i--) { const t = -1 + 2 * i / n; pts.push([ex + t * w / 2, ey + h / 2 * 0.8 * (1 - t * t)]); }
+  return pts;
+}
+function lid(ex, ey, w, h) {
+  const pts = [], n = 14;
+  for (let i = 0; i <= n; i++) { const t = -1 + 2 * i / n; pts.push([ex + t * w / 2, ey - h / 2 * (1 - t * t)]); }
+  for (let i = n; i >= 0; i--) { const t = -1 + 2 * i / n;
+    pts.push([ex + t * w / 2 * 0.92, ey - h / 2 * (1 - t * t) + h * 0.2 * Math.sqrt(1 - t * t)]); }
+  return pts;
+}
+
+// ---------- fills ----------
+const lin = (x0, y0, x1, y1, stops) => ({ lin: [x0, y0, x1, y1], stops });
+const rad = (x0, y0, r0, x1, y1, r1, stops) => ({ rad: [x0, y0, r0, x1, y1, r1], stops });
+// colour c solid until a, sprayed out by b, along direction ang across the box
+function fadeF(bb, c, ang, a, b) {
+  const mx = (bb[0] + bb[2]) / 2, my = (bb[1] + bb[3]) / 2, dx = Math.cos(ang), dy = Math.sin(ang);
+  const h = (Math.abs(dx) * (bb[2] - bb[0]) + Math.abs(dy) * (bb[3] - bb[1])) / 2;
+  b = Math.min(1, b);
+  return lin(mx - dx * h, my - dy * h, mx + dx * h, my + dy * h, [[0, c, 1], [a, c, 1], [(a + b) / 2, c, 0.42], [b, c, 0]]);
+}
+// sfumato edge on one side of a limb
+function shadeF(bb, c, dir, k = 0.85) {
+  const y = (bb[1] + bb[3]) / 2, xa = dir > 0 ? bb[2] : bb[0], xb = dir > 0 ? bb[0] : bb[2];
+  return lin(xa, y, xb, y, [[0, c, k], [0.25, c, k * 0.5], [0.62, c, 0]]);
+}
+
+// ---------- scene ----------
+let S = null;
+function add(pts, layers, o = {}) {
+  const isF = L => typeof L === 'string' || L.lin || L.rad;
+  const Ls = isF(layers) ? [{ f: layers }] : layers.map(L => isF(L) ? { f: L } : L);
+  const w = wob(pts, P.hand * 1.8 * (o.wob ?? 1), (S.n * 131 + 17) | 0);
+  S.n++;
+  S.ops.push({ pts: w, L: Ls, bb: bbox(w), ang: o.ang ?? Math.PI / 2, aj: o.aj ?? 0.5, br: o.br ?? 1, edge: o.edge || 0 });
+}
+const vis = bb => [Math.max(bb[0], -10), Math.max(bb[1], -10), Math.min(bb[2], S.DW + 10), Math.min(bb[3], S.DH + 10)];
+
+// how one piece of clothing is coloured: split halves, sprayed fade, soft glow
+function look(Q, w, avoid, sp, pal, gk = 1) {
+  const r = []; for (let i = 0; i < 10; i++) r.push(Q());
+  let L = pc(r[0], w, avoid);
+  const R = pc(r[1], w, [L, ...avoid]);
+  const split = r[2] < sp;
+  let fade = null;
+  if (r[3] < P.grad * gk * (split ? 0.35 : 0.85)) {
+    const side = split ? (r[5] < 0.5 ? -1 : 1) : 0;
+    let c = pc(r[4], w, [side > 0 ? R : L]);
+    if (!split && r[5] < 0.5 && L !== 'white' && w.white && !avoid.includes('white')) { c = L; L = 'white'; }
+    const k = r[6], t = r[7];
+    const ang = k < 0.3 ? 0 : k < 0.52 ? Math.PI : k < 0.66 ? Math.PI / 2
+      : k < 0.83 ? lerp(0.4, 1.05, t) : Math.PI - lerp(0.4, 1.05, t);
+    const a = lerp(0.06, 0.4, r[8]);
+    fade = { c, ang, a, b: a + lerp(0.25, 0.6, t), side };
+  }
+  return { L, R: split ? R : L, fade, glow: r[9] < pal.glow * (0.3 + P.grad) };
+}
+function lay(lk, bb, RS, LS) {
+  const Ls = [{ f: PIG[lk.L] }];
+  if (lk.R !== lk.L) Ls.push({ f: PIG[lk.R], rect: RS });
+  if (lk.fade) { const F = lk.fade;
+    Ls.push({ f: fadeF(bb, PIG[F.c], F.ang, F.a, F.b), rect: F.side > 0 ? RS : F.side < 0 ? LS : null }); }
+  if (lk.glow) { const cx = (bb[0] + bb[2]) / 2, w = bb[2] - bb[0];
+    Ls.push({ f: rad(cx, bb[3], 0, cx, bb[3], w * 0.62, [[0, '#ffffff', 0.55], [1, '#ffffff', 0]]) }); }
+  return Ls;
+}
+function colorAt(Ls, x, y) {
+  for (let i = Ls.length - 1; i >= 0; i--) {
+    const L = Ls[i];
+    if (typeof L.f !== 'string') continue;
+    if (L.rect && !(x >= L.rect[0] && x <= L.rect[2] && y >= L.rect[1] && y <= L.rect[3])) continue;
+    if (L.poly && !inPoly(L.poly, x, y)) continue;
+    return L.f;
+  }
+  return PIG.white;
+}
+
+// ---------- figure ----------
+function proportions(Q, kind) {
+  const t = () => Q(), K = { full: 0, bust: 1, torso: 2, head: 3 }[kind];
+  const g = {};
+  g.hw = lerp(0.6, 0.72, t()); g.egg = lerp(0.03, 0.12, t()); g.nw = lerp(0.24, 0.36, t());
+  const a = t(), b = t(), c = t(), d = t();
+  g.neck = [lerp(0.06, 0.2, a), lerp(0.14, 0.42, a), lerp(0.26, 0.55, a), lerp(0.3, 0.55, a)][K];
+  g.sh = [lerp(0.95, 1.3, b), lerp(1.35, 1.8, b), lerp(1.1, 1.45, b), lerp(1.5, 2.5, b)][K];
+  g.ds = lerp(0.04, 0.3, c);
+  g.rB = [0.4, lerp(0.45, 1.0, d), lerp(0.35, 0.8, d), lerp(0.5, 1.2, d)][K];
+  g.aw = lerp(0.3, 0.42, t()); g.rS = lerp(0.12, 0.35, t());
+  g.spread = lerp(0, 0.22, t()); g.taper = lerp(-0.25, 0.3, t()); g.flare = lerp(0, 0.25, t());
+  g.torsoL = lerp(2.0, 2.6, t()); g.armL = lerp(2.9, 3.35, t()); g.legL = lerp(5.5, 6.1, t());
+  g.lower = wp(t(), ['skirt', 'trousers'], [1.2, 1]);
+  g.jacket = lerp(0.72, 1.02, t()); g.tunic = lerp(0.45, 0.9, t());
+  g.skirtW = lerp(1.2, 1.85, t()); g.legVis = lerp(0.5, 1.3, t());
+  g.legW = lerp(0.38, 0.52, t()); g.gap = lerp(0.02, 0.12, t()); g.splay = lerp(0, 0.25, t());
+  g.lx = lerp(0.24, 0.45, t()); g.foot = lerp(0.9, 1.2, t()); g.handL = lerp(0.45, 0.6, t());
+  const bb = t(), bt = t();
+  g.body = ['arms', wp(bb, ['block', 'arms'], [3, 1]), wp(bt, ['arms', 'trap', 'block'], [3, 1.4, 0.8]), 'block'][K];
+  g.trapW = lerp(0.42, 0.6, t()); g.archW = lerp(1.15, 1.5, t());
+  g.capY = lerp(0.14, 0.34, t()); g.chinY = lerp(0.7, 0.84, t());
+  g.sleeves = t() < 0.5; g.band = t() < 0.35;
+  g.collar = wp(t(), ['none', 'round', 'band'], [3, K === 1 || K === 3 ? 1.2 : 0.2, 0.8]);
+  g.collarW = lerp(1.8, 2.8, t());
+  g.column = t() < (K === 1 || K === 2 ? 0.18 : 0);
+  g.colL = lerp(1.0, 2.2, t()); g.colOff = lerp(-0.5, 0.5, t()) * g.nw;
+  g.belt = t() < 0.6; g.tie = t() < 0.4; g.peplum = t() < 0.22; g.zig = t() < (K === 2 ? 0.3 : 0);
+  g.zigN = Math.floor(lerp(6, 10.99, t()));
+  return g;
+}
+function jitterG(g, Q) {
+  const j = { ...g };
+  j.sh *= Q.range(0.94, 1.06); j.torsoL += Q.range(-0.1, 0.1); j.neck *= Q.range(0.85, 1.15);
+  j.hw *= Q.range(0.95, 1.05); j.spread = Q.range(0, 0.2); j.taper += Q.range(-0.08, 0.08);
+  j.legL += Q.range(-0.1, 0.1); j.lx = Q.range(0.24, 0.45); j.splay = Q.range(0, 0.22);
+  j.belt = Q.chance(0.6); j.tie = Q.chance(0.4); j.peplum = Q.chance(0.2); j.collar = Q.chance(0.3) ? 'band' : 'none';
+  return j;
+}
+const figTotal = g => 1 + g.neck + g.legL + 0.32 * g.foot;   // head top → sole, in head heights
+
+// one figure; local units = head height, x across the body axis, y down from the top of the head
+function figure(F, o) {
+  const { u, pal, kind, g } = o, sx = o.flip ? -1 : 1, small = !!o.small;
+  const X = x => o.cx + x * u * sx, Y = y => o.top + y * u;
+  const TP = pts => pts.map(([x, y]) => [X(x), Y(y)]);
+  const shp = (pts, r = 0) => rpoly(TP(pts), Array.isArray(r) ? r.map(v => v * u) : r * u, Math.max(1.2, u * 0.025));
+  const ax = X(0), RS = half(ax, sx), LS = half(ax, -sx);
+  const HL = (xl, side) => half(X(xl), side * sx);
+  const put = (pts, lk, opt) => add(pts, lay(lk, vis(bbox(pts)), RS, LS), opt);
+  const sp = P.split * pal.split * (small ? 0.6 : 1);
+  const cl = pal.cloth, avoid = o.avoid || [], V = Math.PI / 2;
+
+  // ---- colours ----
+  const up = look(F.sub(), cl, avoid, sp, pal);
+  const low = look(F.sub(), cl, [up.L], sp, pal);
+  const AR = F.sub();
+  const armMode = AR.wpick(['same', 'contrast', 'shade'], [3, 1.5, 2.4 * P.grad]);
+  const armC = { L: up.L, R: up.R };
+  if (armMode === 'contrast') {
+    armC.L = pc(AR(), cl, [up.L]);
+    armC.R = AR() < sp ? pc(AR(), cl, [armC.L, up.R]) : armC.L === up.R ? pc(AR(), cl, [up.R]) : armC.L;
+  }
+  const armShade = armMode === 'shade' ? pc(AR(), { black: 3, navy: 1, crimson: 1, grey: 0.6 }, [armC.L]) : null;
+  const HR = F.sub();
+  const handL = pc(HR(), pal.hand, [armC.L]);
+  let handR = HR() < sp * 0.6 ? pc(HR(), pal.hand, [armC.R, handL]) : handL;
+  if (handR === armC.R) handR = pc(HR(), pal.hand, [armC.R]);
+  const legC = pc(HR(), pal.leg, [low.L]);
+  const legC2 = HR() < sp * 0.7 ? pc(HR(), pal.leg, [legC]) : legC;
+  const footC = pc(HR(), pal.leg, [legC, low.L]);
+  let footC2 = HR() < sp * 0.6 ? pc(HR(), pal.leg, [legC2, low.R, footC]) : footC;
+  if (footC2 === legC2 || footC2 === low.R) footC2 = pc(HR(), pal.leg, [legC2, low.R]);
+  const accC = pc(HR(), ACC, [up.L, up.R]);
+  const zigC = pc(HR(), { white: 3, black: 3, red: 1, blue: 0.6 }, [up.L, up.R, low.L]);
+  const legShade = HR() < P.grad * 0.5;
+
+  const HD = F.sub();
+  const headC = pc(HD(), pal.head, avoid);
+  const head2 = pc(HD(), HEAD2, [headC]);
+  const head3 = pc(HD(), cl, [headC, head2]);
+  const hairC = pc(HD(), HAIR, [headC]);
+  const scarfC = pc(HD(), SCARF, [headC]);
+  const chinC = pc(HD(), { black: 3, red: 2, navy: 1, crimson: 1 }, [headC]);
+  const hStyle = small ? 'plain' : HD.wpick(['plain', 'split', 'quad', 'shaded', 'mosaic'],
+    [2.2, 3 * sp, 0.7 * sp, 3.5 * pal.shade, kind === 'head' ? 0.7 : 0]);
+  const hair = small ? 'none' : HD.wpick(['none', 'cap', 'chin', 'bob', 'side', 'scarf'],
+    [4, 1.2, 0.9, kind === 'head' ? 1 : 0.4, 0.6, 0.9]);
+  const shaded = hStyle === 'shaded';
+  const faceOn = !small && HD() < P.face * { head: 2.4, bust: 1, torso: 0.8, full: 0.4 }[kind] * (shaded ? 0.35 : 1);
+  const capHalf = HD() < 0.3, scarfSide = HD() < 0.5 ? -1 : 1, hairSide = HD() < 0.5 ? -1 : 1;
+  const faceBase = shaded && lumOf(PIG[headC]) < 0.5 ? 'ivory' : headC;
+  const NR = F.sub();
+  const neckA = NR() < 0.45 ? faceBase : pc(NR(), NECK, [up.L]);
+  const neckB = NR() < sp * 0.7 ? (neckA !== faceBase ? faceBase : pc(NR(), NECK, [neckA])) : neckA;
+  const CQ = F.sub();
+  const colC = pc(CQ(), ACC, [up.L, up.R]), patchC = pc(CQ(), cl, [up.L, up.R, colC]);
+
+  // ---- geometry ----
+  const hw = g.hw, nw = g.nw, sy = 1 + g.neck, sh = g.sh, ds = g.ds, aw = g.aw;
+  const wy = sy + g.torsoL, ya = sy + g.legL, armEnd = sy + g.armL;
+
+  // neck
+  const nL = [{ f: PIG[neckA] }];
+  if (neckB !== neckA) nL.push({ f: PIG[neckB], rect: RS });
+  if (shaded) {
+    nL.push({ f: lin(X(-nw / 2), 0, X(nw / 2), 0, [[0, DK, 0.5], [0.4, DK, 0.04], [0.75, DK, 0.08], [1, DK, 0.42]]) });
+    nL.push({ f: lin(0, Y(0.8), 0, Y(1.15), [[0, DK, 0.55], [1, DK, 0]]) });
+  }
+  add(shp([[-nw / 2, 0.7], [nw / 2, 0.7], [nw / 2, sy + 0.25], [-nw / 2, sy + 0.25]]), nL, { ang: V, br: 0.6 });
+
+  if (g.body === 'arms') {
+    const rS = Math.min(g.rS, aw * 0.9), trousers = g.lower === 'trousers';
+    const wx = Math.max(nw * 0.9, (sh - aw) * (1 + g.taper));
+    const tb = trousers ? wy + g.tunic : sy + g.torsoL * g.jacket;
+    const tbw = wx * (1 + g.flare * (trousers ? 1 : 0.5));
+    const tw = y => lerp(sh, tbw, clamp((y - sy - ds) / (tb - sy - ds)));
+    const foot = (x, s, c) => add(shp(shoe(x, ya, s, g.foot), SHOE_R.map(v => v * g.foot)), PIG[c], { ang: 0, br: 0.5 });
+    if (trousers) {
+      for (const s of [-1, 1]) {
+        const lb = g.legW * 0.82, c = s < 0 ? low.L : low.R;
+        const pts = shp([[s * g.gap / 2, tb - 0.5], [s * tw(tb - 0.5) * 0.98, tb - 0.5],
+          [s * (g.gap / 2 + g.splay + lb), ya + 0.04], [s * (g.gap / 2 + g.splay), ya + 0.04]]);
+        put(pts, { L: c, R: c, fade: low.fade && { ...low.fade, side: 0 }, glow: false }, { ang: V });
+        foot(s * (g.gap / 2 + g.splay + lb / 2), s, s < 0 ? footC : footC2);
+      }
+    } else {
+      const hem = ya - g.legVis;
+      for (const s of [-1, 1]) {
+        const lw = g.legW * 0.72, lx = s * g.lx;
+        const pts = shp([[lx - lw / 2, hem - 0.4], [lx + lw / 2, hem - 0.4], [lx + lw / 2, ya + 0.04], [lx - lw / 2, ya + 0.04]]);
+        const Ls = [{ f: PIG[s < 0 ? legC : legC2] }];
+        if (legShade) Ls.push({ f: shadeF(bbox(pts), DK, s * sx, 0.7) });
+        add(pts, Ls, { ang: V, br: 0.7 });
+        foot(lx, s, s < 0 ? footC : footC2);
+      }
+      const st = tb - 0.15;
+      put(shp([[-tw(st) * 0.96, st], [tw(st) * 0.96, st], [g.skirtW, hem], [-g.skirtW, hem]], [0, 0, 0.06, 0.06]), low, { ang: V });
+    }
+    put(shp([[-sh, sy + ds], [-nw * 0.8, sy], [nw * 0.8, sy], [sh, sy + ds], [tbw, tb], [-tbw, tb]],
+      [rS, 0.05, 0.05, rS, 0.03, 0.03]), up, { ang: V });
+    if (trousers && g.belt && !small) {
+      const bw = tw(wy) + 0.03, bh = 0.06;
+      add(shp([[-bw, wy - bh], [bw, wy - bh], [bw, wy + bh], [-bw, wy + bh]]), PIG[accC], { ang: 0, br: 0.4, wob: 0.4 });
+      if (g.tie) add(shp([[bw * 0.35, wy], [bw * 0.35 + 0.07, wy], [bw * 0.4 + 0.1, wy + 0.55], [bw * 0.4 + 0.03, wy + 0.55]]),
+        PIG[accC], { br: 0, wob: 0.3 });
+    }
+    // arms, then the tool, then hands gripping it
+    const yin = sy + ds * clamp((sh - aw - nw * 0.8) / Math.max(0.01, sh - nw * 0.8)), hands = [];
+    for (const s of [-1, 1]) {
+      const pts = shp([[s * (sh - aw), yin - 0.03], [s * sh, sy + ds], [s * (sh + g.spread), armEnd],
+        [s * (sh + g.spread - aw), armEnd]], [0.02, rS, 0.03, 0.03]);
+      const c = s < 0 ? armC.L : armC.R, tc = s < 0 ? up.L : up.R;
+      const Ls = [{ f: PIG[c] }];
+      if (armShade) Ls.push({ f: shadeF(bbox(pts), PIG[armShade], s * sx) });
+      add(pts, Ls, { ang: V + s * sx * 0.05, edge: c === tc && !armShade ? 0.3 : 0 });
+      const [m, th] = mitten(s * (sh + g.spread - aw / 2), armEnd, aw * 1.08, g.handL, -s), mr = MIT_R(aw * 1.08);
+      const hc = PIG[s < 0 ? handL : handR];
+      hands.push(() => { add(shp(th, mr[1]), hc, { br: 0.3, wob: 0.4 }); add(shp(m, mr[0]), hc, { br: 0.3, wob: 0.4 }); });
+    }
+    if (o.tool) {             // rake: a pole planted by one hand, comb on top
+      const TQ = F.sub(), s = TQ() < 0.5 ? -1 : 1, px = s * (sh + g.spread - aw * 0.35), pw = 0.045;
+      const top = TQ.range(-0.5, 0.3), c = PIG[pc(TQ(), { ochre: 2, brown: 2, white: 1, black: 1 }, avoid)], TO = { br: 0.2, wob: 0.2 };
+      add(shp([[px - pw, top], [px + pw, top], [px + pw * 1.2, ya + 0.3], [px - pw * 1.2, ya + 0.3]]), c, TO);
+      const hw2 = TQ.range(0.45, 0.65), n = TQ.int(6, 9);
+      add(shp([[px - hw2, top - 0.08], [px + hw2, top - 0.08], [px + hw2, top + 0.02], [px - hw2, top + 0.02]]), c, TO);
+      for (let i = 0; i < n; i++) { const tx = px - hw2 + 0.03 + (hw2 * 2 - 0.06) * i / (n - 1);
+        add(shp([[tx - 0.022, 0], [tx + 0.022, 0], [tx + 0.018, 0.2], [tx - 0.018, 0.2]].map(([x, y]) => [x, top + y])), c, TO); }
+    }
+    hands.forEach(h => h());
+    if (!trousers && g.peplum && !g.zig && !small) {
+      const zw = tbw + 0.35;
+      add(shp(zigzag(-zw, zw, tb - 0.14, 0.12, 0.32, g.zigN)), PIG[zigC], { ang: 0, br: 0.6 });
+    }
+    if (g.zig) {
+      const zw = sh + g.spread + 0.4;
+      add(shp(zigzag(-zw, zw, armEnd - 0.3, 0.3, 0.55, g.zigN)), PIG[zigC], { ang: 0, br: 0.8 });
+    }
+  } else if (g.body === 'block') {
+    const yb = sy + 14, fl = g.flare * 0.4, rB = g.rB;
+    const blk = shp([[-nw * 0.8, sy], [nw * 0.8, sy], [sh, sy + ds], [sh + fl, yb], [-sh - fl, yb], [-sh, sy + ds]],
+      [0.05, 0.05, rB, 0, 0, rB]);
+    const Ls = lay(up, vis(bbox(blk)), RS, LS);
+    const xi = sh - aw * 1.2, at = sy + ds + rB * 0.7;
+    const seams = g.band || armC.L !== up.L || armC.R !== up.R || g.sleeves;
+    if (armC.L !== up.L) Ls.push({ f: PIG[armC.L], rect: HL(-xi, -1) });
+    if (armC.R !== up.R) Ls.push({ f: PIG[armC.R], rect: HL(xi, 1) });
+    if (armShade) {
+      Ls.push({ f: shadeF([X(-sh), 0, X(-xi), 0], PIG[armShade], -sx, 0.7), rect: HL(-xi, -1) });
+      Ls.push({ f: shadeF([X(xi), 0, X(sh), 0], PIG[armShade], sx, 0.7), rect: HL(xi, 1) });
+    }
+    if (g.band) {
+      const r0 = [Math.min(X(-xi), X(xi)), Y(wy), Math.max(X(-xi), X(xi)), 1e4];
+      Ls.push({ f: PIG[low.L], rect: r0 });
+      if (low.R !== low.L) Ls.push({ f: PIG[low.R], rect: isect(r0, RS) });
+    }
+    if (seams) for (const s of [-1, 1])
+      Ls.push({ f: lin(0, 0, 0, 1, [[0, DK, 0.32], [1, DK, 0.32]]), rect: [X(s * xi) - u * 0.012, Y(at), X(s * xi) + u * 0.012, 1e4] });
+    add(blk, Ls, { ang: V });
+  } else {
+    const wb = sh * g.trapW, aW = wb * g.archW, aT = wy - 0.3, yb = sy + 14, rT = Math.min(g.rB * 0.7, 0.6);
+    put(shp([[-aW, yb], [-aW, aT], [aW, aT], [aW, yb]], [0, aW * 0.95, aW * 0.95, 0]), low, { ang: V });
+    put(shp([[-sh, sy + ds], [-nw * 0.8, sy], [nw * 0.8, sy], [sh, sy + ds], [wb, wy], [-wb, wy]],
+      [rT, 0.05, 0.05, rT, 0.02, 0.02]), up, { ang: V });
+  }
+
+  // chest accents: neck column and a patch beside it
+  if (g.column && !small) {
+    const c0 = g.colOff, pw = CQ.range(0.3, 0.6), p0 = CQ.range(0.5, 1.0), p1 = p0 + CQ.range(0.5, 1.1);
+    if (CQ() < 0.6) add(shp([[c0 - nw / 2 - pw, sy + p0], [c0 - nw / 2 + 0.02, sy + p0], [c0 - nw / 2 + 0.02, sy + p1],
+      [c0 - nw / 2 - pw, sy + p1]]), PIG[patchC], { br: 0.7 });
+    add(shp([[c0 - nw / 2, sy - 0.15], [c0 + nw / 2, sy - 0.15], [c0 + nw / 2, sy + g.colL], [c0 - nw / 2, sy + g.colL]]),
+      PIG[colC], { br: 0.7 });
+  }
+  if (g.collar === 'round' && g.body !== 'arms' && !small) {
+    const R0 = nw * g.collarW / 2, ch = R0 * 0.75, cy0 = sy - 0.03;
+    const semi = (r, rh) => { const pts = [];
+      for (let i = 0; i <= 28; i++) { const t = i / 28 * Math.PI; pts.push([Math.cos(t) * r, cy0 + Math.sin(t) * rh]); }
+      return pts; };
+    add(shp(semi(R0 + 0.085, ch + 0.085)), PIG.black, { br: 0.2, wob: 0.3 });
+    add(shp(semi(R0 + 0.068, ch + 0.068)), PIG.white, { br: 0.3, wob: 0.3 });
+    add(shp(semi(R0, ch)), PIG[colC], { br: 0.6, wob: 0.3 });
+  } else if (g.collar === 'band' && !small) {
+    add(shp([[-nw * 0.72, sy - 0.24], [nw * 0.72, sy - 0.24], [nw * 0.85, sy + 0.08], [-nw * 0.85, sy + 0.08]]),
+      lay(up, vis(bbox(TP([[-nw, sy - 0.24], [nw, sy + 0.08]]))), RS, LS), { br: 0.5 });
+  }
+
+  // ---- head ----
+  const hcx = X(0), hcy = Y(0.5), rx = hw / 2 * u, ry = 0.5 * u, HO = { ang: V, aj: 0.8, br: 0.8 };
+  if (hair === 'bob') add(egg(hcx, hcy - ry * 0.07, rx * 1.2, ry * 1.04, g.egg * 0.4)
+    .map(([x, y]) => [x, Math.min(y, hcy + ry * 0.42)]), PIG[hairC], HO);
+  if (hair === 'side') add(egg(hcx + hairSide * rx * 0.17, hcy - ry * 0.05, rx * 1.04, ry * 1.03, g.egg)
+    .map(([x, y]) => [x, Math.min(y, hcy + ry * 0.62)]), PIG[hairC], HO);
+  if (hair === 'scarf') {
+    const s = scarfSide;
+    add(egg(hcx, hcy - ry * 0.04, rx * 1.17, ry * 1.09, g.egg * 0.7), PIG[scarfC], HO);
+    add(shp([[s * hw * 0.25, 0.4], [s * hw * 0.62, 0.72], [s * Math.min(sh * 0.8, hw * 1.6), sy + 0.3],
+      [s * hw * 0.15, sy + 0.2], [s * hw * 0.05, 0.9]], [0, 0.1, 0.12, 0.05, 0]), PIG[scarfC], HO);
+  }
+  const HLs = [{ f: PIG[faceBase] }];
+  if (hStyle === 'split') HLs.push({ f: PIG[head2], rect: RS });
+  if (hStyle === 'quad') {
+    HLs.push({ f: PIG[head2], rect: isect(RS, [-1e4, -1e4, 1e4, hcy]) });
+    HLs.push({ f: PIG[head3], rect: isect(RS, [-1e4, hcy, 1e4, 1e4]) });
+  }
+  if (shaded) {
+    HLs.push({ f: lin(0, hcy - ry * 0.2, 0, hcy + ry, [[0, DK, 0], [0.55, DK, 0.3], [1, DK, 0.88]]) });
+    HLs.push({ f: lin(hcx - rx * sx, 0, hcx + rx * sx, 0, [[0, DK, 0.42], [0.45, DK, 0], [1, DK, 0.12]]) });
+    HLs.push({ f: rad(hcx + rx * 0.25 * sx, hcy - ry * 0.45, 0, hcx + rx * 0.25 * sx, hcy - ry * 0.45, rx * 0.9,
+      [[0, '#ffffff', 0.35], [1, '#ffffff', 0]]) });
+  }
+  if (hStyle === 'mosaic') {
+    const MQ = HD.sub(), MW = { ...cl, ...pal.head, orange: 1, violet: 0.8, teal: 0.8, green: 1 };
+    const xs = [-1e4, hcx + rx * MQ.range(-0.75, -0.3), hcx + rx * MQ.range(-0.12, 0.12), hcx + rx * MQ.range(0.3, 0.75), 1e4];
+    const ys = [-1e4, hcy - ry * MQ.range(0.5, 0.7), hcy - ry * MQ.range(0.05, 0.3), hcy + ry * MQ.range(0.15, 0.35),
+      hcy + ry * MQ.range(0.5, 0.75), 1e4];
+    for (let j = 0; j < 5; j++) for (let i = 0; i < 4; i++) {
+      const r1 = MQ(), r2 = MQ();
+      if (r1 < 0.8) HLs.push({ f: PIG[pc(r2, MW)], rect: [xs[i], ys[j], xs[i + 1], ys[j + 1]] });
+    }
+  }
+  const capR = [-1e4, -1e4, 1e4, Y(g.capY)];
+  if (hair === 'cap') HLs.push({ f: PIG[hairC], rect: capHalf ? isect(capR, HL(0, hairSide)) : capR });
+  if (hair === 'bob') HLs.push({ f: PIG[hairC], rect: [-1e4, -1e4, 1e4, Y(g.capY * 0.75)] });
+  if (hair === 'chin') HLs.push({ f: PIG[chinC], rect: [-1e4, Y(g.chinY), 1e4, 1e4] });
+  if (hair === 'scarf') {
+    const s = scarfSide;
+    HLs.push({ f: PIG[scarfC], poly: TP([[s * hw * 0.16, -0.3], [s * 3, -0.3], [s * 3, 1.3], [s * hw * 0.32, 1.3]]) });
+  }
+  add(egg(hcx, hcy, rx, ry, g.egg), HLs, { ang: V, aj: 0.6, br: 0.8 });
+  if (faceOn) features(F.sub(), { cx: hcx, cy: hcy, rx, ry, split: hStyle === 'split' || hair === 'scarf', ax }, (x, y) => colorAt(HLs, x, y));
+}
+
+function features(Q, H, at) {
+  const { cx, cy, rx, ry } = H, FO = { br: 0, wob: 0.15 };
+  const eyY = cy - ry * Q.range(-0.04, 0.12), eyDx = rx * Q.range(0.36, 0.5);
+  const ew = rx * Q.range(0.3, 0.42), eh = ew * Q.range(0.3, 0.44);
+  const one = Q() < (H.split ? 0.4 : 0.08) ? (Q() < 0.5 ? -1 : 1) : 0;
+  const irisC = PIG[Q.wpick(['black', 'navy', 'blue', 'red'], [5, 1, 1, 0.6])];
+  for (const s of [-1, 1]) {
+    if (one && s !== one) continue;
+    const ex = cx + s * eyDx, light = lumOf(at(ex, eyY)) > 0.55;
+    if (light) add(lid(ex, eyY, ew, eh), PIG.black, FO);
+    else add(almond(ex, eyY, ew, eh), PIG.white, FO);
+    add(egg(ex + ew * Q.range(-0.08, 0.08), eyY + eh * 0.04, eh * 0.4, eh * 0.4, 0, 20), light ? irisC : PIG.black, FO);
+  }
+  const nt = Q.wpick(['none', 'tri', 'split', 'line'], [0.8, 3, 1.2, 1]);
+  const nx = cx + rx * Q.range(-0.06, 0.06), n0 = eyY - eh * 0.3, n1 = cy + ry * Q.range(0.24, 0.4);
+  const nw = rx * Q.range(0.14, 0.3), skew = Q.range(-0.5, 0.5) * nw;
+  const nc = lumOf(at(nx, (n0 + n1) / 2)) > 0.5 ? PIG.black : PIG.white;
+  if (nt === 'tri') add([[nx + skew, n0], [nx + nw / 2, n1], [nx - nw / 2, n1]], nc, FO);
+  if (nt === 'line') add([[nx - rx * 0.02, n0], [nx + rx * 0.02, n0], [nx + rx * 0.05, n1], [nx - rx * 0.05, n1]], nc, FO);
+  if (nt === 'split') {
+    const a = Q.pick(['yellow', 'red', 'white']), b = Q.pick(['blue', 'black', 'navy']);
+    add([[nx, n0], [nx + nw / 2, n1], [nx - nw / 2, n1]], [PIG[a], { f: PIG[b], rect: half(nx, Q() < 0.5 ? -1 : 1) }], FO);
+  }
+  const my = cy + ry * Q.range(0.52, 0.66), mw = rx * Q.range(0.17, 0.28), mh = mw * Q.range(0.28, 0.42);
+  const mx = cx + rx * Q.range(-0.05, 0.05), under = at(mx, my);
+  const lipC = reddish(under) ? (lumOf(under) > 0.4 ? PIG.black : PIG.white) : PIG.red;
+  const lipL = H.split && Q() < 0.5 && lipC === PIG.red ? [lipC, { f: PIG.blue, rect: half(H.ax, Q() < 0.5 ? -1 : 1) }] : lipC;
+  add(rpoly([[mx - mw, my], [mx - mw * 0.45, my - mh], [mx, my - mh * 0.55], [mx + mw * 0.45, my - mh], [mx + mw, my]],
+    [0, mh * 0.4, mh * 0.2, mh * 0.4, 0], 1), lipL, FO);
+  add(rpoly([[mx - mw, my + 0.5], [mx + mw, my + 0.5], [mx + mw * 0.4, my + mh * 1.1], [mx - mw * 0.4, my + mh * 1.1]],
+    [0, 0, mh * 0.5, mh * 0.5], 1), lipL, FO);
+}
+
+// ---------- backgrounds ----------
+function sky(Q, pal, hz, force) {
+  const [c0, c1] = Q.pick(pal.sky);
+  const kind = force || Q.wpick(['grad', 'bands', 'diag', 'flat'], [5, 0.9, 1, 0.7]);
+  const y1 = hz + 40, box = rectPts(-30, -30, S.DW + 30, y1), SO = { ang: Q.range(-0.08, 0.08), aj: 0.35, br: 1.1, wob: 0 };
+  if (kind === 'grad') add(box, [PIG[c0], lin(0, -30, 0, hz, [[0, PIG[c1], 0], [0.55, PIG[c1], 0.45], [1, PIG[c1], 1]])], SO);
+  else add(box, [PIG[c1], lin(0, 0, 0, hz, [[0, PIG[c0], kind === 'flat' ? Q.range(0, 0.25) : 0.15], [1, PIG[c0], 0]])], SO);
+  if (kind === 'bands') {       // dark slanted sky bands
+    const n = Q.int(2, 3), sl = Q.range(-0.2, 0.1);
+    for (let i = 0; i < n; i++) {
+      const yc = hz * (i + Q.range(0.25, 0.75)) / n, bh = hz * Q.range(0.07, 0.14);
+      const yl = yc - sl * S.DW * 0.5, yr = yc + sl * S.DW * 0.5;
+      add([[-30, yl - bh / 2], [S.DW + 30, yr - bh / 2], [S.DW + 30, yr + bh / 2], [-30, yl + bh / 2]],
+        lin(S.DW / 2, yc - bh / 2, S.DW / 2 + sl * bh, yc + bh / 2, [[0, DK, 0.95], [0.3, DK, 0.88], [1, DK, 0]]),
+        { ang: Math.atan(sl), aj: 0.2, br: 1.2, wob: 1.5 });
+    }
+  }
+  if (kind === 'diag') {        // brushy diagonal streaks
+    const tn = Math.tan(Q.range(0.25, 0.5)) * (Q() < 0.5 ? 1 : -1), n = Q.int(6, 10);
+    const ya = Math.min(0, -tn * S.DW), yb = Math.max(hz, hz - tn * S.DW), per = (yb - ya) / n;
+    for (let y = ya - per; y < yb + per; y += per) {
+      const th = per * Q.range(0.35, 0.6);
+      add([[-30, y], [S.DW + 30, y + tn * (S.DW + 60)], [S.DW + 30, y + tn * (S.DW + 60) + th], [-30, y + th]],
+        PIG[c0], { ang: Math.atan(tn), aj: 0.3, br: 1.4, wob: 3 });
+    }
+  }
+  return { kind, avoid: [c0] };
+}
+function ground(Q, pal, hz) {
+  const tilt = Q() < 0.55 ? Q.range(-0.035, 0.035) * S.DW : 0;
+  const E = (x, y) => y + tilt * (x / S.DW - 0.5);
+  S.hzAt = x => E(x, hz);
+  const lines = Q() < 0.4;
+  let y = hz, prev = null;
+  for (let i = 0; i < 60 && Math.min(E(-30, y), E(S.DW + 30, y)) < S.DH + 30; i++) {
+    const R = Q.sub(), t = clamp((y - hz) / Math.max(1, S.DH - hz));
+    let h = S.DH * (0.014 + 0.05 * t + R.range(0, 0.045) * (0.35 + t));
+    if ((i === 0 && R() < 0.5) || (lines && R() < 0.35)) h = S.DH * R.range(0.005, 0.012);
+    const c = pc(R(), pal.field, prev ? [prev] : []);
+    const Ls = [{ f: PIG[c] }];
+    if (R() < 0.22) {
+      let x = S.DW * R.range(0.05, 0.5);
+      while (x < S.DW) { const w = S.DW * R.range(0.1, 0.45);
+        Ls.push({ f: PIG[pc(R(), pal.field, [c])], rect: [x, -1e4, x + w, 1e4] }); x += w + S.DW * R.range(0.1, 0.5); }
+    }
+    if (R() < P.grad * 0.5) Ls.push({ f: fadeF([0, y, S.DW, y + h], PIG[pc(R(), pal.field, [c])],
+      R() < 0.5 ? 0 : Math.PI, R.range(0, 0.3), R.range(0.45, 0.9)) });
+    add([[-30, E(-30, y)], [S.DW + 30, E(S.DW + 30, y)], [S.DW + 30, E(S.DW + 30, y + h) + 2], [-30, E(-30, y + h) + 2]],
+      Ls, { ang: Math.atan2(tilt, S.DW), aj: 0.25, br: 1, wob: h < 14 ? 0.3 : 0.8 });
+    prev = c; y += h;
+  }
+}
+function hills(Q, hz) {
+  const n = Q.int(2, 5);
+  for (let i = 0; i < n; i++) {
+    const cx = S.DW * Q.range(-0.1, 1.1), r = S.DW * Q.range(0.06, 0.16), h = r * Q.range(0.3, 0.6), yb = S.hzAt(cx) + 8;
+    const pts = [];
+    for (let k = 0; k <= 24; k++) { const t = Math.PI + k / 24 * Math.PI; pts.push([cx + Math.cos(t) * r, yb + Math.sin(t) * h]); }
+    add(pts, [PIG[Q.pick(['blue', 'cobalt', 'teal', 'green', 'sky'])],
+      lin(0, yb - h, 0, yb, [[0.35, '#ffffff', 0], [1, '#ffffff', 0.85]])], { ang: 0, aj: 0.6, br: 0.8 });
+  }
+}
+function houses(Q) {
+  const n = Q.int(1, 4);
+  for (let i = 0; i < n; i++) {
+    const x = S.DW * Q.range(0.02, 0.94), w = S.DW * Q.range(0.022, 0.048), h = w * Q.range(0.55, 1.05);
+    const yb = Math.max(S.hzAt(x), S.hzAt(x + w)) + S.DH * 0.004;
+    add(rectPts(x, yb - h, x + w, yb), PIG[Q.pick(['white', 'white', 'yellow', 'red', 'pink', 'ivory'])], { br: 0.3, wob: 0.3 });
+    const rc = PIG[Q.pick(['black', 'red', 'green', 'brown'])];
+    if (Q() < 0.6) add([[x - w * 0.08, yb - h], [x + w * 1.08, yb - h], [x + w / 2, yb - h - h * 0.5]], rc, { br: 0.2, wob: 0.2 });
+    else add(rectPts(x - w * 0.05, yb - h - h * 0.14, x + w * 1.05, yb - h + 1), rc, { br: 0, wob: 0.2 });
+    const k = Q.int(1, 3);
+    for (let j = 0; j < k; j++) { const wx = x + w * (j + 0.3) / k, ws = w * 0.35 / k;
+      add(rectPts(wx, yb - h * 0.62, wx + ws, yb - h * 0.62 + ws * 1.2), PIG.black, { br: 0, wob: 0 }); }
+  }
+}
+function tower(Q, lay) {
+  const f = lay.figs[0], side = f.cx < S.DW / 2 ? 1 : -1;
+  const w = S.DW * Q.range(0.06, 0.09), h = w * Q.range(1.4, 2.2);
+  const x = side > 0 ? S.DW * Q.range(0.68, 0.86) : S.DW * Q.range(0.06, 0.24), yb = S.hzAt(x + w / 2) + S.DH * 0.01;
+  add(rectPts(x - w * 0.5, yb - h * 0.08, x + w * 1.5, yb + 2), [PIG.brown, lin(x - w, 0, x + w * 2, 0,
+    [[0, '#ffffff', 0], [0.5, '#ffffff', 0.25], [1, '#ffffff', 0]])], { ang: 0, br: 0.6, wob: 0.4 });
+  add(rectPts(x, yb - h, x + w, yb - h * 0.08), PIG.white, { br: 0.5, wob: 0.3 });
+  const cols = Q.int(3, 4), rows = Q.int(5, 8), cw = w / cols, rh = h * 0.86 / rows;
+  for (let j = 0; j < rows; j++) for (let i = 0; i < cols; i++)
+    add(rectPts(x + cw * (i + 0.3), yb - h + rh * (j + 0.3), x + cw * (i + 0.7), yb - h + rh * (j + 0.72)), PIG.black, { br: 0, wob: 0 });
+}
+function planes(Q, hz) {
+  const n = Q.int(1, 3), a0 = Q.range(-0.5, 0.5), c = PIG[Q.pick(['black', 'grey', 'navy'])];
+  for (let i = 0; i < n; i++) {
+    const x = S.DW * Q.range(0.08, 0.92), y = hz * Q.range(0.06, 0.45), s = S.DW * Q.range(0.025, 0.055), a = a0 + Q.range(-0.15, 0.15);
+    const O = { br: 0, wob: 0.1 };
+    add(rot(rectPts(x - s / 2, y - s * 0.05, x + s / 2, y + s * 0.05), x, y, a), c, O);
+    add(rot(rectPts(x - s * 0.14, y - s * 0.44, x + s * 0.02, y + s * 0.44), x, y, a), c, O);
+    add(rot(rectPts(x + s * 0.36, y - s * 0.17, x + s * 0.46, y + s * 0.17), x, y, a), c, O);
+  }
+}
+function train(Q) {
+  const n = Q.int(3, 7), w = S.DW * Q.range(0.018, 0.026), x0 = S.DW * Q.range(0.05, 0.95 - n * 0.03);
+  for (let i = 0; i < n; i++) {
+    const x = x0 + i * w * 1.18, yb = S.hzAt(x) + S.DH * 0.006;
+    add(rectPts(x, yb - w * 0.55, x + w, yb), PIG[i === 0 ? 'black' : Q.pick(['red', 'red', 'brown', 'crimson'])], { br: 0, wob: 0.15 });
+  }
+}
+function stripesV(Q, lay, y0, y1) {
+  const f = lay.figs[0], side = Q() < 0.5 ? -1 : 1, n = Q.int(3, 6);
+  let x = f.cx + side * f.u * Q.range(-0.1, 0.35), prev = null;
+  for (let i = 0; i < n; i++) {
+    const w = S.DW * Q.range(0.012, 0.06), c = pc(Q(), VSTRIPE, prev ? [prev] : []);
+    const xa = side > 0 ? x : x - w, xb = side > 0 ? x + w : x;
+    add(rectPts(xa - 0.8, y0, xb + 0.8, y1), PIG[c], { ang: Math.PI / 2, aj: 0.2, br: 1, wob: 0.5 });
+    x += side * w; prev = c;
+  }
+}
+function bgFlat(B, pal, lay) {
+  const c = B.pick(pal.flat), tone = B() < 0.5 ? '#ffffff' : '#000000', f = lay.figs[0];
+  add(rectPts(-30, -30, S.DW + 30, S.DH + 30), [PIG[c], lin(0, 0, 0, S.DH, [[0, tone, B.range(0.02, 0.14)], [1, tone, 0]])],
+    { ang: B.range(0, 3.14), aj: 2.4, br: 1.35, wob: 0 });
+  const pl = B.wpick(['none', 'tri', 'rect', 'stripes'], [3, 1.4, 1, 0.8]), Q = B.sub();
+  if (pl === 'tri') {
+    const apex = [f.cx + Q.range(-0.3, 0.3) * f.u, f.top - f.u * Q.range(0.05, 0.6)], spread = S.DW * Q.range(0.55, 1.2);
+    add([apex, [apex[0] + spread, S.DH + 40], [apex[0] - spread, S.DH + 40]], mix(PIG[c], '#ffffff', Q.range(0.35, 0.7)),
+      { ang: 1.2, aj: 1.5, br: 1.2 });
+  } else if (pl === 'rect') {
+    const n = Q.int(1, 2);
+    for (let i = 0; i < n; i++) {
+      const side = Q() < 0.5 ? -1 : 1, xa = f.cx + side * f.u * Q.range(0, 1.2), xb = side < 0 ? Q.range(-30, S.DW * 0.15) : S.DW - Q.range(-30, S.DW * 0.15);
+      add(rectPts(Math.min(xa, xb), -30, Math.max(xa, xb), S.DH * Q.range(0.45, 0.8)), PIG[pc(Q(), pal.field, [c])],
+        { ang: Math.PI / 2, aj: 1, br: 1.2, wob: 0.6 });
+    }
+  } else if (pl === 'stripes') stripesV(Q, lay, -30, S.DH * Q.range(0.7, 1.1));
+  return [c];
+}
+function bgFields(B, pal, lay) {
+  const sk = sky(B.sub(), pal, lay.hz), GQ = B.sub(), HQ = B.sub(), DQ = B.sub();
+  S.hzAt = () => lay.hz;
+  if (HQ() < 0.22) hills(HQ, lay.hz);
+  ground(GQ, pal, lay.hz);
+  if (DQ() < 0.35) houses(DQ.sub());
+  if (DQ() < 0.12 && lay.comp !== 'group') tower(DQ.sub(), lay);
+  if (DQ() < 0.14) train(DQ.sub());
+  if (sk.kind !== 'flat' && DQ() < 0.16) planes(DQ.sub(), lay.hz);
+  return sk.avoid;
+}
+function bgPersp(B, pal, lay) {
+  const hz = lay.hz, sk = sky(B.sub(), pal, hz, B() < 0.8 ? 'grad' : null), Q = B.sub();
+  S.hzAt = () => hz;
+  const vx = S.DW * Q.range(0.1, 0.9), yb = S.DH + 40, n = Q.int(9, 15), m = Q.int(4, 7), ex = Q.range(1.5, 2.4);
+  const xs = [], ys = [];
+  for (let i = 0; i <= n; i++) xs.push(lerp(-S.DW * 2.4, S.DW * 3.4, (i + (i && i < n ? Q.range(-0.35, 0.35) : 0)) / n));
+  xs.sort((a, b) => a - b);
+  for (let j = 0; j <= m; j++) ys.push(hz + (yb - hz) * Math.pow(j / m, ex));
+  const px = (i, y) => vx + (xs[i] - vx) * (y - hz) / (yb - hz);
+  for (let i = 0; i < n; i++) {
+    let c = pc(Q(), pal.field);
+    const ang = Math.atan2(yb - hz, (xs[i] + xs[i + 1]) / 2 - vx);
+    for (let j = 0; j < m; j++) {
+      const r1 = Q(), r2 = Q();
+      if (j && r1 < 0.45) c = pc(r2, pal.field, [c]);
+      const y0 = ys[j], y1 = ys[j + 1] + 1.5;
+      add([[px(i, y0), y0], [px(i + 1, y0) + 1, y0], [px(i + 1, y1) + 1, y1], [px(i, y1), y1]], PIG[c], { ang, aj: 0.2, br: 1, wob: 0.5 });
+    }
+  }
+  const DQ = B.sub();
+  if (DQ() < 0.3) train(DQ.sub());
+  if (DQ() < 0.25) houses(DQ.sub());
+  if (sk.kind !== 'flat' && DQ() < 0.14) planes(DQ.sub(), hz);
+  return sk.avoid;
+}
+function bgGrid(B, pal, lay) {
+  const Q = B.sub(), hy = S.DH * Q.range(0.6, 0.8), f = lay.figs[0], near = [];
+  const row = (y0, y1, n) => {
+    const ws = []; let s = 0;
+    for (let i = 0; i < n; i++) { const w = Q.range(0.4, 1.6); ws.push(w); s += w; }
+    let x = -30, prev = null;
+    for (let i = 0; i < n; i++) {
+      const w = ws[i] / s * (S.DW + 60), c = pc(Q(), GRIDC, prev ? [prev] : []), rr = Q(), rc = Q(), rd = Q();
+      const Ls = [PIG[c]];
+      if (rr < P.grad * 0.55) Ls.push(fadeF([x, y0, x + w, y1], PIG[pc(rc, GRIDC, [c])], rd < 0.5 ? 0 : Math.PI, 0, lerp(0.5, 1, rd)));
+      add(rectPts(x, y0, x + w + 1.5, y1 + 1.5), Ls, { ang: Q.range(0, 3.14), aj: 1.6, br: 1.2, wob: 0.6 });
+      if (f.cx >= x && f.cx <= x + w) near.push(c);
+      x += w; prev = c;
+    }
+  };
+  row(-30, hy, Q.int(3, 5));
+  row(hy, S.DH + 30, Q.int(3, 6));
+  if (Q() < 0.5) add(rectPts(-30, hy - S.DH * 0.01, S.DW + 30, hy + S.DH * 0.012), PIG[Q.pick(['grey', 'navy', 'cream', 'black'])],
+    { ang: 0, br: 0.8, wob: 0.4 });
+  return near;
+}
+function bgStripes(B, pal, lay) {
+  const hz = S.DH * B.range(0.78, 0.9), sk = sky(B.sub(), pal, hz, 'grad'), Q = B.sub();
+  stripesV(B.sub(), lay, -30, hz + 3);
+  const n = Q.int(1, 3);
+  let y = hz, prev = null;
+  for (let i = 0; i < n; i++) {
+    const h = i === n - 1 ? S.DH + 40 - y : (S.DH - hz) * Q.range(0.15, 0.4);
+    const c = pc(Q(), { ochre: 2, teal: 1.5, cream: 1.2, green: 1, black: 0.5, sky: 0.8, white: 0.8 }, prev ? [prev] : []);
+    add(rectPts(-30, y, S.DW + 30, y + h + 2), PIG[c], { ang: 0.02, aj: 0.3 });
+    y += h; prev = c;
+  }
+  return sk.avoid;
+}
+
+// ---------- composition ----------
+function buildScene(seed) {
+  const R = makeRng(seed), rc = R(), rp = R(), rf = R(), rb = R();
+  const comp = P.comp !== 'auto' ? P.comp : wp(rc, ['head', 'bust', 'torso', 'figure', 'group'], [1.1, 2, 2, 3, 2]);
+  const palK = P.pal !== 'auto' ? P.pal : wp(rp, ['peasant', 'sport', 'late', 'primary'],
+    { head: [3, 1, 2.5, 1.5], bust: [3, 1, 2.5, 1.5], torso: [3, 1.5, 1.5, 1.5], figure: [3, 1.5, 1, 1.5], group: [3, 3, 0.5, 1.5] }[comp]);
+  const pal = PALS[palK];
+  const n = comp === 'group' ? P.count : 1;
+  const fk = P.format !== 'auto' ? P.format : wp(rf, ...({
+    head: [['p23', 'p34'], [1, 1]], bust: [['p34', 'p45'], [1.4, 1]], torso: [['p34', 'p45', 'p23'], [1.4, 1, 0.8]],
+    figure: [['p23', 'p34', 'p35', 'a'], [1, 1, 0.6, 0.8]], group: n <= 2 ? [['p45', 'sq'], [1, 1]] : [['w65', 'w43'], [1, 1]],
+  }[comp]));
+  const bgK = P.bg !== 'auto' ? P.bg : wp(rb, ['flat', 'fields', 'persp', 'grid', 'stripes'], {
+    head: [2, 3, 0.5, 1, 0.6], bust: [3, 3, 0.5, 1, 2], torso: [3, 1, 0.3, 2, 1],
+    figure: [1, 4, 2, 0.3, 1], group: [1, 4, 1, 0.3, 1] }[comp]);
+  const DW = 1000, DH = Math.round(DW / FORMATS[fk][1]);
+  S = { DW, DH, ops: [], n: 0, sd: hashStr(seed), hzAt: () => DH * 0.5,
+    info: `${COMPS[comp]} · ${BGS[bgK]} · ${pal.name} · ${FORMATS[fk][0]}` };
+
+  // layout
+  const kind = { head: 'head', bust: 'bust', torso: 'torso', figure: 'full', group: 'full' }[comp];
+  const Lr = makeRng(seed + ':lay'), g = proportions(makeRng(seed + ':g'), kind), total = figTotal(g);
+  const figs = [];
+  let hz;
+  if (comp === 'head') {
+    const u = Math.min(DH * Lr.range(0.4, 0.48), DW * 0.62 / g.hw);
+    figs.push({ cx: DW * (0.5 + Lr.range(-0.03, 0.03)), top: DH * Lr.range(0.07, 0.13), u, g });
+    hz = DH * Lr.range(0.38, 0.62);
+  } else if (comp === 'bust' || comp === 'torso') {
+    const bust = comp === 'bust';
+    const u = bust ? Math.min(DH * Lr.range(0.19, 0.26), DW * 0.86 / (2 * g.sh + 0.3))
+      : Math.min(DH * Lr.range(0.125, 0.16), DW * 0.8 / (2 * (g.sh + g.spread) + 0.6));
+    const top = DH * (bust ? Lr.range(0.1, 0.2) : Lr.range(0.05, 0.1));
+    figs.push({ cx: DW * (0.5 + Lr.range(-0.05, 0.05)), top, u, g });
+    hz = clamp(top + u * (1 + g.neck + Lr.range(-0.3, 2.2)), DH * 0.35, DH * 0.85);
+  } else if (comp === 'figure') {
+    const halfW = Math.max(g.sh + g.spread + 0.2, g.lower === 'skirt' ? g.skirtW + 0.1 : 0);
+    const u = Math.min(DH * Lr.range(0.8, 0.9) / total, DW * 0.84 / (2 * halfW));
+    figs.push({ cx: DW * (0.5 + Lr.range(-0.07, 0.07)), top: DH * (1 - Lr.range(0.03, 0.08)) - total * u, u, g, tool: Lr() < 0.2 });
+    hz = DH * Lr.range(0.3, 0.62);
+  } else {
+    if (g.lower === 'skirt') g.skirtW = Math.min(g.skirtW, 1.4);
+    const slot = DW * 0.96 / n, halfW = Math.max(g.sh + g.spread + 0.12 + g.aw * 0.5, g.lower === 'skirt' ? g.skirtW : 0);
+    const u = Math.min(slot / (2 * halfW * 0.85), DH * Lr.range(0.78, 0.88) / total);
+    const bottom = DH * (1 - Lr.range(0.03, 0.07));
+    for (let i = 0; i < n; i++) {
+      const gi = jitterG(g, makeRng(seed + ':j' + i));
+      figs.push({ cx: DW * 0.02 + slot * (i + 0.5), top: bottom - figTotal(gi) * u, u, g: gi });
+    }
+    hz = DH * Lr.range(0.3, 0.72);
+  }
+  for (const f of figs) f.flip = Lr() < 0.5;
+  const lay = { hz, figs, comp };
+
+  // background
+  const B = makeRng(seed + ':bg');
+  const avoid = nearNames({ flat: bgFlat, fields: bgFields, persp: bgPersp, grid: bgGrid, stripes: bgStripes }[bgK](B, pal, lay));
+
+  // distant little people standing on the fields
+  if (comp === 'figure' && (bgK === 'fields' || bgK === 'persp') && Lr() < 0.35) {
+    const f = figs[0], k = Lr.int(1, 2);
+    for (let i = 0; i < k; i++) {
+      const side = i ? -1 : Lr() < 0.5 ? -1 : 1, cx = f.cx + side * DW * Lr.range(0.26, 0.38);
+      if (cx < DW * 0.06 || cx > DW * 0.94) continue;
+      const gs = proportions(makeRng(seed + ':sg' + i), 'full'), us = f.u * Lr.range(0.22, 0.36);
+      const foot = S.hzAt(cx) + (DH - S.hzAt(cx)) * Lr.range(0.04, 0.16);
+      figure(makeRng(seed + ':s' + i), { cx, top: foot - figTotal(gs) * us, u: us, g: gs, kind: 'full', pal, small: true, flip: Lr() < 0.5 });
+    }
+  }
+  figs.forEach((f, i) => figure(makeRng(seed + ':f' + i), { ...f, kind, pal, avoid }));
+  return S;
+}
+
+// ---------- render ----------
+function style(ctx, f) {
+  if (typeof f === 'string') return f;
+  const g = f.lin ? ctx.createLinearGradient(...f.lin) : ctx.createRadialGradient(...f.rad);
+  for (const [t, c, a] of f.stops) g.addColorStop(clamp(t), rgba(c, a ?? 1));
+  return g;
+}
+function toPath(pts) {
+  const p = new Path2D();
+  p.moveTo(pts[0][0], pts[0][1]);
+  for (let i = 1; i < pts.length; i++) p.lineTo(pts[i][0], pts[i][1]);
+  p.closePath();
+  return p;
+}
+const BUCKETS = [[1.1, '255,255,255', 0.11], [1.1, '0,0,0', 0.09], [2.3, '255,255,255', 0.075],
+  [2.3, '0,0,0', 0.07], [4.2, '255,255,255', 0.05], [4.2, '0,0,0', 0.05]];
+// directional brush strokes, soft-light, clipped to the shape
+function strokes(ctx, op, sd) {
+  const [x0, y0, x1, y1] = vis(op.bb), w = x1 - x0, h = y1 - y0;
+  if (w <= 0 || h <= 0) return;
+  const n = Math.min(14000, w * h / 70 * P.brush * op.br) | 0;
+  if (n < 6) return;
+  const r = mulberry32(sd);
+  ctx.globalCompositeOperation = 'soft-light';
+  ctx.lineCap = 'round';
+  for (const [lw, col, a] of BUCKETS) {
+    ctx.beginPath();
+    for (let j = 0; j < n / BUCKETS.length; j++) {
+      const x = x0 + r() * w, y = y0 + r() * h, an = op.ang + (r() - 0.5) * op.aj * Math.PI / 2;
+      const L = 6 + r() * r() * 30, dx = Math.cos(an) * L / 2, dy = Math.sin(an) * L / 2, b = (r() - 0.5) * 0.3;
+      ctx.moveTo(x - dx, y - dy);
+      ctx.quadraticCurveTo(x - dy * b, y + dx * b, x + dx, y + dy);
+    }
+    ctx.lineWidth = lw; ctx.strokeStyle = `rgba(${col},${a})`;
+    ctx.stroke();
+  }
+  ctx.globalCompositeOperation = 'source-over';
+}
+function paintOp(ctx, op, sd) {
+  const path = toPath(op.pts), [x0, y0, x1, y1] = op.bb;
+  ctx.save();
+  ctx.clip(path);
+  for (const L of op.L) {
+    const cl = L.rect || L.poly;
+    if (cl) { ctx.save(); const p = L.poly ? toPath(L.poly) : new Path2D(); if (L.rect) p.rect(L.rect[0], L.rect[1], L.rect[2] - L.rect[0], L.rect[3] - L.rect[1]); ctx.clip(p); }
+    ctx.fillStyle = style(ctx, L.f);
+    ctx.fillRect(x0 - 2, y0 - 2, x1 - x0 + 4, y1 - y0 + 4);
+    if (cl) ctx.restore();
+  }
+  if (P.brush > 0 && op.br > 0) strokes(ctx, op, sd);
+  if (op.edge) {
+    ctx.globalCompositeOperation = 'multiply';
+    ctx.lineWidth = 2.4; ctx.strokeStyle = rgba('#2a1d12', op.edge); ctx.stroke(path);
+    ctx.globalCompositeOperation = 'source-over';
+  }
+  ctx.restore();
+}
+// Voronoi craquelure: edges drawn where the paint is dark or the crack field is strong
+function craquelure(ctx, sc) {
+  const k = P.cracks;
+  if (k <= 0) return;
+  const { DW, DH } = sc, lw = 200, lh = Math.max(1, Math.round(lw * DH / DW));
+  const lc = document.createElement('canvas'); lc.width = lw; lc.height = lh;
+  const lx = lc.getContext('2d', { willReadFrequently: true });
+  lx.drawImage(ctx.canvas, 0, 0, lw, lh);
+  const ld = lx.getImageData(0, 0, lw, lh).data;
+  const lumAt = (x, y) => { const i = (clamp(Math.floor(y / DH * lh), 0, lh - 1) * lw + clamp(Math.floor(x / DW * lw), 0, lw - 1)) * 4;
+    return (ld[i] * 0.3 + ld[i + 1] * 0.59 + ld[i + 2] * 0.11) / 255; };
+  const r = mulberry32(sc.sd ^ 0x5bd1e995), cs = 13, csy = 19, nx = Math.ceil(DW / cs) + 3, ny = Math.ceil(DH / csy) + 3;
+  const site = new Float64Array(nx * ny * 2);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const q = (j * nx + i) * 2;
+    site[q] = (i - 1 + 0.12 + 0.76 * r()) * cs; site[q + 1] = (j - 1 + 0.12 + 0.76 * r()) * csy;
+  }
+  const dark = new Path2D(), light = new Path2D(), sd = sc.sd & 0xffff;
+  for (let j = 1; j < ny - 1; j++) for (let i = 1; i < nx - 1; i++) {
+    const id = j * nx + i, px = site[id * 2], py = site[id * 2 + 1];
+    const bw = 3 * csy;
+    let poly = [[px - bw, py - bw, -1], [px + bw, py - bw, -1], [px + bw, py + bw, -1], [px - bw, py + bw, -1]];
+    for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
+      if (!di && !dj) continue;
+      const nid = (j + dj) * nx + i + di, qx = site[nid * 2], qy = site[nid * 2 + 1];
+      const mx = (px + qx) / 2, my = (py + qy) / 2, dx = qx - px, dy = qy - py;
+      const out = [];
+      for (let e = 0; e < poly.length; e++) {
+        const a = poly[e], b = poly[(e + 1) % poly.length];
+        const sa = (a[0] - mx) * dx + (a[1] - my) * dy, sb = (b[0] - mx) * dx + (b[1] - my) * dy;
+        if (sa <= 0) {
+          out.push(a);
+          if (sb > 0) { const t = sa / (sa - sb); out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, nid]); }
+        } else if (sb <= 0) { const t = sa / (sa - sb); out.push([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t, a[2]]); }
+      }
+      poly = out;
+    }
+    for (let e = 0; e < poly.length; e++) {
+      const a = poly[e], lab = a[2];
+      if (lab <= id) continue;                 // each shared edge once
+      const b = poly[(e + 1) % poly.length], mx = (a[0] + b[0]) / 2, my = (a[1] + b[1]) / 2;
+      if (mx < -2 || my < -2 || mx > DW + 2 || my > DH + 2) continue;
+      // patches of connected network: a smooth field thresholded by amount and paint darkness
+      const L = lumAt(mx, my);
+      const fld = vnoise2(mx / 260, my / 260, sd) * 0.65 + vnoise2(mx / 70, my / 70, sd + 9) * 0.35;
+      const th = 0.9 - k * 0.6 - (1 - L) * 0.2;
+      if (fld < th + (hash1(id * 131 + lab * 7 + sd) - 0.5) * 0.07 || hash1(id * 29 + lab * 3 + sd) < 0.1) continue;
+      const jt = (hash1(id * 17 + lab) - 0.5) * 0.35;
+      const path = L < 0.42 ? light : dark;
+      path.moveTo(a[0], a[1]);
+      path.lineTo(mx + (b[1] - a[1]) * jt, my - (b[0] - a[0]) * jt);
+      path.lineTo(b[0], b[1]);
+    }
+  }
+  ctx.lineWidth = 0.7; ctx.lineJoin = 'round'; ctx.lineCap = 'round';
+  ctx.globalCompositeOperation = 'multiply'; ctx.strokeStyle = 'rgba(80,58,34,0.36)'; ctx.stroke(dark);
+  ctx.globalCompositeOperation = 'source-over'; ctx.strokeStyle = 'rgba(228,220,200,0.33)'; ctx.stroke(light);
+}
+let weaveCache = null;
+function weaveTile(s) {
+  const per0 = Math.max(2.2, 2.8 * s), m = 2 * Math.max(4, Math.round(96 / per0)), TS = Math.round(per0 * m), per = TS / m;
+  if (weaveCache && weaveCache.TS === TS) return weaveCache.c;
+  const c = document.createElement('canvas'); c.width = c.height = TS;
+  const g = c.getContext('2d'), im = g.createImageData(TS, TS), d = im.data, r = mulberry32(12345);
+  for (let y = 0; y < TS; y++) for (let x = 0; x < TS; x++) {
+    const u = x / per, v = y / per, cu = Math.floor(u), cv = Math.floor(v), par = (cu + cv) & 1;
+    const across = par ? u - cu : v - cv, along = par ? v - cv : u - cu;
+    const val = 0.5 + 0.22 * (Math.sin(across * Math.PI) * (0.75 + 0.25 * Math.sin(along * Math.PI)) - 0.6) + (r() - 0.5) * 0.18;
+    const i = (y * TS + x) * 4;
+    d[i] = d[i + 1] = d[i + 2] = clamp(val) * 255; d[i + 3] = 255;
+  }
+  g.putImageData(im, 0, 0);
+  weaveCache = { TS, c };
+  return c;
+}
+// canvas weave, paint mottling, yellowed varnish, vignette
+function finish(ctx, sc, s) {
+  const k = P.canvas;
+  if (k <= 0) return;
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'overlay'; ctx.globalAlpha = Math.min(1, 0.6 * k);
+  ctx.fillStyle = ctx.createPattern(weaveTile(s), 'repeat'); ctx.fillRect(0, 0, W, H);
+  const mw = 64, mh = Math.round(64 * H / W), mc = document.createElement('canvas'); mc.width = mw; mc.height = mh;
+  const mg = mc.getContext('2d'), im = mg.createImageData(mw, mh);
+  for (let i = 0; i < mw * mh; i++) { const v = 128 + (hash1(i + sc.sd) - 0.5) * 110; im.data.set([v, v, v, 255], i * 4); }
+  mg.putImageData(im, 0, 0);
+  ctx.globalAlpha = 0.3 * k; ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = 'high';
+  ctx.drawImage(mc, 0, 0, W, H);
+  ctx.globalCompositeOperation = 'multiply'; ctx.globalAlpha = 1;
+  ctx.fillStyle = `rgba(238,220,182,${0.38 * k})`; ctx.fillRect(0, 0, W, H);
+  const gr = ctx.createRadialGradient(W / 2, H / 2, Math.min(W, H) * 0.35, W / 2, H / 2, Math.hypot(W, H) * 0.56);
+  gr.addColorStop(0, 'rgba(110,85,50,0)'); gr.addColorStop(1, `rgba(110,85,50,${0.32 * k})`);
+  ctx.fillStyle = gr; ctx.fillRect(0, 0, W, H);
+  ctx.globalCompositeOperation = 'source-over';
+}
+function render(ctx, sc, s) {
+  const W = ctx.canvas.width, H = ctx.canvas.height;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.globalCompositeOperation = 'source-over'; ctx.globalAlpha = 1;
+  ctx.fillStyle = PIG.white; ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(s, 0, 0, s, 0, 0);
+  sc.ops.forEach((op, i) => paintOp(ctx, op, (sc.sd + i * 7919) >>> 0));
+  craquelure(ctx, sc);
+  finish(ctx, sc, s);
+}
+
+// ---------- ui ----------
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const stage = document.getElementById('stage'), seedInp = document.getElementById('seed'), status = document.getElementById('status');
+let seed = randSeed(), scene = null, auto = null, pend = false;
+
+function regen() {
+  const t0 = performance.now();
+  scene = buildScene(seed);
+  draw();
+  status.textContent = `${scene.info} · ${Math.round(performance.now() - t0)} ms`;
+}
+function regenSoon() { if (pend) return; pend = true; requestAnimationFrame(() => { pend = false; regen(); }); }
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  const aw = (stage.clientWidth - 40) * dpr, ah = (stage.clientHeight - 40) * dpr;
+  const s = Math.max(0.2, Math.min(aw / scene.DW, ah / scene.DH));
+  cv.width = Math.round(scene.DW * s); cv.height = Math.round(scene.DH * s);
+  cv.style.width = cv.width / dpr + 'px'; cv.style.height = cv.height / dpr + 'px';
+  render(ctx, scene, s);
+}
+function newPeople() { seed = randSeed(); seedInp.value = seed; regen(); }
+function save() {
+  const c = document.createElement('canvas');
+  c.width = scene.DW * 2; c.height = scene.DH * 2;
+  render(c.getContext('2d'), scene, 2);
+  const a = document.createElement('a');
+  a.download = `suprematist-${seed.replace(/[^\w-]/g, '_')}.png`;
+  a.href = c.toDataURL('image/png'); a.click();
+}
+function toggleAuto() {
+  if (auto) { clearInterval(auto); auto = null; } else auto = setInterval(newPeople, 2600);
+  document.getElementById('bAuto').classList.toggle('on', !!auto);
+}
+
+const box = document.getElementById('controls');
+for (const [k, label, min, max, step] of CTRL) {
+  const row = document.createElement('div'); row.className = 'row';
+  row.innerHTML = `<label>${label}</label><input type="range" min="${min}" max="${max}" step="${step}" value="${P[k]}"><output>${P[k]}</output>`;
+  const inp = row.querySelector('input'), out = row.querySelector('output');
+  inp.oninput = () => { P[k] = +inp.value; out.textContent = P[k]; regenSoon(); };
+  box.appendChild(row);
+}
+const sels = {};
+for (const [id, opts] of [['comp', COMPS], ['bg', BGS], ['pal', PAL_NAMES], ['format', FORMATS]]) {
+  const sel = sels[id] = document.getElementById(id);
+  for (const [k, v] of Object.entries(opts)) sel.add(new Option(Array.isArray(v) ? v[0] : v, k, false, k === P[id]));
+  sel.onchange = () => { P[id] = sel.value; regen(); };
+}
+function cycle(id) {
+  const sel = sels[id];
+  sel.selectedIndex = (sel.selectedIndex + 1) % sel.options.length;
+  sel.onchange();
+}
+
+seedInp.value = seed;
+seedInp.onchange = () => { seed = seedInp.value; regen(); };
+document.getElementById('bNew').onclick = newPeople;
+document.getElementById('bDice').onclick = newPeople;
+document.getElementById('bAuto').onclick = toggleAuto;
+document.getElementById('bSave').onclick = save;
+cv.addEventListener('click', newPeople);
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.code === 'Space') { e.preventDefault(); newPeople(); }
+  else if (e.code === 'KeyR') newPeople();
+  else if (e.code === 'KeyS') save();
+  else if (e.code === 'KeyA') toggleAuto();
+  else if (e.code === 'KeyC') cycle('comp');
+  else if (e.code === 'KeyB') cycle('bg');
+  else if (e.code === 'KeyP') cycle('pal');
+});
+let rt;
+addEventListener('resize', () => { clearTimeout(rt); rt = setTimeout(draw, 80); });
+regen();
+</script>
+</body>
+</html>

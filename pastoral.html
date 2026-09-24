@@ -1,0 +1,1323 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Pastoral</title>
+<style>
+  :root { --bg:#111; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#ee8fb3; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262626, #121212 72%); }
+  #cv { display:block; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #panel { width:290px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 92px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  .row input[type=checkbox] { justify-self:start; accent-color:var(--acc); margin:0; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  .pals { display:grid; grid-template-columns: repeat(3, 1fr); gap:5px; margin:6px 0; }
+  .pal { border:1px solid #2c2c2c; background:#0c0c0c; padding:3px; cursor:pointer; min-width:0; }
+  .pal:hover { border-color:#555; }
+  .pal.on { border-color:var(--acc); }
+  .pal canvas { width:100%; height:34px; display:block; }
+  .pal span { display:block; font-size:10px; color:var(--dim); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pal.on span { color:var(--fg); }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Pastoral</h1>
+  <div class="btns">
+    <button id="bNew" title="N">новый пейзаж</button>
+    <button id="bStyle" title="M">случайный стиль</button>
+    <button id="bRedraw" title="R">перемазать</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>seed</label><input type="text" id="seed"><span></span></div>
+  <div class="row"><label>сцена</label><select id="scene"></select><span></span></div>
+  <h2>Палитра</h2>
+  <div class="pals" id="pals"></div>
+  <div class="btns"><button id="bPal" title="P">сгенерировать палитру</button></div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Наивный пасторальный пейзаж в духе плоской живописи маслом. Сцена строится по планам от дальнего
+    к ближнему: небо с полосами растяжки, светило и облака, слои гор с внутренними складками, снегом,
+    теневыми гранями и дымкой у подножия, вода, полосы полей (наклон + холм/ступень/волна), на их
+    кромках — перелески, лес, деревья, кипарисы, домик, тропа и путник; спереди — тень, маки, трава,
+    рапс или лаванда.<br><br>
+    Каждая плоскость сначала заливается ровным цветом, потом по ней идут мазки из отдельных щетинок —
+    цвет каждого мазка берётся с уже написанного холста, поэтому мазки «размешивают» краску, а не
+    перекрашивают. Параллельно щетинки рисуются в карту высот; в конце она вместе с переплетением
+    холста освещается слева сверху — получается рельеф краски.<br><br>
+    Случайность разделена по частям сцены: слайдер двигает только своё, остальное не пересыпается.<br><br>
+    N — новый · M — стиль · P — палитра · R — перемазать · S — PNG 2400px
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const mix = (a, b, t) => a + (b - a) * t;
+const smooth = (a, b, x) => { x = clamp((x - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); };
+const TAU = Math.PI * 2, DEG = Math.PI / 180;
+
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+function Rng(key) {
+  const r = mulberry(hashStr(key));
+  r.range = (a, b) => a + (b - a) * r();
+  r.int = (a, b) => a + Math.floor(r() * (b - a + 1));
+  r.pick = a => a[Math.floor(r() * a.length)];
+  r.chance = p => r() < p;
+  r.sgn = () => r() < 0.5 ? -1 : 1;
+  return r;
+}
+let SEED = Math.random().toString(36).slice(2, 8), SSEED = 0;
+// геометрия зависит только от seed, мазки — ещё и от «перемазать»
+const rng = (...k) => Rng(SEED + '/' + k.join('/'));
+const rngS = (...k) => Rng(SEED + '#' + SSEED + '/' + k.join('/'));
+
+// ---------- noise 1D ----------
+function h1(i, s) {
+  let h = Math.imul(i | 0, 0x27d4eb2d) ^ Math.imul(s | 0, 0x165667b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b); h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296 * 2 - 1;
+}
+function n1(x, s) {
+  const i = Math.floor(x), f = x - i, u = f * f * f * (f * (f * 6 - 15) + 10), a = h1(i, s);
+  return a + (h1(i + 1, s) - a) * u;
+}
+function fbm1(x, s, oct = 4) { let v = 0, a = 0.5; for (let k = 0; k < oct; k++) { v += a * n1(x, s + k * 7919); x *= 2.07; a *= 0.5; } return v; }
+
+// ---------- color (OKLab) ----------
+const hex2rgb = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const rgb2hex = c => '#' + c.map(v => clamp(Math.round(v), 0, 255).toString(16).padStart(2, '0')).join('');
+const s2l = c => (c /= 255) <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const l2s = c => { c = clamp(c, 0, 1); return 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * Math.pow(c, 1 / 2.4) - 0.055); };
+function rgb2lab(c) {
+  const r = s2l(c[0]), g = s2l(c[1]), b = s2l(c[2]);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+function lab2rgb([L, a, b]) {
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+  return [l2s(4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s),
+          l2s(-1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s),
+          l2s(-0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s)];
+}
+const lch2rgb = (L, C, h) => lab2rgb([L, C * Math.cos(h * DEG), C * Math.sin(h * DEG)]);
+function rgb2lch(c) { const [L, a, b] = rgb2lab(c); return [L, Math.hypot(a, b), Math.atan2(b, a) / DEG]; }
+function mixc(c1, c2, t) {
+  if (t <= 0) return c1; if (t >= 1) return c2;
+  const a = rgb2lab(c1), b = rgb2lab(c2);
+  return lab2rgb([mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)]);
+}
+// сдвиг светлоты / множитель хромы / поворот тона
+function tone(c, dL = 0, cm = 1, dh = 0) { const [L, C, h] = rgb2lch(c); return lch2rgb(clamp(L + dL, 0, 1), C * cm, h + dh); }
+// быстрый rgb-сдвиг яркости для мазков
+const lit = (c, v) => v >= 0 ? [c[0] + (255 - c[0]) * v, c[1] + (255 - c[1]) * v, c[2] + (255 - c[2]) * v]
+                             : [c[0] * (1 + v), c[1] * (1 + v), c[2] * (1 + v)];
+const css = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const gray = (v, a = 1) => { const g = clamp(v, 0, 1) * 255 | 0; return `rgba(${g},${g},${g},${a})`; };
+
+// ---------- palettes ----------
+// небо сверху вниз · горы от дальних к ближним · поля · тёмное (тень переднего плана)
+const PALS = [
+  { name: 'маки', sky: ['#e4e2ee', '#eeecd4', '#f2d8cc', '#eeb6ca', '#f0c4d0', '#ead6d8'], cloud: '#ea9fbd', sun: '#fff3e2',
+    mtn: ['#8ccae6', '#4db4e4', '#3aa6dc'], water: '#8fd6e0', fields: ['#8dbd83', '#74bd96', '#ece4b6', '#ee8558', '#e6c07e', '#9fcb5a'],
+    tree: '#1d7766', fg: '#3f2552', grass: '#9cc85a', flowers: ['#e5302a', '#f3eeec', '#b8306a'] },
+  { name: 'сумерки', sky: ['#bcdad8', '#dcd0dc', '#f4d6c4', '#f3b6ae', '#f6c8b2'], cloud: '#f0c0c8', sun: '#fbf6ea',
+    mtn: ['#a6a6da', '#6ccfd0', '#56aed8', '#ad8ab8'], water: '#ebe0e4', fields: ['#f0c28e', '#f3b88c', '#6db86a', '#1d2b6a', '#e8a88a'],
+    tree: '#1b2850', fg: '#1d2a66', grass: '#6db86a', path: '#ead7a2' },
+  { name: 'озеро', sky: ['#a2cfe8', '#b8cfea', '#c9c8e6', '#e8b2d6', '#f0a0c6'], cloud: '#f4efe6', sun: '#fff0e0',
+    mtn: ['#98b4cc', '#6fa4c0', '#5b98b6'], water: '#44dcd8', fields: ['#e2a47a', '#c7784e', '#16806e', '#567a3a', '#efcb3e', '#f1d6b2'],
+    tree: '#172a28', fg: '#1a2660', grass: '#567a3a', roof: '#c9683e' },
+  { name: 'вершина', sky: ['#62b4ca', '#86bedc', '#b0b4e2', '#dcaee0'], cloud: '#f2e8f4', sun: '#fffaf0',
+    mtn: ['#f1eff2', '#79c6ee', '#3ea6e0', '#2b84d4'], water: '#5fc8e8', fields: ['#e8a2de', '#127a5a', '#ecef3a', '#f0b64a', '#2b84d4'],
+    tree: '#10303a', fg: '#4a1a98', grass: '#127a5a', lav: '#4a1a98', path: '#f0b64a' },
+  { name: 'дерево', sky: ['#38a4d8', '#6aa6e0', '#98a0de', '#58aee2'], cloud: '#a09ce0', sun: '#fff0f0',
+    mtn: ['#2cb2e8', '#1e8ad0'], water: '#3ab8e8', fields: ['#f0d2c0', '#cce08a', '#2a8a3a', '#86c24a', '#f2eab4', '#1a3a8c'],
+    tree: '#19387a', fg: '#2a2a9a', grass: '#86c24a', lav: '#4636dc' },
+  { name: 'гроза', sky: ['#1d6484', '#216e8c', '#28789c', '#2c80a4'], cloud: '#a492e6', sun: '#f0f0ff',
+    mtn: ['#2690dc', '#1a3a9e'], water: '#2a78c0', fields: ['#f2e2c6', '#56b02e', '#e8d6b0', '#3d9a2a'],
+    tree: '#131c3e', fg: '#1a2a5a', grass: '#56b02e', rape: '#f4d628' },
+  { name: 'закат', sky: ['#d9a8d8', '#e6a2cc', '#ee98ba', '#f28aa8'], cloud: '#f0b0d0', sun: '#f7b89a',
+    mtn: ['#5ea8d0', '#4a8ed8', '#3e7aa8', '#2c6a8a'], water: '#6ab0d8', fields: ['#1a1f4a', '#48a83a', '#c8cc2a', '#3fa88a', '#6fb04a'],
+    tree: '#0e1a2a', fg: '#1a1f4a', grass: '#f0a0b8', path: '#c8cc2a' },
+  { name: 'лето', sky: ['#30ace0', '#46b0e0', '#86b2dc', '#c8b8d8', '#eab0c0'], cloud: '#e6dce8', sun: '#fffbe8',
+    mtn: ['#62aab6', '#3e98a0'], water: '#40b0d0', fields: ['#5c9e30', '#f2ae6e', '#f0d040', '#8ac040', '#e8c070'],
+    tree: '#1f5a30', fg: '#1a1f5a', grass: '#8ac040', path: '#e8c890' },
+];
+const PAL_DEF = { snow: '#f3f1f4', rape: '#f3d02c', lav: '#5b40cf', roof: '#c96a3d', wall: '#f4f1ea', path: '#ead6a4',
+  flowers: ['#e5302a', '#f3eeec', '#c03a6a'] };
+let PAL = PALS[0], PALI = 0, GENPAL = null;
+
+function genPalette(r) {
+  const L = (l, c, h) => rgb2hex(lch2rgb(l, c, h));
+  const mood = r.pick(['day', 'day', 'dusk', 'dusk', 'pink', 'storm']);
+  const hb = r.range(205, 255), hw = r.range(345, 395) % 360, hp = r.range(40, 75);
+  let sky;
+  if (mood === 'day') sky = [L(0.72, 0.11, hb), L(0.77, 0.09, hb + 15), L(0.8, 0.08, hb + 55), L(0.85, 0.08, hw)];
+  else if (mood === 'dusk') sky = [L(0.86, 0.04, hb - 20), L(0.93, 0.05, 95), L(0.82, 0.09, hw), L(0.87, 0.07, hp)];
+  else if (mood === 'pink') sky = [L(0.78, 0.08, r.range(305, 330)), L(0.76, 0.11, 345), L(0.74, 0.13, 0), L(0.8, 0.1, 20)];
+  else sky = [L(0.46, 0.08, hb - 15), L(0.5, 0.085, hb - 12), L(0.55, 0.09, hb - 8)];
+  const cloud = mood === 'storm' ? L(0.7, 0.13, r.range(285, 300)) : L(r.range(0.84, 0.93), r.range(0.03, 0.09), r.pick([hw, hb + 50, 90]));
+  const hm = r.range(200, 285);
+  const mtn = [L(0.84, 0.06, hm + r.range(-20, 20)), L(0.73, 0.12, hm), L(0.62, 0.14, hm + r.range(-10, 25))];
+  const pool = [[0.72, 0.12, 142], [0.76, 0.09, 165], [0.87, 0.17, 122], [0.89, 0.16, 100], [0.8, 0.12, 75], [0.72, 0.15, 42],
+    [0.84, 0.08, 355], [0.94, 0.05, 92], [0.52, 0.09, 180], [0.56, 0.1, 128], [0.84, 0.1, 60], [0.4, 0.1, 265]];
+  for (let i = pool.length - 1; i > 0; i--) { const j = r.int(0, i); [pool[i], pool[j]] = [pool[j], pool[i]]; }
+  const fields = pool.slice(0, r.int(5, 6)).map(([l, c, h]) => L(l + r.range(-0.04, 0.04), c * r.range(0.8, 1.2), h + r.range(-10, 10)));
+  return { name: 'случайная', sky, cloud, sun: L(0.92, 0.06, hp), mtn, water: L(0.82, 0.13, r.range(185, 215)), fields,
+    tree: L(0.32, 0.06, r.range(160, 260)), fg: L(0.3, 0.12, r.range(255, 295)), grass: r.pick(fields), lav: L(0.5, 0.17, r.range(280, 300)) };
+}
+let C = null;
+function resolvePalette() {
+  const q = { ...PAL_DEF, ...PAL };
+  const a = h => { const [L, Cc, hh] = rgb2lch(hex2rgb(h)); return lch2rgb(clamp(L + P.light, 0, 1), Cc * P.sat, hh + P.hue); };
+  C = {};
+  for (const k in q) if (k !== 'name') C[k] = Array.isArray(q[k]) ? q[k].map(a) : a(q[k]);
+  C.haze = q.haze ? a(q.haze) : mixc(C.sky[C.sky.length - 1], [255, 255, 255], 0.2);
+}
+
+// ---------- params ----------
+const SCHEMA = [
+  ['Композиция'],
+  ['aspect', 'формат', 'sel', ['5:6', '4:5', '1:1', '5:4', '4:3', '3:2'], '5:6'],
+  ['horizon', 'горизонт', 0.3, 0.75, 0.01, 0.52],
+  ['fields', 'полей', 2, 9, 1, 5],
+  ['hilly', 'холмистость', 0, 1, 0.01, 0.6],
+  ['tilt', 'наклон', 0, 1, 0.01, 0.45],
+  ['Небо'],
+  ['clouds', 'облака', 'sel', ['нет', 'полосы', 'кучевые', 'туча'], 'полосы'],
+  ['cloudAmt', 'облачность', 0, 1, 0.01, 0.45],
+  ['sun', 'светило', 'sel', ['нет', 'луна', 'солнце'], 'нет'],
+  ['stars', 'звёзды', 0, 40, 1, 0],
+  ['mist', 'дымка', 0, 1, 0.01, 0.3],
+  ['Горы'],
+  ['mtnLayers', 'слоёв', 0, 5, 1, 1],
+  ['mtnHeight', 'высота', 0.02, 0.4, 0.01, 0.1],
+  ['mtnShape', 'форма', 'sel', ['холмы', 'пик', 'скалы', 'смесь'], 'холмы'],
+  ['snow', 'снег', 0, 1, 0.01, 0],
+  ['shadeFace', 'тень склона', 0, 1, 0.01, 0.3],
+  ['water', 'вода', 0, 0.25, 0.01, 0],
+  ['Поля'],
+  ['texture', 'фактура', 0, 1, 0.01, 0.45],
+  ['hedges', 'перелески', 0, 1, 0.01, 0.6],
+  ['Объекты'],
+  ['lone', 'деревья', 0, 3, 1, 1],
+  ['cypress', 'кипарисы', 0, 6, 1, 0],
+  ['forest', 'лес', 0, 1, 0.01, 0],
+  ['house', 'домик', 'chk', false],
+  ['path', 'тропа', 'chk', false],
+  ['figure', 'путник', 'chk', false],
+  ['Передний план'],
+  ['fg', 'тип', 'sel', ['нет', 'тень', 'маки', 'трава', 'рапс', 'лаванда'], 'маки'],
+  ['fgHeight', 'высота', 0.04, 0.4, 0.01, 0.22],
+  ['Цвет'],
+  ['hue', 'сдвиг тона', -180, 180, 1, 0],
+  ['sat', 'насыщенность', 0, 1.6, 0.01, 1],
+  ['light', 'яркость', -0.2, 0.2, 0.01, 0],
+  ['Живопись'],
+  ['strokes', 'мазки', 0, 1, 0.01, 0.6],
+  ['brush', 'кисть', 0.4, 2.5, 0.01, 1],
+  ['relief', 'рельеф', 0, 1, 0.01, 0.5],
+  ['grain', 'холст', 0, 1, 0.01, 0.4],
+  ['wobble', 'дрожь краёв', 0, 1, 0.01, 0.4],
+];
+const P = {};
+for (const s of SCHEMA) if (s.length > 1) P[s[0]] = s[s.length - 1];
+
+// сцены по мотивам референсов: палитра + набор параметров
+const SCENES = {
+  'маковое поле': { pal: 0, horizon: 0.5, fields: 5, hilly: 0.75, tilt: 0.4, clouds: 'полосы', cloudAmt: 0.4, sun: 'нет', stars: 0, mist: 0.2,
+    mtnLayers: 1, mtnHeight: 0.09, mtnShape: 'холмы', snow: 0, shadeFace: 0.2, water: 0, texture: 0.5, hedges: 0.75,
+    lone: 1, cypress: 0, forest: 0, house: false, path: false, figure: false, fg: 'маки', fgHeight: 0.24 },
+  'путник в сумерках': { pal: 1, horizon: 0.64, fields: 3, hilly: 0.1, tilt: 0.55, clouds: 'нет', cloudAmt: 0.3, sun: 'луна', stars: 0, mist: 0.35,
+    mtnLayers: 4, mtnHeight: 0.2, mtnShape: 'скалы', snow: 0, shadeFace: 0.15, water: 0.05, texture: 0.3, hedges: 0,
+    lone: 0, cypress: 0, forest: 0, house: false, path: true, figure: true, fg: 'трава', fgHeight: 0.12 },
+  'дом у озера': { pal: 2, horizon: 0.42, fields: 5, hilly: 0.12, tilt: 0.45, clouds: 'кучевые', cloudAmt: 0.65, sun: 'нет', stars: 0, mist: 0.35,
+    mtnLayers: 2, mtnHeight: 0.1, mtnShape: 'холмы', snow: 0, shadeFace: 0.3, water: 0.15, texture: 0.55, hedges: 0.15,
+    lone: 0, cypress: 3, forest: 0, house: true, path: false, figure: false, fg: 'тень', fgHeight: 0.14 },
+  'к вершине': { pal: 3, horizon: 0.5, fields: 4, hilly: 0.95, tilt: 0.45, clouds: 'нет', cloudAmt: 0.3, sun: 'нет', stars: 6, mist: 0.2,
+    mtnLayers: 3, mtnHeight: 0.24, mtnShape: 'пик', snow: 1, shadeFace: 0.6, water: 0, texture: 0.2, hedges: 0,
+    lone: 0, cypress: 0, forest: 0, house: false, path: false, figure: true, fg: 'лаванда', fgHeight: 0.13 },
+  'одинокое дерево': { pal: 4, horizon: 0.44, fields: 4, hilly: 0.95, tilt: 0.65, clouds: 'полосы', cloudAmt: 0.85, sun: 'нет', stars: 0, mist: 0.1,
+    mtnLayers: 1, mtnHeight: 0.06, mtnShape: 'холмы', snow: 0, shadeFace: 0.3, water: 0, texture: 0.35, hedges: 0,
+    lone: 1, cypress: 0, forest: 0, house: false, path: false, figure: false, fg: 'лаванда', fgHeight: 0.24 },
+  'гроза над рапсом': { pal: 5, horizon: 0.66, fields: 2, hilly: 0.25, tilt: 0.5, clouds: 'туча', cloudAmt: 0.7, sun: 'нет', stars: 0, mist: 0.05,
+    mtnLayers: 1, mtnHeight: 0.04, mtnShape: 'холмы', snow: 0, shadeFace: 0, water: 0, texture: 0.2, hedges: 0,
+    lone: 0, cypress: 1, forest: 0.55, house: false, path: false, figure: false, fg: 'рапс', fgHeight: 0.26 },
+  'розовая луна': { pal: 6, horizon: 0.56, fields: 4, hilly: 0.35, tilt: 0.8, clouds: 'полосы', cloudAmt: 0.2, sun: 'солнце', stars: 0, mist: 0.2,
+    mtnLayers: 4, mtnHeight: 0.2, mtnShape: 'пик', snow: 0, shadeFace: 0.25, water: 0, texture: 0.3, hedges: 0,
+    lone: 1, cypress: 0, forest: 0, house: false, path: false, figure: false, fg: 'трава', fgHeight: 0.24 },
+  'летний день': { pal: 7, horizon: 0.64, fields: 3, hilly: 0.1, tilt: 0.6, clouds: 'нет', cloudAmt: 0.3, sun: 'нет', stars: 0, mist: 0.55,
+    mtnLayers: 2, mtnHeight: 0.07, mtnShape: 'холмы', snow: 0, shadeFace: 0, water: 0, texture: 0.3, hedges: 0.2,
+    lone: 0, cypress: 1, forest: 0.6, house: false, path: false, figure: false, fg: 'тень', fgHeight: 0.2 },
+};
+
+// ---------- canvas state ----------
+let W = 0, H = 0, U = 1, AR = 1, ctx = null, hx = null, PL = null;
+const X = x => x * W, Y = y => y * H;
+const save = () => { ctx.save(); hx && hx.save(); };
+const restore = () => { ctx.restore(); hx && hx.restore(); };
+const clip = (p, rule = 'nonzero') => { ctx.clip(p, rule); hx && hx.clip(p, rule); };
+// заливка + такая же заливка в карту высот
+function fillC(path, style, hv = 0.35, ha = 1) {
+  ctx.fillStyle = style; ctx.fill(path);
+  if (hx && hv !== null) { hx.fillStyle = gray(hv, ha); hx.fill(path); }
+}
+function line2(x0, y0, x1, y1, col, lw, hv = 0.75, cx = null) {
+  const p = new Path2D(); p.moveTo(x0, y0);
+  if (cx) p.quadraticCurveTo(cx[0], cx[1], x1, y1); else p.lineTo(x1, y1);
+  ctx.strokeStyle = col; ctx.lineWidth = lw; ctx.stroke(p);
+  if (hx) { hx.strokeStyle = gray(hv, 0.7); hx.lineWidth = lw; hx.stroke(p); }
+}
+
+// ---------- curves: y(x) на сетке x ∈ [-0.02, 1.02] ----------
+const NC = 256;
+const CX = k => -0.02 + 1.04 * k / NC;
+const idx = x => clamp(Math.round((x + 0.02) / 1.04 * NC), 0, NC);
+function curve(fn) { const c = new Float32Array(NC + 1); for (let k = 0; k <= NC; k++) c[k] = fn(CX(k)); return c; }
+function at(c, x) { const t = clamp((x + 0.02) / 1.04 * NC, 0, NC), k = Math.min(NC - 1, t | 0); return mix(c[k], c[k + 1], t - k); }
+// наклон кривой в пикселях (dy/dx)
+function slope(c, x) { const k = clamp(idx(x), 1, NC - 1); return (c[k + 1] - c[k - 1]) * H / (2 * 1.04 / NC * W); }
+function below(c, bottom = 1.05) {
+  const p = new Path2D(); p.moveTo(X(CX(0)), Y(bottom));
+  for (let k = 0; k <= NC; k++) p.lineTo(X(CX(k)), Y(c[k]));
+  p.lineTo(X(CX(NC)), Y(bottom)); p.closePath(); return p;
+}
+function above(c) {
+  const p = new Path2D(); p.moveTo(X(CX(0)), -10);
+  for (let k = 0; k <= NC; k++) p.lineTo(X(CX(k)), Y(c[k]));
+  p.lineTo(X(CX(NC)), -10); p.closePath(); return p;
+}
+function poly(pts) { const p = new Path2D(); pts.forEach(([x, y], k) => k ? p.lineTo(X(x), Y(y)) : p.moveTo(X(x), Y(y))); p.closePath(); return p; }
+function areaBetween(top, bot) { let s = 0; for (let k = 0; k <= NC; k++) s += Math.max(0, Math.min(bot[k], 1) - Math.max(top[k], 0)); return s * 1.04 / NC; }
+
+// ---------- brush ----------
+// мазок = пучок щетинок; каждая — своя яркость, длина, прозрачность; в карту высот — свой серый
+function bristle(x, y, ang, len, wid, col, alpha, r, hv) {
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  const nb = clamp(Math.round(wid / (2.4 * U)), 2, 7), bw = wid / nb;
+  const bend = (r() - 0.5) * len * 0.14;
+  for (let b = 0; b < nb; b++) {
+    const o = ((b + 0.5) / nb - 0.5) * wid;
+    const l = len * (0.55 + 0.45 * r()), s0 = -l / 2 + (r() - 0.5) * len * 0.25;
+    const px = x - sa * o, py = y + ca * o;
+    const x0 = px + ca * s0, y0 = py + sa * s0, x1 = x0 + ca * l, y1 = y0 + sa * l;
+    const mx = (x0 + x1) / 2 - sa * bend, my = (y0 + y1) / 2 + ca * bend;
+    const p = new Path2D(); p.moveTo(x0, y0); p.quadraticCurveTo(mx, my, x1, y1);
+    const v = (r() - 0.5) * 0.09, lw = bw * (0.8 + 0.7 * r()), a = alpha * (0.45 + 0.55 * r()), hj = r();
+    const t0 = 0.12 + 0.25 * r(), t1 = 1 - (0.12 + 0.25 * r()), c = lit(col, v);
+    ctx.lineWidth = lw;
+    ctx.strokeStyle = css(c, a * 0.5); ctx.stroke(p);
+    // плотная середина: концы щетинки выходят сухими и полупрозрачными
+    const q = new Path2D(), u0 = 1 - t0, u1 = 1 - t1;
+    q.moveTo(u0 * u0 * x0 + 2 * u0 * t0 * mx + t0 * t0 * x1, u0 * u0 * y0 + 2 * u0 * t0 * my + t0 * t0 * y1);
+    q.quadraticCurveTo(u0 * u1 * x0 + (u0 * t1 + t0 * u1) * mx + t0 * t1 * x1, u0 * u1 * y0 + (u0 * t1 + t0 * u1) * my + t0 * t1 * y1,
+      u1 * u1 * x0 + 2 * u1 * t1 * mx + t1 * t1 * x1, u1 * u1 * y0 + 2 * u1 * t1 * my + t1 * t1 * y1);
+    ctx.strokeStyle = css(c, a * 0.6); ctx.lineWidth = lw * 0.85; ctx.stroke(q);
+    if (hx) { hx.strokeStyle = gray(hv + (hj - 0.5) * 0.24, 0.35); hx.lineWidth = lw * 0.8; hx.stroke(p); }
+  }
+}
+// сколько мазков нужно, чтобы покрыть площадь area (доля холста) cover раз
+const nFor = (area, len, wid, cover = 1) => Math.round(P.strokes * cover * area * 1e6 / (len * wid * P.brush * P.brush));
+function paint(r, n, sample, colOf, angOf, o = {}) {
+  const L = (o.len ?? 46) * U * P.brush, Wd = (o.wid ?? 10) * U * P.brush, A = o.alpha ?? 0.5, hv = o.hv ?? 0.6;
+  for (let k = 0; k < n; k++) {
+    const pt = sample(r); if (!pt) { r(); continue; }
+    const sc = pt[2] ?? 1;
+    bristle(X(pt[0]), Y(pt[1]), angOf(pt[0], pt[1], r), L * sc * (0.6 + 0.8 * r()), Wd * sc * (0.6 + 0.7 * r()),
+      colOf(pt[0], pt[1], r), A * (0.55 + 0.45 * r()), r, hv);
+  }
+}
+// мазки внутри path: цвет берётся с уже написанного холста — краска размешивается, а не перекрашивается
+function strokesIn(path, y0, y1, r, n, sample, angOf, o = {}) {
+  if (n <= 0) return;
+  const py0 = clamp(Math.floor(Y(y0)) - 2, 0, H - 1), py1 = clamp(Math.ceil(Y(y1)) + 2, py0 + 1, H);
+  const hh = py1 - py0, d = ctx.getImageData(0, py0, W, hh).data;
+  const jit = o.jit ?? 0.05, alt = o.alt, altP = o.altP ?? 0.14;
+  const colOf = (x, y, r) => {
+    const j = (clamp((Y(y) | 0) - py0, 0, hh - 1) * W + clamp(X(x) | 0, 0, W - 1)) * 4;
+    let c = [d[j], d[j + 1], d[j + 2]];
+    const q = r(), t = r();
+    if (alt && q < altP) c = [mix(c[0], alt[0], 0.3 * t), mix(c[1], alt[1], 0.3 * t), mix(c[2], alt[2], 0.3 * t)];
+    return lit(c, (r() - 0.5) * 2 * jit);
+  };
+  save(); clip(path); paint(r, n, sample, colOf, angOf, o); restore();
+}
+
+// ---------- plan ----------
+function skyAt(y) {
+  const S = PL.skyStops;
+  if (y <= S[0][0]) return S[0][1];
+  for (let k = 1; k < S.length; k++) if (y <= S[k][0]) return mixc(S[k - 1][1], S[k][1], (y - S[k - 1][0]) / (S[k][0] - S[k - 1][0]));
+  return S[S.length - 1][1];
+}
+function planSky() {
+  const r = rng('sky'), n = C.sky.length, span = PL.hz + 0.05;
+  PL.skyStops = C.sky.map((c, k) => [(k / (n - 1) + (k > 0 && k < n - 1 ? r.range(-0.25, 0.25) / (n - 1) : 0)) * span, c]);
+}
+function mtnCol(t) {
+  const m = C.mtn.length;
+  let c = C.mtn[0];
+  if (m > 1) { const f = t * (m - 1), k = Math.min(m - 2, Math.floor(f)); c = mixc(C.mtn[k], C.mtn[k + 1], f - k); }
+  return mixc(c, C.haze, P.mist * 0.45 * (1 - t));
+}
+function planMountains() {
+  const n = P.mtnLayers, hz = PL.hz, L = [];
+  for (let i = 0; i < n; i++) {
+    const r = rng('mtn', i), t = n === 1 ? 0.5 : i / (n - 1);
+    const shape = P.mtnShape === 'смесь' ? r.pick(['холмы', 'пик', 'скалы']) : P.mtnShape;
+    const h = P.mtnHeight * (1 - 0.55 * (n === 1 ? 0 : t)) * r.range(0.75, 1.1);
+    const s = r.int(0, 1e6), f = r.range(1.2, 2.8), o = r.range(0, 50);
+    let prof;
+    if (shape === 'холмы') {
+      const c = r.range(0.1, 0.9), w = r.range(0.2, 0.5), a = r.range(0.2, 0.5);
+      prof = x => 0.5 + 0.55 * fbm1(x * f + o, s, 3) + a * Math.exp(-(((x - c) / w) ** 2)) - a * 0.35;
+    } else if (shape === 'пик') {
+      const c = r.range(0.25, 0.75), wl = r.range(0.28, 0.6), wr = r.range(0.28, 0.6), e = 0.0018;
+      prof = x => {
+        const d = x < c ? (c - x) / wl : (x - c) / wr;
+        const m = 1 - (Math.sqrt(d * d + e) - Math.sqrt(e));
+        const sec = 0.42 + 0.35 * fbm1(x * f * 1.5 + o, s, 3);
+        return Math.max(m * (1 + 0.035 * fbm1(x * 22, s + 5, 2)), sec);
+      };
+    } else {
+      const k = r.int(3, 5);
+      prof = x => {
+        const v = (0.55 + 0.65 * fbm1(x * f + o, s, 4)) * k, fl = Math.floor(v);
+        return (fl + smooth(0.25, 0.75, v - fl)) / k + 0.02 * fbm1(x * 30, s + 3, 2);
+      };
+    }
+    const wob = P.wobble * 0.0018;
+    const ridge = curve(x => hz - h * clamp(prof(x), 0.04, 1.35) + wob * fbm1(x * 70, s + 9, 2));
+    L.push({ i, t, h, shape, ridge, s, col: mtnCol(t), folds: r.int(0, 2) });
+  }
+  return L;
+}
+function planFg() {
+  if (P.fg === 'нет') return curve(() => 1.2);
+  const r = rng('fg'), s = r.int(0, 1e6);
+  const tilt = r.range(-1, 1) * P.tilt * 0.2, top = 1 - P.fgHeight, bump = P.fg === 'тень' ? 0.004 : 0.01;
+  return curve(x => clamp(top + tilt * (x - 0.5) + 0.015 * fbm1(x * 1.6, s, 2) + bump * fbm1(x * 14, s + 1, 2)
+    + P.wobble * 0.002 * fbm1(x * 60, s + 2, 2), PL.hz + 0.05, 0.99));
+}
+function planFields() {
+  const n = P.fields, hz = PL.hz, top0 = PL.land0, F = [];
+  const end = P.fg === 'нет' ? 1 : 1 - P.fgHeight;
+  // «главный» холм: одно среднее поле поднимается высоко, иногда выше гор
+  const hero = P.hilly > 0.35 && n > 2 ? rng('hero').int(1, n - 2) : -1;
+  let prev = -1;
+  for (let i = 0; i < n; i++) {
+    const r = rng('field', i);
+    const b = i === 0 ? top0 : mix(top0, end, Math.pow(i / n, 1.25));
+    const d = clamp((b - hz) / (1 - hz), 0, 1);
+    let tilt = 0, hump = () => 0;
+    if (i > 0) {
+      tilt = r.range(-1, 1) * P.tilt * (0.04 + 0.3 * d);
+      let A = P.hilly * r.range(0.35, 1) * (0.03 + 0.3 * d);
+      let kind = r.pick(['bump', 'bump', 'step', 'wave']);
+      const c = r.range(-0.1, 1.1), w = r.range(0.25, 0.7), sg = r.sgn();
+      if (i === hero) { A = P.hilly * (0.08 + 0.14 * d) * (1 + 0.8 * P.hilly); if (kind === 'wave') kind = 'bump'; }
+      if (kind === 'bump') hump = x => -A * Math.exp(-(((x - c) / w) ** 2));
+      else if (kind === 'step') hump = x => -A * sg * (1 / (1 + Math.exp(-(x - c) / (w * 0.35))) - 0.5);
+      else { const fq = r.range(0.6, 1.4), ph = r.range(0, TAU); hump = x => -A * 0.6 * Math.sin(x * fq * Math.PI + ph); }
+    }
+    const s = r.int(0, 1e6);
+    const c = curve(x => {
+      let y = b + tilt * (x - 0.5) + hump(x);
+      if (i > 0) y += 0.006 * (0.4 + d) * fbm1(x * 2.5, s, 3);
+      else if (P.water <= 0) y += 0.002 * fbm1(x * 6, s, 2);
+      y += P.wobble * 0.0022 * (0.4 + d) * fbm1(x * 55, s + 1, 3);
+      return clamp(y, i ? hz - 0.32 : top0 - 0.005, 1.04);
+    });
+    const m = C.fields.length;
+    const ci = prev < 0 ? r.int(0, m - 1) : (prev + 1 + r.int(0, m - 2)) % m;
+    prev = ci;
+    const alt = C.fields[(ci + r.int(1, m - 1)) % m];
+    const haze = P.mist * 0.32 * (1 - d) ** 3;
+    const tex = r.chance(P.texture) ? r.pick(['rows', 'grass', 'stubble', 'blend', 'rim', 'rows']) : 'flat';
+    F.push({ i, b, d, c, col: mixc(C.fields[ci], C.haze, haze), alt: mixc(alt, C.haze, haze), tex, hv: r.range(0.3, 0.45),
+      gdir: r.chance(0.5), ga: r.range(-0.2, 0.5), gb: r.range(0.5, 1.2), rimSign: r.chance(0.7) ? -1 : 1 });
+  }
+  // видимая часть поля: до ближайшей кромки перед ним
+  for (let i = 0; i < n; i++) {
+    const vis = new Float32Array(NC + 1);
+    for (let k = 0; k <= NC; k++) { let v = PL.fg[k]; for (let j = i + 1; j < n; j++) v = Math.min(v, F[j].c[k]); vis[k] = Math.min(v, 1.02); }
+    F[i].vis = vis; F[i].area = areaBetween(F[i].c, vis);
+    let mn = 2, mx = -1; for (let k = 0; k <= NC; k++) { mn = Math.min(mn, F[i].c[k]); mx = Math.max(mx, vis[k]); }
+    F[i].y0 = mn; F[i].y1 = mx;
+  }
+  return F;
+}
+// место на видимой кромке поля; crest > 0 — тянет на макушки холмов
+function findSpot(r, iMin, iMax, xMin, xMax, clear, crest, taken) {
+  const F = PL.F; iMin = clamp(iMin, 0, F.length - 1); iMax = clamp(iMax, iMin, F.length - 1);
+  let best = null, bs = -1e9;
+  for (let t = 0; t < 90; t++) {
+    const i = r.int(iMin, iMax), x = r.range(xMin, xMax), f = F[i], k = idx(x), y = f.c[k];
+    const q = r();
+    if (f.vis[k] - y < clear || y > 0.97 || y < 0.08) continue;
+    let sc = q + crest * ((at(f.c, x - 0.06) + at(f.c, x + 0.06)) / 2 - y) * 40;
+    for (const o of taken) if (Math.abs(o.x - x) < 0.08 && Math.abs(o.y - y) < 0.06) sc -= 5;
+    if (sc > bs) { bs = sc; best = { i, x, y, d: f.d }; }
+  }
+  if (best) taken.push(best);
+  return best;
+}
+function planPath(taken) {
+  if (!P.path) return null;
+  const r = rng('path'), n = PL.F.length;
+  const s = findSpot(r, 1, Math.max(1, n - 2), 0.25, 0.75, 0.012, 0.2, taken);
+  if (!s) return null;
+  const x0 = r.range(0.12, 0.88), y0 = 1.03, cx = mix(x0, s.x, 0.5) + r.range(-0.25, 0.25), cy = mix(y0, s.y, 0.55);
+  const w0 = r.range(0.08, 0.17), sd = r.int(0, 1e6), pts = [], m = 60;
+  for (let k = 0; k <= m; k++) {
+    const t = k / m, u = 1 - t;
+    const x = u * u * x0 + 2 * u * t * cx + t * t * s.x, y = u * u * y0 + 2 * u * t * cy + t * t * s.y;
+    const w = Math.max(0.003, w0 * (y - PL.hz) / (y0 - PL.hz)) * AR;
+    const dx = 2 * u * (cx - x0) + 2 * t * (s.x - cx), dy = 2 * u * (cy - y0) + 2 * t * (s.y - cy);
+    pts.push({ x, y, w, ang: Math.atan2(dy * AR, dx), wl: 0.12 * w * n1(t * 5, sd), wr: 0.12 * w * n1(t * 5, sd + 1) });
+  }
+  let area = 0; for (let k = 1; k <= m; k++) area += pts[k].w * Math.abs(pts[k - 1].y - pts[k].y);
+  return { i: s.i, x: s.x, y: s.y, d: s.d, pts, area };
+}
+function pathPoly(pp) {
+  const L = pp.pts.map(q => [q.x - q.w / 2 + q.wl, q.y]), R = pp.pts.map(q => [q.x + q.w / 2 + q.wr, q.y]).reverse();
+  return poly([...L, ...R]);
+}
+function planObjects(taken) {
+  const F = PL.F, n = F.length, O = [];
+  if (P.forest > 0) {
+    const r = rng('forest'), i = n > 3 ? r.int(0, 1) : 0, len = 0.12 + 0.45 * P.forest, left = r.chance(0.5);
+    const xa = left ? -0.04 : 1.04 - len;
+    O.push({ kind: 'forest', i, y: -1, x: xa, xb: xa + len, h: (0.03 + 0.05 * P.forest) * (0.8 + F[i].d * 2.5), pine: r.range(0.45, 0.9) });
+    taken.push({ x: xa + len * 0.3, y: F[i].b }, { x: xa + len * 0.7, y: F[i].b });
+  }
+  for (let i = 0; i < n; i++) {
+    const r = rng('hedge', i);
+    if (!r.chance(P.hedges * (i === 0 ? 0.4 : 1))) continue;
+    const len = r.range(0.08, 0.45), xa = r.range(-0.15, 1.05 - len * 0.6);
+    O.push({ kind: 'hedge', i, y: 0, x: xa, xb: xa + len, h: (0.016 + 0.06 * F[i].d) * r.range(0.7, 1.3) });
+  }
+  let house = null;
+  if (P.house) {
+    const r = rng('house'), s = findSpot(r, 0, n - 2, 0.15, 0.85, 0.02, 0.2, taken);
+    if (s) { house = { kind: 'house', ...s, h: 0.009 + 0.035 * s.d, flip: r.chance(0.5), pole: r.chance(0.75) }; O.push(house); }
+  }
+  let left = P.cypress, g = 0;
+  while (left > 0 && g < 8) {
+    const r = rng('cyp', g), k = Math.min(left, r.int(1, 3)); left -= k;
+    let s;
+    if (g === 0 && house) {
+      const w = house.h * 3 * AR, x = house.x + (house.flip ? 1 : -1) * (w * 0.6 + 0.012);
+      s = { i: house.i, x, y: at(F[house.i].c, x), d: house.d };
+    } else s = findSpot(r, 0, n - 2, 0.05, 0.95, 0.015, 0.4, taken);
+    if (s) O.push({ kind: 'cypress', ...s, k, h: (0.035 + 0.14 * s.d) * r.range(0.85, 1.2) });
+    g++;
+  }
+  for (let q = 0; q < P.lone; q++) {
+    const r = rng('lone', q), s = findSpot(r, n > 3 ? 1 : 0, n - 2, 0.06, 0.94, 0.015, 1, taken);
+    if (s) O.push({ kind: 'tree', ...s, h: (0.03 + 0.12 * s.d) * r.range(0.8, 1.2) });
+  }
+  if (P.figure) {
+    const r = rng('figure');
+    const s = PL.path ? { i: PL.path.i, x: PL.path.x, y: PL.path.y, d: PL.path.d } : findSpot(r, 1, n - 1, 0.15, 0.85, 0.02, 0.3, taken);
+    if (s) O.push({ kind: 'figure', ...s, h: 0.014 + 0.05 * s.d });
+  }
+  return O;
+}
+function makePlan() {
+  const [aw, ah] = P.aspect.split(':').map(Number);
+  AR = ah / aw;
+  PL = { hz: P.horizon, land0: P.horizon + P.water };
+  planSky();
+  PL.mtn = planMountains();
+  PL.fg = planFg();
+  PL.F = planFields();
+  const taken = [];
+  PL.path = planPath(taken);
+  PL.objs = planObjects(taken);
+}
+
+// ---------- sky ----------
+function drawSky() {
+  const hz = PL.hz, g = ctx.createLinearGradient(0, 0, 0, Y(hz + 0.06));
+  for (let k = 0; k <= 24; k++) g.addColorStop(k / 24, css(skyAt(k / 24 * (hz + 0.06))));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  if (hx) { hx.fillStyle = gray(0.3); hx.fillRect(0, 0, W, H); }
+  // длинные горизонтальные мазки с цветом чуть выше/ниже — полосы растяжки
+  const r = rngS('sky');
+  paint(r, nFor(hz, 230, 16, 1.8), r => [r.range(-0.1, 1.1), r() * (hz + 0.02), 0.5 + r()],
+    (x, y, r) => skyAt(y + (r() - 0.5) * 0.08), (x, y, r) => (r() - 0.5) * 0.04, { len: 230, wid: 16, alpha: 0.45, hv: 0.45 });
+}
+function drawStars() {
+  if (P.stars <= 0) return;
+  const r = rng('stars');
+  for (let k = 0; k < P.stars; k++) {
+    const x = r(), y = r() * PL.hz * 0.8, s = r.range(0.8, 2.2) * U;
+    ctx.fillStyle = css([255, 252, 245], r.range(0.6, 0.95)); ctx.beginPath(); ctx.arc(X(x), Y(y), s, 0, TAU); ctx.fill();
+  }
+  if (P.stars >= 4 && r.chance(0.6)) {
+    const x = r.range(0.15, 0.85), y = r.range(0.05, PL.hz * 0.5), a = r.range(0.35, 0.8) * r.sgn() + Math.PI / 2, l = r.range(40, 90) * U;
+    const x1 = X(x) + Math.cos(a) * l, y1 = Y(y) + Math.sin(a) * l, g = ctx.createLinearGradient(X(x), Y(y), x1, y1);
+    g.addColorStop(0, 'rgba(255,255,255,0)'); g.addColorStop(1, 'rgba(255,255,255,0.8)');
+    ctx.strokeStyle = g; ctx.lineWidth = 1.3 * U; ctx.beginPath(); ctx.moveTo(X(x), Y(y)); ctx.lineTo(x1, y1); ctx.stroke();
+  }
+}
+function drawSun() {
+  if (P.sun === 'нет') return;
+  const r = rng('sun'), moon = P.sun === 'луна';
+  const x = r.range(0.2, 0.8), y = r.range(Math.max(0.12, PL.hz - 0.35), PL.hz - 0.1 - P.mtnHeight * 0.5);
+  const R = (moon ? r.range(9, 14) : r.range(32, 50)) * U;
+  const col = moon ? mixc(C.sun, [255, 255, 255], 0.4) : C.sun;
+  const g = ctx.createRadialGradient(X(x), Y(y), R, X(x), Y(y), R * (moon ? 5 : 3));
+  g.addColorStop(0, css(col, 0.28)); g.addColorStop(1, css(col, 0));
+  ctx.fillStyle = g; ctx.fillRect(0, 0, W, H);
+  const p = new Path2D(); p.arc(X(x), Y(y), R, 0, TAU);
+  fillC(p, css(col), 0.55);
+  save(); clip(p);
+  paint(rngS('sun'), 14, r => [x + (r() - 0.5) * R * 2 / W, y + (r() - 0.5) * R * 2 / H],
+    (a, b, r) => lit(col, (r() - 0.5) * 0.08), (a, b, r) => r() * TAU, { len: R / U * 0.8, wid: R / U * 0.4, alpha: 0.35 });
+  restore();
+}
+function drawStreaks(r) {
+  const n = Math.round(1 + P.cloudAmt * 6);
+  for (let j = 0; j < n; j++) {
+    const yc = r.range(0.05, PL.hz - 0.08), xc = r.range(-0.1, 1.1), len = r.range(0.35, 1.1);
+    const th = r.range(0.012, 0.042) * (0.5 + P.cloudAmt), s = r.int(0, 1e6), soft = r.chance(0.5), blur = r.range(2, 9);
+    const col = mixc(C.cloud, skyAt(yc), r.range(0, 0.45)), a = r.range(0.55, 0.95);
+    const top = [], bot = [];
+    for (let k = 0; k <= 48; k++) {
+      const t = k / 48, x = xc - len / 2 + len * t, env = Math.pow(Math.sin(Math.PI * t), 0.7), wave = 0.012 * fbm1(x * 2, s);
+      top.push([x, yc + wave - th * env * (0.55 + 0.45 * n1(x * 9, s + 1))]);
+      bot.push([x, yc + wave + th * 0.45 * env * (0.6 + 0.4 * n1(x * 7, s + 2))]);
+    }
+    const p = poly([...top, ...bot.reverse()]);
+    if (soft) ctx.filter = `blur(${blur * U}px)`;
+    ctx.fillStyle = css(col, a); ctx.fill(p); ctx.filter = 'none';
+    if (hx) { hx.fillStyle = gray(0.4, 0.5); hx.fill(p); }
+    save(); clip(p);
+    paint(r, nFor(len * th * 1.2, 60, 8, 1.2), r => [r.range(xc - len / 2, xc + len / 2), yc + (r() - 0.6) * th * 1.5],
+      (x, y, r) => lit(col, (r() - 0.5) * 0.12), (x, y, r) => (r() - 0.5) * 0.06, { len: 60, wid: 8, alpha: 0.4 * a, hv: 0.6 });
+    restore();
+  }
+}
+function drawCumulus(r) {
+  const rowY = PL.hz - r.range(0.07, 0.17) - P.mtnHeight * 0.4;
+  const n = Math.round(2 + P.cloudAmt * 8);
+  // длинные низкие гряды из мелких клубов с пастозными светлыми макушками
+  let xs = r.range(-0.15, 0.2);
+  for (let j = 0; j < n && xs < 1.05; j++) {
+    const cw = r.range(0.1, 0.4), xc = xs + cw / 2, yb = rowY + r.range(-0.025, 0.02), s = r.int(0, 1e6);
+    xs += cw + r.range(-0.02, 0.2) * (1.3 - P.cloudAmt);
+    const hm = r.range(0.012, 0.028) * (0.6 + P.cloudAmt) * H, circles = [], p = new Path2D();
+    for (let x = X(xc - cw / 2); x < X(xc + cw / 2);) {
+      const t = (x / W - xc + cw / 2) / cw, env = Math.pow(Math.sin(Math.PI * clamp(t, 0.02, 0.98)), 0.5) * (0.55 + 0.45 * n1(x / W * 14, s));
+      const rad = hm * (0.35 + 0.9 * env) * r.range(0.7, 1.1), cy = Y(yb) - rad * r.range(0.15, 0.6) - hm * env * 0.8;
+      circles.push([x, cy, rad]); p.moveTo(x + rad, cy); p.arc(x, cy, rad, 0, TAU);
+      x += rad * r.range(0.6, 1.1);
+    }
+    const flat = new Path2D(); flat.rect(-10, -10, W + 20, Y(yb) + 10);
+    save(); clip(flat);
+    const g = ctx.createLinearGradient(0, Y(yb) - hm * 2.2, 0, Y(yb));
+    g.addColorStop(0, css(lit(C.cloud, 0.08))); g.addColorStop(1, css(mixc(C.cloud, skyAt(yb), 0.45)));
+    ctx.filter = `blur(${0.8 * U}px)`; fillC(p, g, 0.5); ctx.filter = 'none';
+    strokesIn(p, yb - hm * 2.5 / H, yb, r, nFor(cw * hm * 1.6 / H, 18, 5, 1.5),
+      r => { const [cx, cy, rad] = circles[r.int(0, circles.length - 1)]; return [(cx + (r() - 0.5) * rad * 1.6) / W, (cy + (r() - 0.5) * rad * 1.4) / H]; },
+      (x, y, r) => (r() - 0.5) * 0.8, { len: 18, wid: 5, alpha: 0.5, jit: 0.07, hv: 0.7 });
+    clip(p);
+    for (const [cx, cy, rad] of circles) {
+      if (r() < 0.25) continue;
+      ctx.strokeStyle = css(lit(C.cloud, 0.35), r.range(0.35, 0.75)); ctx.lineWidth = r.range(1, 2.4) * U;
+      ctx.beginPath(); ctx.arc(cx, cy + rad * 0.08, rad * 0.9, Math.PI * r.range(1.05, 1.3), Math.PI * r.range(1.6, 1.9)); ctx.stroke();
+      if (hx) { hx.strokeStyle = gray(0.85, 0.7); hx.lineWidth = 1.6 * U; hx.stroke(); }
+    }
+    const sh = ctx.createLinearGradient(0, Y(yb) - hm * 0.9, 0, Y(yb));
+    sh.addColorStop(0, css(tone(C.cloud, -0.08, 1.2, -20), 0)); sh.addColorStop(1, css(tone(C.cloud, -0.1, 1.2, -20), 0.4));
+    ctx.fillStyle = sh; ctx.fill(p);
+    restore();
+  }
+}
+function drawBigCloud(r) {
+  const cx = r.range(0.3, 0.7), cy = r.range(0.2, PL.hz - 0.2);
+  const rx = r.range(0.4, 0.62) * (0.6 + 0.6 * P.cloudAmt), ry = rx * r.range(0.26, 0.4) / AR, s = r.int(0, 1e6);
+  const pts = [];
+  for (let k = 0; k < 120; k++) {
+    const a = k / 120 * TAU, top = Math.sin(a) < 0;
+    let b = 1 + 0.14 * fbm1(a * 1.5, s) + (top ? 0.1 * Math.abs(n1(a * 5, s + 1)) + 0.3 * Math.max(0, n1(a * 2.2, s + 2)) : -0.05);
+    pts.push([cx + Math.cos(a) * rx * b, cy + Math.sin(a) * ry * b * (top ? 1 : 0.75)]);
+  }
+  const p = poly(pts), g = ctx.createLinearGradient(0, Y(cy - ry), 0, Y(cy + ry));
+  g.addColorStop(0, css(lit(C.cloud, 0.05))); g.addColorStop(0.6, css(C.cloud)); g.addColorStop(1, css(tone(C.cloud, -0.05, 1.05)));
+  ctx.filter = `blur(${r.range(2.5, 5) * U}px)`; ctx.fillStyle = g; ctx.fill(p);
+  const inner = poly(pts.map(([x, y]) => [cx + (x - cx) * 0.7, cy - ry * 0.1 + (y - cy) * 0.55]));
+  ctx.filter = `blur(${r.range(10, 16) * U}px)`; ctx.fillStyle = css(lit(C.cloud, 0.12), 0.45); ctx.fill(inner);
+  ctx.filter = 'none';
+  if (hx) { hx.fillStyle = gray(0.4, 0.5); hx.fill(p); }
+  // рваный край: мазки поверх контура, наполовину в небо
+  paint(r, Math.round(120 * (0.5 + P.cloudAmt)), r => { const [x, y] = pts[r.int(0, pts.length - 1)]; return [x + (r() - 0.5) * 0.03, y + (r() - 0.5) * 0.015, 0.5 + 0.8 * r()]; },
+    (x, y, r) => mixc(C.cloud, skyAt(y), r.range(0.15, 0.6)), (x, y, r) => (r() - 0.5) * 0.35, { len: 60, wid: 14, alpha: 0.4, hv: 0.5 });
+  save(); clip(p);
+  paint(r, nFor(rx * ry * 3, 80, 14, 1.3), r => [cx + (r() - 0.5) * rx * 1.8, cy + (r() - 0.5) * ry * 1.8],
+    (x, y, r) => lit(mixc(C.cloud, skyAt(y), 0.15), (r() - 0.5) * 0.1), (x, y, r) => (r() - 0.5) * 0.12,
+    { len: 80, wid: 14, alpha: 0.3, hv: 0.55 });
+  restore();
+}
+function drawClouds() {
+  const r = rngS('clouds');
+  if (P.clouds === 'полосы') drawStreaks(r);
+  else if (P.clouds === 'кучевые') drawCumulus(r);
+  else if (P.clouds === 'туча') drawBigCloud(r);
+}
+// светлая мутная полоса над горизонтом
+function drawHaze() {
+  if (P.mist <= 0.02) return;
+  const r = rng('haze'), s = r.int(0, 1e6), top = PL.hz - 0.03 - P.mist * 0.22;
+  const c = curve(x => top + 0.035 * fbm1(x * 2.5, s, 3));
+  const p = below(c, PL.hz + 0.03), g = ctx.createLinearGradient(0, Y(top - 0.04), 0, Y(PL.hz));
+  g.addColorStop(0, css(C.haze, 0)); g.addColorStop(0.6, css(C.haze, P.mist * 0.5)); g.addColorStop(1, css(C.haze, P.mist * 0.85));
+  ctx.filter = `blur(${12 * U}px)`; ctx.fillStyle = g; ctx.fill(p); ctx.filter = 'none';
+}
+
+// ---------- mountains ----------
+function drawMountains() {
+  const hz = PL.hz;
+  for (const m of PL.mtn) {
+    const r = rng('mtnd', m.i), path = below(m.ridge, hz + 0.08);
+    let minY = 2; for (let k = 0; k <= NC; k++) minY = Math.min(minY, m.ridge[k]);
+    fillC(path, css(m.col), 0.3 + 0.08 * m.t);
+    save(); clip(path);
+    // складки — внутренние гряды другого тона
+    for (let q = 0; q < m.folds; q++) {
+      const s = r.int(0, 1e6), off = r.range(0.25, 0.6), fc = r.range(1.5, 4);
+      const v = r.chance(0.5) ? mixc(m.col, C.sky[C.sky.length - 1], r.range(0.15, 0.35)) : tone(m.col, r.range(-0.06, 0.05), r.range(0.9, 1.2), r.range(-12, 12));
+      const sub = curve(x => { const t = at(m.ridge, x); return t + (hz - t) * clamp(off + 0.35 * fbm1(x * fc, s, 3), 0.05, 0.95); });
+      fillC(below(sub, hz + 0.08), css(v), 0.35);
+    }
+    if (m.i === 0 && P.snow > 0) {
+      const s = r.int(0, 1e6), line = curve(x => minY + (hz - minY) * P.snow * (0.5 + 0.15 * fbm1(x * 6, s, 3)));
+      fillC(above(line), css(C.snow), 0.5);
+    }
+    // теневые грани: от каждой вершины вниз-вправо до ближайшей седловины
+    if (P.shadeFace > 0) {
+      const w = 10, R = m.ridge, peaks = [], base = hz + 0.08;
+      for (let k = 1; k < NC; k++) {
+        let ok = true;
+        for (let j = Math.max(0, k - w); j <= Math.min(NC, k + w); j++) if (R[j] < R[k] || (R[j] === R[k] && j < k)) { ok = false; break; }
+        if (ok) peaks.push(k);
+      }
+      ctx.globalCompositeOperation = 'multiply';
+      ctx.fillStyle = css(lch2rgb(0.66, 0.09, 262), P.shadeFace * 0.75);
+      peaks.forEach((k, q) => {
+        const end = q + 1 < peaks.length ? peaks[q + 1] : NC;
+        let v = k; for (let j = k; j <= end; j++) if (R[j] > R[v]) v = j;
+        if (R[v] - R[k] < m.h * 0.12 || v - k < 3) return;
+        const xp = CX(k), yp = R[k], xv = CX(v), xs = mix(xp, xv, r.range(0.25, 0.55)), bend = r.range(-0.3, 0.3);
+        // грань: вершина → отрог вниз → подошва → линия седловины → по гребню назад
+        const pts = [];
+        for (let t = 0; t <= 1.001; t += 1 / 12) pts.push([mix(xp, xs, Math.pow(t, 1 + bend)) + 0.004 * n1(t * 6, k), mix(yp, base, t)]);
+        pts.push([mix(xv, xs, r.range(0.1, 0.4)), base], [xv, R[v]]);
+        for (let j = v; j >= k; j -= 2) pts.push([CX(j), R[j] - 0.02]);
+        ctx.fill(poly(pts));
+      });
+      ctx.globalCompositeOperation = 'source-over';
+    }
+    if (P.mist > 0) {
+      const g = ctx.createLinearGradient(0, Y(hz), 0, Y(hz - m.h * 0.8));
+      g.addColorStop(0, css(C.haze, P.mist * 0.8)); g.addColorStop(1, css(C.haze, 0));
+      ctx.fillStyle = g; ctx.fill(path);
+    }
+    restore();
+    strokesIn(path, minY, hz + 0.02, rngS('mtn', m.i), nFor(areaBetween(m.ridge, curve(() => hz)), 70, 10, 1.6),
+      r => { const x = r.range(-0.02, 1.02), t = at(m.ridge, x); return [x, mix(t, hz + 0.01, r()), (0.6 + 0.5 * m.t) * (0.6 + 0.6 * r())]; },
+      (x, y, r) => { const t = at(m.ridge, x), f = (y - t) / Math.max(1e-3, hz - t); return Math.atan(slope(m.ridge, x)) * (1 - f) * 0.9 + (r() - 0.5) * 0.12; },
+      { len: 70, wid: 10, alpha: 0.45, jit: 0.035 });
+  }
+}
+function drawWater() {
+  if (P.water <= 0) return;
+  const y0 = PL.hz, y1 = PL.land0 + 0.02, col = C.water, r = rngS('water');
+  const g = ctx.createLinearGradient(0, Y(y0), 0, Y(y1));
+  g.addColorStop(0, css(mixc(col, C.haze, 0.25))); g.addColorStop(0.3, css(col)); g.addColorStop(1, css(tone(col, -0.03, 1.08)));
+  const p = new Path2D(); p.rect(-5, Y(y0), W + 10, Y(y1 - y0));
+  fillC(p, g, 0.35);
+  const shore = PL.mtn.length ? PL.mtn[PL.mtn.length - 1].col : tone(col, -0.2);
+  ctx.fillStyle = css(mixc(shore, col, 0.35), 0.85); ctx.fillRect(0, Y(y0) - 1, W, Y(0.004) + 1);
+  strokesIn(p, y0, y1, r, nFor(y1 - y0, 60, 8, 1.2), r => [r(), mix(y0, y1, r())], (x, y, r) => (r() - 0.5) * 0.02,
+    { len: 60, wid: 8, alpha: 0.45, jit: 0.04 });
+  // рябь
+  const nr = Math.round(2600 * (y1 - y0));
+  for (let k = 0; k < nr; k++) {
+    const t = Math.pow(r(), 0.8), y = mix(y0 + 0.006, y1, t), x = r(), l = (3 + 26 * t) * U * r.range(0.5, 1.3);
+    const c = r.chance(0.7) ? lit(col, r.range(0.12, 0.35)) : tone(col, -0.06, 1.1);
+    line2(X(x), Y(y), X(x) + l, Y(y) + (r() - 0.5) * U, css(c, r.range(0.35, 0.8)), (0.8 + 1.4 * t) * U, 0.7);
+  }
+}
+
+// ---------- fields ----------
+function drawField(f) {
+  if (f.area <= 1e-4) return;
+  const r = rngS('field', f.i), path = below(f.c), d = f.d;
+  if (f.tex === 'blend') {
+    const g = f.gdir ? ctx.createLinearGradient(X(f.ga), 0, X(f.gb), 0) : ctx.createLinearGradient(0, Y(f.y0), 0, Y(Math.min(1, f.y1)));
+    g.addColorStop(0.15, css(f.col)); g.addColorStop(0.85, css(f.alt));
+    fillC(path, g, f.hv);
+  } else fillC(path, css(f.col), f.hv);
+  if (f.tex === 'rim') {
+    save(); clip(path);
+    const p = new Path2D(); for (let k = 0; k <= NC; k++) k ? p.lineTo(X(CX(k)), Y(f.c[k])) : p.moveTo(X(CX(k)), Y(f.c[k]));
+    ctx.filter = `blur(${(4 + 8 * d) * U}px)`;
+    ctx.strokeStyle = css(f.rimSign < 0 ? tone(f.col, -0.18, 1.2, 15) : lit(f.col, 0.35), 0.8);
+    ctx.lineWidth = (8 + 26 * d) * U; ctx.stroke(p); ctx.filter = 'none';
+    restore();
+  }
+  const sc = 0.45 + 0.9 * d;
+  strokesIn(path, f.y0, f.y1, r, nFor(f.area, 90 * sc, 12 * sc, 1.7),
+    r => { const x = r.range(-0.05, 1.05), k = idx(x), t = f.c[k], b = f.vis[k] + 0.01; if (b <= t) return null; return [x, mix(t, b, r()), sc * (0.6 + 0.7 * r())]; },
+    (x, y, r) => Math.atan(slope(f.c, x)) * Math.exp(-(y - at(f.c, x)) / 0.07) + (r() - 0.5) * 0.06,
+    { len: 90, wid: 12, alpha: 0.55, alt: f.alt, jit: 0.06 });
+  if (f.tex === 'rows') {
+    save(); clip(path);
+    const vx = r.range(0.1, 0.9), vy = PL.hz - 0.02, nr = r.int(22, 60), dark = r.chance(0.6);
+    const c = dark ? tone(f.col, -0.09, 1.1) : lit(f.col, 0.15), lw = r.range(1.2, 3) * U * (0.5 + d);
+    for (let k = 0; k <= nr; k++) {
+      const bx = mix(-1.6, 2.6, (k + (r() - 0.5) * 0.6) / nr);
+      line2(X(vx), Y(vy), X(bx), Y(1.1), css(c, r.range(0.08, 0.32)), lw * r.range(0.6, 1.3), 0.5);
+    }
+    restore();
+  } else if (f.tex === 'grass' || f.tex === 'stubble') {
+    const grass = f.tex === 'grass', n = Math.round(f.area * (grass ? 16000 : 9000) * (0.4 + P.texture));
+    for (let k = 0; k < n; k++) {
+      const x = r(), kk = idx(x), t = f.c[kk], b = f.vis[kk];
+      const u = r(), q = r(), v = r(), w = r();
+      if (b <= t) continue;
+      const y = t + (b - t) * Math.pow(u, grass ? 1.6 : 1), sz = (0.4 + 0.9 * d);
+      if (grass) {
+        const l = (3 + 12 * q) * U * sz, lean = (v - 0.5) * 0.5;
+        const c = w < 0.3 ? tone(f.col, -0.12, 1.1, -15) : lit(f.col, (w - 0.5) * 0.35);
+        line2(X(x), Y(y) + 1, X(x) + lean * l, Y(y) - l, css(c, 0.7), (0.7 + 0.8 * v) * U * sz, 0.8);
+      } else {
+        const l = (3 + 8 * q) * U * sz, c = lit(f.col, (w - 0.5) * 0.3);
+        line2(X(x), Y(y), X(x) + l, Y(y) + (v - 0.5) * U, css(c, 0.6), (1.2 + 1.5 * v) * U * sz, 0.8);
+      }
+    }
+  }
+}
+
+// ---------- objects ----------
+function blobs(pts, col, hv = 0.8) {
+  const p = new Path2D();
+  for (const [x, y, rx, ry] of pts) { p.moveTo(x + rx, y); p.ellipse(x, y, rx, ry ?? rx, 0, 0, TAU); }
+  fillC(p, css(col), hv);
+  return p;
+}
+function roundTree(x, y, s, col, r) {
+  line2(x, y + s * 0.02, x + (r() - 0.5) * s * 0.05, y - s * 0.5, css(tone(col, -0.04)), Math.max(1, s * 0.05));
+  const cy = y - s * 0.64, R = s * 0.33, asp = r.range(1, 1.3), B = [];
+  for (let k = 0; k < 14; k++) {
+    const a = r() * TAU, dd = R * 0.62 * Math.sqrt(r()), br = R * r.range(0.32, 0.55);
+    B.push([x + Math.cos(a) * dd, cy + Math.sin(a) * dd * asp, br, br * asp * 0.9]);
+  }
+  const p = blobs(B, col);
+  save(); clip(p);
+  ctx.fillStyle = css(tone(col, 0.07, 1.1), 0.35);
+  for (const [bx, by, br] of B) { ctx.beginPath(); ctx.arc(bx - br * 0.35, by - br * 0.4, br * 0.55, 0, TAU); ctx.fill(); }
+  restore();
+}
+function cypress(x, y, s, col, r, jag = 0.12, wf = 1) {
+  const w = s * r.range(0.16, 0.23) * wf, m = 16, L = [], R = [];
+  for (let k = 0; k <= m; k++) {
+    const t = k / m, hw = w / 2 * Math.pow(1 - t, 0.8) * (0.72 + 0.28 * Math.sin(Math.PI * Math.min(1, t * 2.2)));
+    L.push([x - hw * (1 + (r() - 0.5) * jag * 2), y - s * t]); R.push([x + hw * (1 + (r() - 0.5) * jag * 2), y - s * t]);
+  }
+  const p = new Path2D(); [...L, ...R.reverse()].forEach(([a, b], k) => k ? p.lineTo(a, b) : p.moveTo(a, b)); p.closePath();
+  fillC(p, css(col), 0.8);
+  save(); clip(p); ctx.fillStyle = css(tone(col, 0.06, 1.1), 0.35); ctx.fillRect(x - w, y - s, w * 0.85, s); restore();
+}
+// перелесок: пухлая гряда кустов вдоль кромки поля
+function clump(c, xa, xb, h, col, r) {
+  // силуэт: огибающая с крупными горбами (шум) + мелкие фестоны кустов по верхнему краю
+  const k0 = idx(xa), k1 = Math.max(idx(xb), k0 + 2), s = r.int(0, 1e6), fq = r.range(3, 7) / (xb - xa);
+  const topY = k => {
+    const t = (k - k0) / (k1 - k0), env = Math.pow(Math.sin(Math.PI * clamp(t, 0, 1)), 0.35);
+    return Y(c[k]) - h * env * clamp(0.62 + 0.55 * fbm1(CX(k) * fq, s, 2), 0.15, 1.2);
+  };
+  const p = new Path2D(), B = [];
+  p.moveTo(X(CX(k0)), Y(c[k0]) + h * 0.1);
+  for (let k = k0; k <= k1; k++) p.lineTo(X(CX(k)), topY(k));
+  for (let k = k1; k >= k0; k--) p.lineTo(X(CX(k)), Y(c[k]) + h * 0.1);
+  p.closePath();
+  for (let x = X(xa) + h * 0.2; x < X(xb) - h * 0.1;) {
+    const rad = h * r.range(0.14, 0.3), ty = topY(idx(x / W));
+    if (ty < Y(at(c, x / W)) - rad * 0.8) { B.push([x, ty + rad * r.range(0.35, 0.7), rad]); p.moveTo(x + rad, B.at(-1)[1]); p.arc(x, B.at(-1)[1], rad, 0, TAU); }
+    x += rad * r.range(0.9, 1.6);
+  }
+  fillC(p, css(col), 0.8);
+  save(); clip(p);
+  ctx.fillStyle = css(tone(col, 0.08, 1.15, -8), 0.32);
+  for (const [bx, by, rad] of B) if (r() < 0.6) { ctx.beginPath(); ctx.ellipse(bx - rad * 0.25, by - rad * 0.35, rad * 0.6, rad * 0.4, -0.3, 0, TAU); ctx.fill(); }
+  // тень у земли — размытая тёмная полоса вдоль кромки
+  const b = new Path2D(); for (let k = k0; k <= k1; k++) k > k0 ? b.lineTo(X(CX(k)), Y(c[k])) : b.moveTo(X(CX(k)), Y(c[k]));
+  ctx.filter = `blur(${h * 0.15}px)`; ctx.strokeStyle = css(tone(col, -0.08, 1.1), 0.45); ctx.lineWidth = h * 0.5; ctx.stroke(b);
+  ctx.filter = 'none';
+  restore();
+}
+function forest(c, xa, xb, h, pineP, r) {
+  const dark = C.tree, mid = tone(C.tree, 0.05, 1.1, -8), light = tone(C.tree, 0.12, 1.2, -20), items = [];
+  let x = xa;
+  while (x < xb) {
+    const t = (x - xa) / (xb - xa), env = 0.3 + 0.7 * Math.pow(Math.sin(Math.PI * clamp(t, 0.02, 0.98)), 0.4);
+    const th = h * env * r.range(0.6, 1.05), pine = r.chance(pineP);
+    items.push({ x, th, pine, col: pine ? r.pick([dark, dark, mid]) : r.pick([mid, light, light, dark]) });
+    x += (pine ? th * 0.13 : th * 0.35) / W * r.range(0.6, 1.1);
+  }
+  // сплошная подложка, чтобы между стволами не просвечивало поле
+  const k0 = idx(xa), k1 = idx(xb), p = new Path2D();
+  p.moveTo(X(CX(k0)), Y(c[k0]));
+  for (let k = k0; k <= k1; k++) p.lineTo(X(CX(k)), Y(c[k]) - h * 0.35 * Math.pow(Math.sin(Math.PI * (k - k0) / Math.max(1, k1 - k0)), 0.3));
+  for (let k = k1; k >= k0; k--) p.lineTo(X(CX(k)), Y(c[k]) + h * 0.06);
+  p.closePath(); fillC(p, css(dark), 0.8);
+  for (const it of items.filter(i => i.pine)) cypress(X(it.x), Y(at(c, it.x)) + h * 0.05, it.th, it.col, r, 0.35, 1.4);
+  for (const it of items.filter(i => !i.pine)) {
+    const bx = X(it.x), by = Y(at(c, it.x)) - it.th * 0.3, R = it.th * 0.35, B = [];
+    for (let k = 0; k < 5; k++) B.push([bx + (r() - 0.5) * R, by - r() * it.th * 0.3, R * r.range(0.5, 0.8)]);
+    blobs(B, it.col);
+  }
+}
+function house(x, y, s, flip, pole, r) {
+  const f = flip ? -1 : 1, ww = s * r.range(1.6, 2.1), gw = s * r.range(0.9, 1.15), rh = s * 0.55, x0 = x - f * (ww + gw) / 2;
+  const xs = v => x0 + f * v;
+  const pl = pts => { const p = new Path2D(); pts.forEach(([a, b], k) => k ? p.lineTo(a, b) : p.moveTo(a, b)); p.closePath(); return p; };
+  fillC(pl([[xs(0), y], [xs(ww), y], [xs(ww), y - s], [xs(0), y - s]]), css(C.wall), 0.7);
+  fillC(pl([[xs(ww), y], [xs(ww + gw), y], [xs(ww + gw), y - s], [xs(ww + gw / 2), y - s - rh], [xs(ww), y - s]]),
+    css(tone(C.wall, -0.1, 3, -60)), 0.65);
+  fillC(pl([[xs(-s * 0.06), y - s], [xs(ww), y - s], [xs(ww + gw / 2), y - s - rh], [xs(gw / 2 - s * 0.06), y - s - rh]]), css(C.roof), 0.75);
+  ctx.fillStyle = css(tone(C.roof, -0.2), 0.8);
+  ctx.fillRect(Math.min(xs(ww * 0.25), xs(ww * 0.25 + s * 0.2)), y - s * 0.62, s * 0.2, s * 0.26);
+  ctx.fillStyle = css(C.tree, 0.5); ctx.fillRect(xs(-s * 0.1) - s * 0.2, y - s * 0.08, ww + gw + s * 0.5, s * 0.1);
+  if (pole) {
+    const px = xs(ww + gw + s * r.range(1.8, 3.2)), ph = s * r.range(2.3, 2.8), c = css(tone(C.tree, -0.05));
+    line2(px, y + s * 0.05, px, y - ph, c, Math.max(1, s * 0.07));
+    line2(px - s * 0.18, y - ph * 0.92, px + s * 0.18, y - ph * 0.92, c, Math.max(1, s * 0.05));
+  }
+}
+function figure(x, y, s, col, r) {
+  const f = r.sgn(), c = css(col), lw = Math.max(1, s * 0.09);
+  line2(x, y - s * 0.45, x - f * s * 0.12, y, c, lw);
+  line2(x, y - s * 0.45, x + f * s * 0.1, y - s * 0.02, c, lw);
+  const p = new Path2D();
+  p.moveTo(x - s * 0.09, y - s * 0.78); p.lineTo(x + s * 0.09, y - s * 0.78); p.lineTo(x + s * 0.07, y - s * 0.42); p.lineTo(x - s * 0.07, y - s * 0.42); p.closePath();
+  p.moveTo(x + f * s * 0.02 + s * 0.085, y - s * 0.89); p.arc(x + f * s * 0.02, y - s * 0.89, s * 0.085, 0, TAU);
+  fillC(p, c, 0.8);
+  line2(x + s * 0.07, y - s * 0.75, x + f * s * 0.12, y - s * 0.46, c, lw * 0.8);
+}
+function drawObj(o) {
+  const r = rngS(o.kind, o.i, Math.round(o.x * 1000)), f = PL.F[o.i];
+  if (o.kind === 'hedge') clump(f.c, o.x, o.xb, o.h * H, C.tree, r);
+  else if (o.kind === 'forest') forest(f.c, o.x, o.xb, o.h * H, o.pine, r);
+  else if (o.kind === 'tree') roundTree(X(o.x), Y(o.y) + 1, o.h * H, C.tree, r);
+  else if (o.kind === 'cypress') {
+    for (let q = 0; q < o.k; q++) {
+      const s = o.h * H * r.range(0.8, 1.1), xx = o.x + (q - (o.k - 1) / 2) * o.h * AR * 0.24;
+      cypress(X(xx), Y(at(f.c, xx)) + 1, s, tone(C.tree, -0.04), r);
+    }
+  } else if (o.kind === 'house') house(X(o.x), Y(o.y) + 1, o.h * H, o.flip, o.pole, r);
+  else if (o.kind === 'figure') figure(X(o.x), Y(o.y) + 1, o.h * H, tone(C.fg, -0.06, 0.8), r);
+}
+function drawPathOn(f) {
+  const pp = PL.path, r = rngS('path'), p = pathPoly(pp);
+  save(); clip(below(f.c));
+  fillC(p, css(C.path), 0.5);
+  clip(p);
+  const m = pp.pts.length - 1;
+  paint(r, nFor(pp.area, 30, 7, 2.5), r => { const k = r.int(0, m), q = pp.pts[k]; return [q.x + (r() - 0.5) * q.w, q.y, 0.3 + 1.2 * (q.y - PL.hz) / (1 - PL.hz)]; },
+    (x, y, r) => lit(C.path, (r() - 0.5) * 0.16), (x, y, r) => { const q = pp.pts[clamp(Math.round((1.03 - y) / (1.03 - pp.y) * m), 0, m)]; return q.ang + (r() - 0.5) * 0.3; },
+    { len: 30, wid: 7, alpha: 0.5, hv: 0.7 });
+  ctx.strokeStyle = css(tone(C.path, -0.12, 1.2), 0.35); ctx.lineWidth = 2 * U; ctx.stroke(p);
+  restore();
+}
+
+// ---------- foreground ----------
+function drawFg() {
+  if (P.fg === 'нет') return;
+  const c = PL.fg, r = rngS('fg'), path = below(c);
+  let top = 2; for (let k = 0; k <= NC; k++) top = Math.min(top, c[k]);
+  const area = areaBetween(c, curve(() => 1)), type = P.fg;
+  const inside = r => { const x = r.range(-0.01, 1.01), t = at(c, x); return [x, mix(t, 1.01, r()), 0.8 + 0.6 * r()]; };
+  const cut = PL.path && type !== 'тень';
+  save();
+  if (cut) { const pc = pathPoly(PL.path), full = new Path2D(); full.rect(-10, -10, W + 20, H + 20); full.addPath(pc); clip(full, 'evenodd'); }
+  // травинки: от (x,y) вверх длиной l
+  const blade = (x, y, l, lean, col, lw, a = 0.8) => line2(X(x), Y(y), X(x) + lean * l, Y(y) - l, css(col, a), lw, 0.85,
+    [X(x) + lean * l * 0.2, Y(y) - l * 0.6]);
+  const edgeBlades = (n, col, len) => {
+    for (let k = 0; k < n; k++) { const x = r(), y = at(c, x) + r() * 0.006; blade(x, y, len * r.range(0.4, 1) * U, (r() - 0.5) * 0.6, lit(col, (r() - 0.5) * 0.1), r.range(0.8, 1.6) * U); }
+  };
+  if (type === 'тень') {
+    fillC(path, css(C.fg), 0.4);
+    strokesIn(path, top, 1, r, nFor(area, 50, 11, 1.8), inside, (x, y, r) => Math.atan(slope(c, x)) * 0.6 + (r() - 0.5) * 0.15,
+      { len: 50, wid: 11, alpha: 0.6, jit: 0.1, alt: tone(C.fg, 0.1, 1.2, 20), altP: 0.25 });
+    for (let k = 0; k < Math.round(area * 400); k++) {
+      const [x, y] = inside(r), l = r.range(20, 80) * U, a = (r() - 0.5) * 0.5;
+      line2(X(x), Y(y), X(x) + Math.cos(a) * l, Y(y) + Math.sin(a) * l, css(lit(C.fg, 0.3), r.range(0.1, 0.25)), r.range(0.6, 1.4) * U, 0.9,
+        [X(x) + Math.cos(a) * l * 0.5 + (r() - 0.5) * 10 * U, Y(y) + Math.sin(a) * l * 0.5 + (r() - 0.5) * 10 * U]);
+    }
+    edgeBlades(260, C.fg, 9);
+  } else if (type === 'маки') {
+    const mag = C.flowers[2], red = C.flowers[0], white = C.flowers[1];
+    const g = ctx.createLinearGradient(0, Y(top), 0, H);
+    g.addColorStop(0, css(mixc(mag, C.fg, 0.15))); g.addColorStop(0.4, css(mixc(mag, C.fg, 0.6))); g.addColorStop(1, css(C.fg));
+    fillC(path, g, 0.4);
+    strokesIn(path, top, 1, r, nFor(area, 30, 8, 1.8), inside, (x, y, r) => -Math.PI / 2 + (r() - 0.5) * 0.6, { len: 30, wid: 8, alpha: 0.5, jit: 0.1 });
+    const stem = mixc(C.fg, [70, 120, 80], 0.45);
+    for (let k = 0; k < Math.round(area * 2500); k++) {
+      const x = r(), t = at(c, x), u = Math.pow(r(), 0.6), y = mix(t, 1.02, u);
+      blade(x, y, (4 + 40 * u * u) * U * r.range(0.5, 1), (r() - 0.5) * 0.3, stem, (0.6 + 1.2 * u) * U, 0.55);
+    }
+    const dot = (x, y, rx, ry, rot, col, a) => {
+      ctx.fillStyle = css(col, a); ctx.beginPath(); ctx.ellipse(x, y, rx, ry, rot, 0, TAU); ctx.fill();
+      if (hx) { hx.fillStyle = gray(0.9, 0.6); hx.fill(); }
+    };
+    // дальняя кромка: мелкая россыпь белого и розового
+    for (let k = 0; k < Math.round(area * 5000); k++) {
+      const x = r(), t = at(c, x), u = Math.pow(r(), 1.6) * 0.55, y = mix(t, 1.02, u), q = r(), sz = (0.6 + 2.2 * u) * U * r.range(0.7, 1.3);
+      dot(X(x), Y(y), sz, sz * 0.75, 0, lit(q < 0.55 ? white : q < 0.85 ? mixc(mag, white, 0.5) : red, (r() - 0.5) * 0.15), 0.85);
+    }
+    // ближние цветы: маки с тенью и сердцевиной, белые зонтики; по глубине, чтобы ближние перекрывали
+    const fl = [];
+    for (let k = 0; k < Math.round(area * 1500); k++) { const x = r(), u = Math.pow(r(), 0.7); fl.push([x, mix(at(c, x), 1.03, 0.15 + 0.85 * u), u, r()]); }
+    fl.sort((a, b) => a[1] - b[1]);
+    for (const [x, y, u, q] of fl) {
+      const sz = (1.5 + 14 * u * u) * U * r.range(0.6, 1.25), px = X(x), py = Y(y);
+      if (q < 0.62) {
+        if (sz > 3 * U) line2(px, py, px + (r() - 0.5) * sz, py + sz * r.range(2, 5), css(stem, 0.8), Math.max(0.8, sz * 0.12), 0.8);
+        const rot = (r() - 0.5) * 0.7;
+        dot(px, py, sz, sz * 0.72, rot, lit(red, (r() - 0.5) * 0.18), 0.95);
+        dot(px - sz * 0.3, py - sz * 0.15, sz * 0.55, sz * 0.4, rot, lit(red, 0.12), 0.6);
+        dot(px + sz * 0.1, py + sz * 0.3, sz * 0.75, sz * 0.3, rot, tone(red, -0.12, 1.1), 0.55);
+        if (sz > 4 * U && r() < 0.7) dot(px, py - sz * 0.1, sz * 0.17, sz * 0.14, 0, [30, 18, 30], 0.85);
+      } else if (q < 0.9) {
+        const m = r.int(4, 9);
+        if (sz > 3 * U) line2(px, py, px, py + sz * r.range(2, 4), css(stem, 0.7), Math.max(0.7, sz * 0.08), 0.8);
+        for (let j = 0; j < m; j++) dot(px + (r() - 0.5) * sz * 1.6, py + (r() - 0.5) * sz * 0.6, sz * 0.22, sz * 0.18, 0, lit(white, -r() * 0.08), 0.9);
+      } else dot(px, py, sz * 0.6, sz * 0.45, 0, mixc(mag, white, 0.4), 0.9);
+    }
+  } else if (type === 'трава') {
+    const gc = C.grass, tip = mixc(gc, [255, 250, 245], 0.6);
+    fillC(path, css(gc), 0.4);
+    const g = ctx.createLinearGradient(0, Y(top), 0, H);
+    g.addColorStop(0, css(tone(gc, -0.1, 1.1, 10), 0)); g.addColorStop(1, css(tone(gc, -0.08, 1.1, 10), 0.6));
+    ctx.fillStyle = g; ctx.fill(path);
+    strokesIn(path, top, 1, r, nFor(area, 30, 8, 1.8), inside, (x, y, r) => -Math.PI / 2 + (r() - 0.5) * 0.5, { len: 30, wid: 8, alpha: 0.5, jit: 0.08 });
+    for (let k = 0; k < Math.round(area * 16000); k++) {
+      const x = r(), t = at(c, x), u = Math.pow(r(), 0.9), y = mix(t, 1.03, u), q = r();
+      const l = (4 + 50 * Math.pow(u, 1.3)) * U * r.range(0.4, 1), col = q < 0.18 ? tip : lit(gc, (r() - 0.5) * 0.35);
+      const lean = (r() - 0.5) * 0.5 + 0.1;
+      blade(x, y, l, lean, col, (0.5 + 1.4 * u) * U, q < 0.18 ? 0.85 : 0.7);
+      if (q < 0.05 && u > 0.2) { ctx.fillStyle = css(tip, 0.8); ctx.beginPath(); ctx.ellipse(X(x) + lean * l, Y(y) - l, 1.4 * U, 3.5 * U, lean, 0, TAU); ctx.fill(); }
+    }
+    edgeBlades(500, gc, 14);
+  } else if (type === 'рапс') {
+    const y0 = C.rape, stem = mixc(y0, [50, 110, 120], 0.55);
+    fillC(path, css(y0), 0.45);
+    strokesIn(path, top, 1, r, nFor(area, 24, 9, 2.2), inside, (x, y, r) => (r() - 0.5) * 0.25,
+      { len: 24, wid: 9, alpha: 0.7, jit: 0.1, alt: tone(y0, -0.04, 1.1, -18), altP: 0.3 });
+    for (let k = 0; k < Math.round(area * 3500); k++) {
+      const x = r(), t = at(c, x), u = r(), y = mix(t, 1.02, u);
+      blade(x, y, (5 + 30 * u) * U * r.range(0.5, 1), (r() - 0.5) * 0.15, stem, (0.6 + 0.9 * u) * U, r.range(0.25, 0.55));
+    }
+    const edge = mixc(C.fg, stem, 0.3);
+    const p = new Path2D(); for (let k = 0; k <= NC; k++) k ? p.lineTo(X(CX(k)), Y(c[k])) : p.moveTo(X(CX(k)), Y(c[k]));
+    ctx.strokeStyle = css(edge, 0.7); ctx.lineWidth = 2.5 * U; ctx.stroke(p);
+    edgeBlades(300, edge, 6);
+    // тёмные пучки травы по нижнему краю
+    for (let k = 0; k < 90; k++) {
+      const x = r(), m = r.int(3, 6), col = lit(C.fg, (r() - 0.5) * 0.2);
+      for (let j = 0; j < m; j++) blade(x + (r() - 0.5) * 0.012, 1.01, r.range(8, 22) * U, (r() - 0.5) * 0.8, col, r.range(2, 4.5) * U, 0.9);
+    }
+  } else if (type === 'лаванда') {
+    const lv = C.lav;
+    fillC(path, css(lv), 0.4);
+    strokesIn(path, top, 1, r, nFor(area, 30, 8, 1.8), inside, (x, y, r) => -Math.PI / 2 + (r() - 0.5) * 0.4,
+      { len: 30, wid: 8, alpha: 0.55, jit: 0.1, alt: tone(lv, 0.05, 1.1, -25), altP: 0.3 });
+    for (let k = 0; k < Math.round(area * 12000); k++) {
+      const x = r(), t = at(c, x), u = Math.pow(r(), 0.9), y = mix(t, 1.03, u), q = r();
+      const col = q < 0.3 ? tone(lv, 0.1, 1.1, -20) : q < 0.6 ? tone(lv, -0.08, 1.1, 10) : lit(lv, (r() - 0.5) * 0.3);
+      blade(x, y, (3 + 36 * u) * U * r.range(0.4, 1), (r() - 0.5) * 0.25, col, (0.7 + 1.8 * u) * U, 0.7);
+    }
+    edgeBlades(500, lv, 10);
+  }
+  restore();
+}
+
+// ---------- post: рельеф мазков + холст ----------
+function post(hcv) {
+  const rel = P.relief, gr = P.grain;
+  if (rel <= 0 && gr <= 0) return;
+  const img = ctx.getImageData(0, 0, W, H), d = img.data;
+  const hs = hcv && rel > 0 ? hcv.getContext('2d').getImageData(0, 0, W, H).data : null;
+  const hf = new Float32Array(W * H);
+  const p = Math.max(2, 2.2 * U), wk = 0.16 * gr * U;
+  const cx = new Float32Array(W), ox = new Uint8Array(W), cy = new Float32Array(H), oy = new Uint8Array(H);
+  for (let x = 0; x < W; x++) { const f = x / p, t = Math.floor(f); cx[x] = Math.sin(Math.PI * (f - t)) * (0.8 + 0.2 * h1(t, 7)); ox[x] = t & 1; }
+  for (let y = 0; y < H; y++) { const f = y / p, t = Math.floor(f); cy[y] = Math.sin(Math.PI * (f - t)) * (0.8 + 0.2 * h1(t, 13)); oy[y] = t & 1; }
+  for (let y = 0, i = 0; y < H; y++) for (let x = 0; x < W; x++, i++) {
+    const sh = hs ? hs[i * 4] / 255 * rel : 0;
+    const wv = (ox[x] ^ oy[y]) ? cx[x] * (0.5 + 0.5 * cy[y]) : cy[y] * (0.5 + 0.5 * cx[x]);
+    hf[i] = sh * 1.1 + wv * wk * (1 - 0.6 * sh);
+  }
+  const K = 95, gn = gr * 9;
+  let s = 12345;
+  for (let y = 1; y < H - 1; y++) for (let x = 1, i = y * W + 1; x < W - 1; x++, i++) {
+    s = (Math.imul(s, 1664525) + 1013904223) >>> 0;
+    const v = (hf[i + 1] - hf[i - 1] + hf[i + W] - hf[i - W]) * K + (s / 4294967296 - 0.5) * gn, j = i * 4;
+    d[j] += v; d[j + 1] += v; d[j + 2] += v;
+  }
+  ctx.putImageData(img, 0, 0);
+}
+
+// ---------- render ----------
+const cv = $('cv'), hcv = document.createElement('canvas');
+function render(target, longSide, full) {
+  const [aw, ah] = P.aspect.split(':').map(Number);
+  if (aw >= ah) { W = longSide; H = Math.round(longSide * ah / aw); } else { H = longSide; W = Math.round(longSide * aw / ah); }
+  target.width = W; target.height = H; U = Math.sqrt(W * H) / 1000;
+  ctx = target.getContext('2d');
+  hx = null;
+  if (full && P.relief > 0) { hcv.width = W; hcv.height = H; hx = hcv.getContext('2d'); hx.lineCap = 'round'; }
+  ctx.lineCap = 'round';
+  resolvePalette();
+  makePlan();
+  drawSky(); drawStars(); drawSun(); drawClouds(); drawHaze();
+  drawMountains();
+  drawWater();
+  for (const f of PL.F) {
+    drawField(f);
+    if (PL.path && f.i >= PL.path.i) drawPathOn(f);
+    for (const o of PL.objs.filter(o => o.i === f.i).sort((a, b) => a.y - b.y)) drawObj(o);
+  }
+  drawFg();
+  if (full) post(hx ? hcv : null);
+  hx = null;
+}
+function fitCanvas() {
+  const st = $('stage'), pad = st.clientWidth < 500 ? 12 : 32;
+  const [aw, ah] = P.aspect.split(':').map(Number);
+  const s = Math.max(20, Math.min((st.clientWidth - pad * 2) / aw, (st.clientHeight - pad * 2) / ah));
+  cv.style.width = Math.round(aw * s) + 'px'; cv.style.height = Math.round(ah * s) + 'px';
+  return clamp(Math.round(Math.max(aw, ah) * s * devicePixelRatio), 300, 2200);
+}
+function draw(q) {
+  const t0 = performance.now(), long = fitCanvas();
+  render(cv, q < 1 ? Math.round(long * 0.5) : long, q >= 1);
+  $('status').textContent = `${W}×${H}${q < 1 ? ' · превью' : ''} · ${Math.round(performance.now() - t0)} ms`;
+  if (q >= 1) writeHash();
+}
+// состояние в адресе: seed, палитра и всё, что отличается от умолчаний
+function writeHash() {
+  const q = new URLSearchParams();
+  q.set('seed', SEED); if (SSEED) q.set('s', SSEED);
+  if (PAL === GENPAL) q.set('gp', GSEED); else q.set('pal', PALI);
+  for (const it of SCHEMA) if (it.length > 1 && P[it[0]] !== it[it.length - 1]) q.set(it[0], P[it[0]]);
+  history.replaceState(null, '', '#' + q.toString());
+}
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (!q.has('seed')) return false;
+  if (q.has('scene') && SCENES[q.get('scene')]) applyScene(q.get('scene'));
+  SEED = q.get('seed'); SSEED = +(q.get('s') || 0); $('seed').value = SEED;
+  if (q.has('gp')) generatePalette(q.get('gp'));
+  else if (q.has('pal')) { const k = clamp(+q.get('pal') | 0, 0, PALS.length - 1); setPalette(PALS[k], k); }
+  for (const it of SCHEMA) {
+    if (it.length === 1 || !q.has(it[0])) continue;
+    const v = q.get(it[0]), def = it[it.length - 1];
+    setP(it[0], typeof def === 'boolean' ? v === 'true' : typeof def === 'number' ? +v : v);
+  }
+  return true;
+}
+let raf = 0, wantQ = 1, idle = 0;
+function schedule(q = 1) {
+  wantQ = q; clearTimeout(idle);
+  if (!raf) raf = requestAnimationFrame(() => {
+    raf = 0; draw(wantQ);
+    if (wantQ < 1) idle = setTimeout(() => draw(1), 280);
+  });
+}
+
+// ---------- ui ----------
+const inputs = {};
+function fmt(v, step) { return step >= 1 ? String(Math.round(v)) : (+v).toFixed(2); }
+function buildUI() {
+  const root = $('controls');
+  for (const it of SCHEMA) {
+    if (it.length === 1) { const h = document.createElement('h2'); h.textContent = it[0]; root.appendChild(h); continue; }
+    const [key, label, a, b, step] = it;
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = label; row.appendChild(lab);
+    if (a === 'sel') {
+      const sel = document.createElement('select');
+      for (const o of b) sel.add(new Option(o, o));
+      sel.value = P[key];
+      sel.onchange = () => { P[key] = sel.value; $('scene').value = ''; schedule(); };
+      row.append(sel, document.createElement('span'));
+      inputs[key] = { set: v => { sel.value = v; } };
+    } else if (a === 'chk') {
+      const ch = document.createElement('input'); ch.type = 'checkbox'; ch.checked = P[key];
+      ch.onchange = () => { P[key] = ch.checked; $('scene').value = ''; schedule(); };
+      row.append(ch, document.createElement('span'));
+      inputs[key] = { set: v => { ch.checked = v; } };
+    } else {
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = a; inp.max = b; inp.step = step; inp.value = P[key];
+      const out = document.createElement('output'); out.textContent = fmt(P[key], step);
+      inp.oninput = () => { P[key] = +inp.value; out.textContent = fmt(P[key], step); $('scene').value = ''; schedule(0.5); };
+      inp.onchange = () => schedule(1);
+      row.append(inp, out);
+      inputs[key] = { set: v => { inp.value = v; out.textContent = fmt(v, step); } };
+    }
+    root.appendChild(row);
+  }
+  $('seed').value = SEED;
+  $('seed').onchange = () => { SEED = $('seed').value.trim() || '0'; schedule(); };
+  const sc = $('scene');
+  sc.add(new Option('—', ''));
+  for (const k of Object.keys(SCENES)) sc.add(new Option(k, k));
+  sc.onchange = () => { if (sc.value) applyScene(sc.value); };
+}
+function setP(key, v) { P[key] = v; inputs[key]?.set(v); }
+function applyScene(name) {
+  const s = SCENES[name];
+  for (const k in s) if (k !== 'pal') setP(k, s[k]);
+  setPalette(PALS[s.pal], s.pal);
+}
+function drawTile(cvs, p) {
+  const g = cvs.getContext('2d'), w = cvs.width, h = cvs.height, sky = p.sky.map(hex2rgb);
+  const gr = g.createLinearGradient(0, 0, 0, h * 0.58);
+  sky.forEach((c, k) => gr.addColorStop(k / (sky.length - 1), css(c)));
+  g.fillStyle = gr; g.fillRect(0, 0, w, h);
+  p.mtn.forEach((c, k) => {
+    g.fillStyle = c; g.beginPath(); g.moveTo(0, h * 0.58);
+    for (let x = 0; x <= w; x += 4) g.lineTo(x, h * (0.42 + k * 0.04) - Math.sin(x / w * 5 + k * 2) * h * 0.06);
+    g.lineTo(w, h * 0.58); g.fill();
+  });
+  const fl = p.fields;
+  for (let k = 0; k < fl.length; k++) {
+    g.fillStyle = fl[k]; g.beginPath(); const y = h * (0.56 + k * 0.07);
+    g.moveTo(0, y + (k % 2 ? 3 : -2)); g.lineTo(w, y + (k % 2 ? -2 : 3)); g.lineTo(w, h); g.lineTo(0, h); g.fill();
+  }
+  g.fillStyle = p.fg; g.fillRect(0, h * 0.9, w, h * 0.1);
+}
+function buildPalettes() {
+  const box = $('pals'); box.innerHTML = '';
+  const list = GENPAL ? [...PALS, GENPAL] : PALS;
+  list.forEach((p, k) => {
+    const d = document.createElement('div'); d.className = 'pal' + (p === PAL ? ' on' : ''); d.title = p.name;
+    const c = document.createElement('canvas'); c.width = 90; c.height = 40; d.appendChild(c);
+    const s = document.createElement('span'); s.textContent = p.name; d.appendChild(s);
+    d.onclick = () => { $('scene').value = ''; setPalette(p, k); };
+    box.appendChild(d); drawTile(c, p);
+  });
+}
+function setPalette(p, k) { PAL = p; PALI = k; buildPalettes(); schedule(); }
+let GSEED = '';
+function generatePalette(seed) {
+  GSEED = typeof seed === 'string' ? seed : Math.random().toString(36).slice(2, 8);
+  GENPAL = genPalette(Rng('pal/' + GSEED)); setPalette(GENPAL, PALS.length);
+}
+
+function newLandscape() { SEED = Math.random().toString(36).slice(2, 8); SSEED = 0; $('seed').value = SEED; schedule(); }
+function randomStyle() {
+  const r = Rng(String(Math.random()));
+  setP('horizon', +r.range(0.42, 0.66).toFixed(2));
+  setP('fields', r.int(3, 7));
+  setP('hilly', +r.range(0.1, 0.95).toFixed(2));
+  setP('tilt', +r.range(0.1, 0.85).toFixed(2));
+  setP('clouds', r.pick(['нет', 'полосы', 'полосы', 'кучевые', 'туча']));
+  setP('cloudAmt', +r.range(0.2, 0.8).toFixed(2));
+  setP('sun', r.pick(['нет', 'нет', 'луна', 'солнце']));
+  setP('stars', r.chance(0.2) ? r.int(3, 12) : 0);
+  setP('mist', +r.range(0.05, 0.6).toFixed(2));
+  setP('mtnLayers', r.pick([0, 1, 1, 2, 2, 3, 4]));
+  setP('mtnHeight', +r.range(0.05, 0.22).toFixed(2));
+  setP('mtnShape', r.pick(['холмы', 'холмы', 'пик', 'скалы', 'смесь']));
+  setP('snow', P.mtnShape === 'пик' && r.chance(0.5) ? +r.range(0.4, 1).toFixed(2) : 0);
+  setP('shadeFace', +r.range(0, 0.6).toFixed(2));
+  setP('water', r.chance(0.2) ? +r.range(0.04, 0.14).toFixed(2) : 0);
+  setP('texture', +r.range(0.1, 0.7).toFixed(2));
+  setP('hedges', r.chance(0.6) ? +r.range(0.2, 0.8).toFixed(2) : 0);
+  setP('lone', r.chance(0.4) ? 1 : 0);
+  setP('cypress', r.chance(0.25) ? r.int(1, 3) : 0);
+  setP('forest', r.chance(0.25) ? +r.range(0.3, 0.9).toFixed(2) : 0);
+  setP('house', r.chance(0.2));
+  setP('path', r.chance(0.25));
+  setP('figure', r.chance(0.3));
+  setP('fg', r.pick(['нет', 'тень', 'тень', 'маки', 'трава', 'рапс', 'лаванда']));
+  setP('fgHeight', +r.range(0.08, 0.28).toFixed(2));
+  $('scene').value = '';
+  if (r.chance(0.3)) generatePalette(); else { const k = r.int(0, PALS.length - 1); setPalette(PALS[k], k); }
+  newLandscape();
+}
+function savePng() {
+  const off = document.createElement('canvas');
+  $('status').textContent = 'рендер 2400px…';
+  setTimeout(() => {
+    render(off, 2400, true);
+    off.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = `pastoral-${SEED}-${SSEED}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      draw(1);
+    });
+  }, 30);
+}
+$('bNew').onclick = newLandscape;
+$('bStyle').onclick = randomStyle;
+$('bRedraw').onclick = () => { SSEED++; schedule(); };
+$('bSave').onclick = savePng;
+$('bPal').onclick = generatePalette;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n' || k === 'т') newLandscape();
+  else if (k === 'm' || k === 'ь') randomStyle();
+  else if (k === 'r' || k === 'к') { SSEED++; schedule(); }
+  else if (k === 's' || k === 'ы') savePng();
+  else if (k === 'p' || k === 'з') generatePalette();
+});
+let rsT = 0;
+new ResizeObserver(() => { clearTimeout(rsT); rsT = setTimeout(() => schedule(), 150); }).observe($('stage'));
+
+buildUI();
+buildPalettes();
+if (!readHash()) { applyScene('маковое поле'); $('scene').value = 'маковое поле'; }
+</script>
+</body>
+</html>

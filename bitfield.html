@@ -1,0 +1,613 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bitfield</title>
+<style>
+  :root { --bg:#111; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#e9e9e9; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262626, #121212 72%); }
+  #cv { display:block; cursor:pointer; image-rendering: pixelated;
+    box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #panel { width:290px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 92px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  .row input[type=checkbox] { justify-self:start; accent-color:var(--acc); margin:0; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  input[type=color] { width:100%; height:22px; padding:0 2px; background:#0c0c0c; border:1px solid #333; cursor:pointer; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  .sws { display:grid; grid-template-columns: repeat(5, 1fr); gap:5px; margin:6px 0 8px; }
+  .sw { height:26px; border:1px solid #2c2c2c; background:#0c0c0c; padding:3px; cursor:pointer; }
+  .sw:hover { border-color:#555; }
+  .sw.on { border-color:var(--acc); }
+  .sw i { display:block; height:100%; }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Bitfield</h1>
+  <div class="btns">
+    <button id="bNew" title="N">новый seed</button>
+    <button id="bStyle" title="M">случайный стиль</button>
+    <button id="bSwap" title="I">поменять цвета</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>seed</label><input type="text" id="seed"><span></span></div>
+  <div class="row"><label>пресет</label><select id="preset"></select><span></span></div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Однобитный плакат из пиксельных фактур. Поле рекурсивно режется на блоки: «размер блока» — типичная
+    сторона в ячейках, «вытянутость» тянет блоки в полосы, «шаг сетки» — кратность разрезов,
+    «градиент» делает верх крупнее (или мельче) низа.<br><br>
+    Каждый блок получает фактуру: шахматку, полосы, штрихи, машинный код, мотивы, растр Байера или
+    гребни. «Связность» — как часто блок наследует фактуру родителя (целиком, со сдвигом фазы
+    или в инверсии). «Плотность» тянет долю чёрного.<br><br>
+    Потом сбои: сдвиги строк, протяжки, инвертированные прямоугольники, ступенчатые массы
+    из прямоугольников. Только прямые углы — ни кругов, ни диагоналей.<br><br>
+    клик по холсту / N — новый seed · M — стиль · I — цвета · S — PNG
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const mix = (a, b, t) => a + (b - a) * t;
+const mod = (a, n) => ((a % n) + n) % n;
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+function Rng(key) {
+  const r = mulberry(hashStr(key));
+  r.range = (a, b) => a + (b - a) * r();
+  r.int = (a, b) => a + Math.floor(r() * (b - a + 1));
+  r.pick = a => a[Math.floor(r() * a.length)];
+  r.chance = p => r() < p;
+  r.sgn = () => r() < 0.5 ? -1 : 1;
+  return r;
+}
+let SEED = Math.random().toString(36).slice(2, 8);
+// отдельный поток случайности на каждую часть: слайдер двигает только своё
+const rng = (...k) => Rng(SEED + '/' + k.join('/'));
+
+// целочисленный хэш → [0, 1)
+function hash3(a, b, c) {
+  let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1) ^ Math.imul(c | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b); h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  const a = hash3(xi, yi, s), b = hash3(xi + 1, yi, s), c = hash3(xi, yi + 1, s), d = hash3(xi + 1, yi + 1, s);
+  return (a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v) * 2 - 1;
+}
+// матрица Байера 8×8
+const B8 = new Uint8Array(64);
+for (let y = 0; y < 8; y++) for (let x = 0; x < 8; x++) {
+  let v = 0; const xc = x ^ y;
+  for (let bit = 0; bit < 3; bit++) v = (v << 2) | (((xc >> bit) & 1) << 1) | ((y >> bit) & 1);
+  B8[y * 8 + x] = v;
+}
+const rgba32 = h => { const n = parseInt(h.slice(1), 16); return ((255 << 24) | ((n & 255) << 16) | (n & 0xff00) | (n >> 16 & 255)) >>> 0; };
+
+// ---------- params ----------
+const ASPECTS = { 'A 1:√2': [1, Math.SQRT2], '3:4': [3, 4], '4:5': [4, 5], '1:1': [1, 1], '√2:1': [Math.SQRT2, 1], '16:9': [16, 9], '9:16': [9, 16] };
+const SCHEMA = [
+  ['Сетка'],
+  ['cols', 'колонки', 32, 256, 1, 168],
+  ['margin', 'поля', 0, 0.2, 0.01, 0.06],
+  ['aspect', 'формат', 'sel', Object.keys(ASPECTS), 'A 1:√2'],
+  ['Разбиение'],
+  ['block', 'размер блока', 2, 40, 1, 10],
+  ['spread', 'разброс', 0, 1, 0.01, 0.6],
+  ['stretch', 'вытянутость', 0.25, 8, 0.05, 4],
+  ['snap', 'шаг сетки', 1, 8, 1, 2],
+  ['gradient', 'градиент', -1, 1, 0.01, 0.25],
+  ['coherence', 'связность', 0, 1, 0.01, 0.45],
+  ['Фактуры'],
+  ['wSolid', 'заливка', 0, 1, 0.01, 0.35],
+  ['wChecker', 'шахматка', 0, 1, 0.01, 0.9],
+  ['wStripes', 'полосы', 0, 1, 0.01, 0.7],
+  ['wDash', 'штрихи', 0, 1, 0.01, 0.9],
+  ['wCode', 'код', 0, 1, 0.01, 0.7],
+  ['wMotif', 'мотивы', 0, 1, 0.01, 0.6],
+  ['wDither', 'растр', 0, 1, 0.01, 0.35],
+  ['wComb', 'гребни', 0, 1, 0.01, 0.5],
+  ['scaleMax', 'макс. масштаб', 1, 8, 1, 4],
+  ['fine', 'мелкость', 0, 1, 0.01, 0.65],
+  ['ink', 'плотность', 0.1, 0.9, 0.01, 0.5],
+  ['Сбой'],
+  ['shift', 'сдвиги', 0, 1, 0.01, 0.2],
+  ['smear', 'протяжки', 0, 1, 0.01, 0.12],
+  ['xors', 'инверсии', 0, 1, 0.01, 0.2],
+  ['Массы'],
+  ['masses', 'количество', 0, 8, 1, 2],
+  ['shapeMode', 'режим', 'sel', ['смесь', 'чёрные', 'белые', 'инверсия'], 'смесь'],
+  ['Цвет'],
+  ['inkColor', 'краска', 'color', '#000000'],
+  ['paperColor', 'бумага', 'color', '#ffffff'],
+  ['Экспорт'],
+  ['export', 'PNG, px', 'sel', ['2400', '3600', '4800', '6000'], '4800'],
+];
+const P = {};
+for (const s of SCHEMA) if (s.length > 1) P[s[0]] = s[s.length - 1];
+
+const PRESETS = {
+  'плакат': {},
+  'шахматы': { block: 14, spread: 0.8, stretch: 1.2, snap: 4, coherence: 0.3, wSolid: 0.45, wChecker: 1, wStripes: 0.25, wDash: 0.1,
+    wCode: 0.1, wMotif: 0.35, wDither: 0.25, wComb: 0.1, scaleMax: 6, fine: 0.25, masses: 1, smear: 0 },
+  'данные': { cols: 200, block: 6, stretch: 7, snap: 1, gradient: 0, wSolid: 0.15, wChecker: 0.3, wStripes: 0.4, wDash: 1, wCode: 1,
+    wMotif: 0.3, wDither: 0.1, wComb: 0.7, scaleMax: 3, fine: 0.8, shift: 0.5, smear: 0.3, xors: 0.3, masses: 0 },
+  'крупно': { cols: 72, block: 10, spread: 0.7, stretch: 2, scaleMax: 3, fine: 0.4, masses: 3 },
+  'ткань': { cols: 160, block: 12, spread: 0.3, stretch: 4, gradient: 0, coherence: 0.85, wSolid: 0.1, wChecker: 0.6, wStripes: 0.8,
+    wDash: 0.5, wCode: 0.2, wMotif: 1, wDither: 0.5, wComb: 0.3, shift: 0, smear: 0, xors: 0, masses: 0 },
+  'сбой': { cols: 128, block: 7, stretch: 5, shift: 0.8, smear: 0.6, xors: 0.7, masses: 5, shapeMode: 'инверсия' },
+};
+const SWATCHES = [['#000000', '#ffffff'], ['#ffffff', '#000000'], ['#161616', '#ebe5d6'], ['#2340c8', '#f4f0e6'], ['#e5352b', '#f6f0e4'],
+  ['#ff4fa3', '#fff7ef'], ['#0f5a3c', '#e9efe2'], ['#3aff7a', '#0c110d'], ['#ffd23a', '#1b1c3a'], ['#6b3cf0', '#f2eefc']];
+
+// ---------- фактуры ----------
+const FAMS = [['solid', 'wSolid'], ['checker', 'wChecker'], ['stripes', 'wStripes'], ['dash', 'wDash'],
+  ['code', 'wCode'], ['motif', 'wMotif'], ['dither', 'wDither'], ['comb', 'wComb']];
+function pickFam(r) {
+  let tot = 0; for (const [, k] of FAMS) tot += P[k];
+  if (tot <= 0) return 'solid';
+  let t = r() * tot;
+  for (const [f, k] of FAMS) { t -= P[k]; if (t < 0) return f; }
+  return FAMS.filter(([, k]) => P[k] > 0).pop()[0];
+}
+// масштаб 1…scaleMax, «мелкость» тянет к единице; крупным блокам можно крупнее
+function pickScale(r, lim) {
+  const mx = Math.max(1, Math.min(P.scaleMax, Math.floor(lim))), k = P.fine * 3 * clamp(4 / lim, 0.35, 1);
+  let tot = 0; for (let s = 1; s <= mx; s++) tot += Math.pow(s, -k);
+  let t = r() * tot;
+  for (let s = 1; s <= mx; s++) { t -= Math.pow(s, -k); if (t <= 0) return s; }
+  return mx;
+}
+function newStyle(r, w, h, fam = pickFam(r)) {
+  const lim = Math.max(1, Math.min(w, h) / 2), sc = (l = lim) => pickScale(r, l);
+  const st = { fam, seed: r.int(1, 2147483646), glob: r.chance(0.75), ox: r.int(0, 255), oy: r.int(0, 255), iv: r(), flip: false };
+  switch (fam) {
+    case 'solid': st.c = r.chance(P.ink) ? 1 : 0; break;
+    case 'checker': st.sx = sc(); st.sy = r.chance(0.55) ? st.sx : sc(); break;
+    case 'stripes': st.dir = r.chance(0.6) ? 'h' : 'v'; st.a = sc(); st.b = r.chance(0.5) ? st.a : sc(); break;
+    case 'dash': {
+      st.kind = r.chance(0.5) ? 'runs' : 'bricks'; st.rh = sc(3); st.gh = r.pick([0, 0, 1, st.rh]);
+      const q = sc(3);
+      st.a = r.int(1, 4) * q; st.b = r.int(1, 3) * q; st.sh = r.chance(0.5) ? 0 : (st.a + st.b) >> 1;
+      st.la = r.int(1, 6) * q; st.lb = r.int(1, 6) * q;
+      break;
+    }
+    case 'code':
+      st.kind = r.pick(['words', 'words', 'words', 'bars', 'static', 'vwords']); st.d = r.range(0.3, 0.7);
+      st.cw = sc(3); st.c = sc(3); st.rh = sc(3); st.gh = r.pick([0, 0, 1]); st.q = sc(2); st.L = r.int(3, 12);
+      break;
+    case 'motif': {
+      const mw = r.int(1, 5), mh = r.int(1, 5), bm = new Uint8Array(mw * mh);
+      st.mw = mw; st.mh = mh; st.gx = r.pick([0, 1, 1, 2]); st.gy = r.pick([0, 1, 1, 2]); st.sc = sc(3); st.drop = r.chance(0.3);
+      for (let i = 0; i < bm.length; i++) bm[i] = r.chance(0.5) ? 1 : 0;
+      if (r.chance(0.5)) for (let y = 0; y < mh; y++) for (let x = 0; x < mw; x++) bm[y * mw + x] = bm[y * mw + Math.min(x, mw - 1 - x)];
+      let n = 0; for (const v of bm) n += v;
+      if (n === 0) bm[r.int(0, bm.length - 1)] = 1;
+      if (n === bm.length && !st.gx && !st.gy) st.gx = 1;
+      st.bm = bm;
+      break;
+    }
+    case 'dither': st.c = sc(2); st.ramp = r.pick(['', '', 'x', 'y']); st.l0 = r.int(1, 15) / 16; st.l1 = r.int(1, 15) / 16; break;
+    case 'comb':
+      st.dir = r.chance(0.75) ? 'v' : 'h'; st.ta = sc(2); st.tb = r.int(1, 2) * sc(2); st.t = r.pick([1, 1, 2]);
+      st.side = r.pick(['top', 'top', 'bottom', 'both', 'none']); st.len = r.pick(['full', 'alt', 'alt', 'rand']);
+      st.lr = r.range(0.3, 0.7); st.off = r.int(0, 31);
+      break;
+  }
+  return st;
+}
+// наследование фактуры от родителя
+function mutate(r, p, w, h) {
+  const x = r();
+  if (x < 0.4) return p;                                                         // та же — блоки сливаются
+  if (x < 0.7) return { ...p, glob: false, ox: r.int(0, 255), oy: r.int(0, 255) }; // сдвиг фазы — шов
+  if (x < 0.85) return { ...p, flip: !p.flip };                                  // инверсия
+  return newStyle(r, w, h, p.fam);                                               // тот же род, другие параметры
+}
+function runRow(seed, row, w, st) {
+  const r = mulberry(Math.imul(seed, 31) ^ Math.imul(row + 1, 0x9e3779b1)), a = new Uint8Array(w);
+  let i = 0, c = r() < 0.5 ? 1 : 0;
+  while (i < w) { const L = 1 + Math.floor(r() * (c ? st.la : st.lb)); a.fill(c, i, i + L); i += L; c ^= 1; }
+  return a;
+}
+// функция (i, j) → 0/1 в локальных координатах блока
+function pattern(st, b) {
+  const { w, h } = b, S = st.seed, bx = st.glob ? b.x : st.ox, by = st.glob ? b.y : st.oy;
+  switch (st.fam) {
+    case 'solid': return () => st.c;
+    case 'checker': { const { sx, sy } = st; return (i, j) => (Math.floor((i + bx) / sx) + Math.floor((j + by) / sy)) & 1; }
+    case 'stripes': {
+      const a = st.a, p = st.a + st.b;
+      if (st.dir === 'h') return (i, j) => mod(j + by, p) < a;
+      return i => mod(i + bx, p) < a;
+    }
+    case 'dash': {
+      const per = st.rh + st.gh;
+      if (st.kind === 'bricks') {
+        const p = st.a + st.b;
+        return (i, j) => { const v = j + by; if (mod(v, per) >= st.rh) return 0; return mod(i + bx + (Math.floor(v / per) & 1) * st.sh, p) < st.a; };
+      }
+      const rows = [];
+      return (i, j) => { if (j % per >= st.rh) return 0; const k = Math.floor(j / per); return (rows[k] ||= runRow(S, k, w, st))[i]; };
+    }
+    case 'code': {
+      const d = st.d, per = st.rh + st.gh;
+      if (st.kind === 'bars') return i => hash3(S, Math.floor((i + bx) / st.cw), 7) < d;
+      if (st.kind === 'static') return (i, j) => hash3(S, Math.floor((i + bx) / st.c), Math.floor((j + by) / st.c)) < d;
+      if (st.kind === 'words') return (i, j) => { const v = j + by; if (mod(v, per) >= st.rh) return 0;
+        return hash3(S, Math.floor(v / per), mod(Math.floor((i + bx) / st.q), st.L)) < d; };
+      return (i, j) => { const u = i + bx; if (mod(u, per) >= st.rh) return 0;
+        return hash3(S, Math.floor(u / per), mod(Math.floor((j + by) / st.q), st.L)) < d; };
+    }
+    case 'motif': {
+      const { mw, mh, sc, bm, drop } = st, pw = mw + st.gx, ph = mh + st.gy;
+      return (i, j) => {
+        let tu = Math.floor((i + bx) / sc); const tv = Math.floor((j + by) / sc);
+        if (drop && (Math.floor(tv / ph) & 1)) tu += pw >> 1;
+        const lx = mod(tu, pw), ly = mod(tv, ph);
+        return lx < mw && ly < mh ? bm[ly * mw + lx] : 0;
+      };
+    }
+    case 'dither': {
+      const c = st.c;
+      return (i, j) => {
+        const l = st.ramp === 'x' ? mix(st.l0, st.l1, (i + 0.5) / w) : st.ramp === 'y' ? mix(st.l0, st.l1, (j + 0.5) / h) : st.l0;
+        return B8[mod(Math.floor((j + by) / c), 8) * 8 + mod(Math.floor((i + bx) / c), 8)] < l * 64;
+      };
+    }
+    case 'comb': {
+      const vert = st.dir === 'v', D = vert ? h : w, p = st.ta + st.tb, t = Math.min(st.t, Math.max(1, Math.floor(D / 3)));
+      const top = st.side === 'top' || st.side === 'both', bot = st.side === 'bottom' || st.side === 'both';
+      const len = k => st.len === 'full' ? D : st.len === 'alt' ? (k & 1 ? D : Math.max(1, Math.round(D * st.lr)))
+        : Math.max(1, Math.round(D * (0.25 + 0.75 * hash3(S, k, 3))));
+      return (i, j) => {
+        const al = vert ? i : j, dp = vert ? j : i;
+        if ((top && dp < t) || (bot && dp >= D - t)) return 1;
+        const q = al + st.off;
+        if (q % p >= st.ta) return 0;
+        const L = len(Math.floor(q / p));
+        if (st.side === 'bottom') return D - 1 - dp < L;
+        if (st.side === 'none') return Math.abs(dp + 0.5 - D / 2) < L / 2;
+        return dp < L;
+      };
+    }
+  }
+}
+function fillLeaf(U, G, b) {
+  const st = b.st, f = pattern(st, b);
+  let n = 0;
+  for (let j = 0; j < b.h; j++) {
+    const o = (b.y + j) * G + b.x;
+    for (let i = 0; i < b.w; i++) { const v = f(i, j) ? 1 : 0; U[o + i] = v; n += v; }
+  }
+  if (st.fam === 'solid') return;
+  // инверсия: чаще в сторону нужной плотности чёрного
+  const d = n / (b.w * b.h), prefer = Math.abs(1 - d - P.ink) < Math.abs(d - P.ink);
+  if ((st.iv < 0.75 ? prefer : !prefer) === st.flip) return;
+  for (let j = 0; j < b.h; j++) { const o = (b.y + j) * G + b.x; for (let i = 0; i < b.w; i++) U[o + i] ^= 1; }
+}
+
+// ---------- разбиение ----------
+function dims() {
+  const G = P.cols | 0, [aw, ah] = ASPECTS[P.aspect] || ASPECTS['A 1:√2'];
+  const M = Math.round(P.margin * G), TW = G + 2 * M, TH = Math.max(2 * M + 8, Math.round(TW * ah / aw));
+  return { G, R: TH - 2 * M, M, TW, TH };
+}
+function layout({ G, R }) {
+  const leaves = [], sn = P.snap | 0 || 1, fs = hashStr(SEED + '/field');
+  const field = (x, y) => vnoise(x / G * 3, y / G * 3, fs) * 0.7 + vnoise(x / G * 8, y / G * 8, fs + 1) * 0.3;
+  const sizeAt = (cx, cy) => P.block * Math.pow(2, P.gradient * 1.5 * (1 - 2 * cy / R) + P.spread * 1.5 * field(cx, cy));
+  // разрез кратен шагу сетки и лежит строго внутри отрезка
+  const cut = (a, len, t) => {
+    const lo = Math.floor(a / sn) * sn + sn, hi = Math.ceil((a + len) / sn) * sn - sn;
+    return lo > hi ? -1 : clamp(Math.round((a + len * t) / sn) * sn, lo, hi);
+  };
+  const node = (x, y, w, h, pst) => {
+    const rs = rng('s', x, y, w, h), rc = rng('c', x, y, w, h);
+    const st = pst && rs.chance(P.coherence) ? mutate(rs, pst, w, h) : newStyle(rs, w, h);
+    const t = sizeAt(x + w / 2, y + h / 2) * Math.pow(2, rc.range(-1, 1) * P.spread);
+    const asp = Math.sqrt(P.stretch * Math.pow(2, rc.range(-0.8, 0.8)));
+    const ex = w / (t * asp), ey = h / (t / asp), lim = rc.range(1, 1.8);
+    for (const [d, e] of ex >= ey ? [['v', ex], ['h', ey]] : [['h', ey], ['v', ex]]) {
+      if (e <= lim) continue;
+      const tt = rc.range(0.2, 0.8);
+      if (d === 'v') {
+        const p = cut(x, w, tt); if (p < 0) continue;
+        node(x, y, p - x, h, st); node(p, y, x + w - p, h, st); return;
+      }
+      const p = cut(y, h, tt); if (p < 0) continue;
+      node(x, y, w, p - y, st); node(x, p, w, y + h - p, st); return;
+    }
+    leaves.push({ x, y, w, h, st });
+  };
+  node(0, 0, G, R, null);
+  return leaves;
+}
+
+// ---------- сбои (в ячейках) ----------
+function modeOf(r) {
+  const m = P.shapeMode;
+  if (m === 'чёрные') return 1; if (m === 'белые') return 0; if (m === 'инверсия') return 2;
+  const x = r(); return x < 0.5 ? 1 : x < 0.85 ? 2 : 0;
+}
+function paint(U, i, m) { U[i] = m === 2 ? U[i] ^ 1 : m; }
+// ступенчатые массы: объединение прямоугольников вдоль случайного блуждания, с окнами
+function applyMasses(U, { G, R }) {
+  const mask = new Uint8Array(G * R), sn = P.snap | 0 || 1, snap = v => Math.round(v / sn) * sn;
+  const rect = (x0, y0, w, h, v) => {
+    for (let y = Math.max(0, y0); y < Math.min(R, y0 + h); y++)
+      for (let x = Math.max(0, x0); x < Math.min(G, x0 + w); x++) mask[y * G + x] = v;
+  };
+  for (let k = 0; k < P.masses; k++) {
+    const r = rng('mass', k), q = Math.max(sn, Math.round(Math.min(G, R) / 36)), pts = [];
+    mask.fill(0);
+    let cx = r.int(0, G), cy = r.int(0, R);
+    for (let s = r.int(3, 9); s > 0; s--) {
+      const w = r.int(1, 4) * q, h = r.int(1, 3) * q, x0 = snap(cx - w / 2), y0 = snap(cy - h / 2);
+      rect(x0, y0, w, h, 1); pts.push([x0, y0, w, h]);
+      cx += r.range(-1, 1) * w; cy += r.range(-1, 1) * h;
+    }
+    for (let s = r.int(0, 4); s > 0; s--) {
+      const [x0, y0, w, h] = r.pick(pts), hw = r.int(1, 2) * Math.max(1, q >> 1), hh = Math.max(1, q >> 1);
+      rect(snap(x0 + r.range(0, w - hw)), snap(y0 + r.range(0, h - hh)), hw, hh, 0);
+    }
+    const m = modeOf(r);
+    for (let i = 0; i < mask.length; i++) if (mask[i]) paint(U, i, m);
+  }
+}
+function applyXors(U, { G, R }) {
+  const n = Math.round(P.xors * 16);
+  for (let k = 0; k < n; k++) {
+    const r = rng('xor', k), w = r.int(2, Math.max(2, G / 3 | 0)), h = r.int(1, r.chance(0.3) ? 16 : 5);
+    const x0 = r.int(0, G - w), y0 = r.int(0, Math.max(0, R - h));
+    for (let y = y0; y < Math.min(R, y0 + h); y++) for (let x = x0; x < x0 + w; x++) U[y * G + x] ^= 1;
+  }
+}
+// сдвиг куска строк по кругу
+function applyShift(U, { G, R }) {
+  const n = Math.round(P.shift * R * 0.4), tmp = new Uint8Array(G);
+  for (let k = 0; k < n; k++) {
+    const r = rng('shift', k), h = r.chance(0.25) ? r.int(3, 12) : r.int(1, 3), y0 = r.int(0, R - 1);
+    const w = r.int(6, G), x0 = r.int(0, G - w), dx = r.int(1, Math.max(1, w >> 2)) * r.sgn();
+    for (let y = y0; y < Math.min(R, y0 + h); y++) {
+      const o = y * G + x0;
+      for (let i = 0; i < w; i++) tmp[i] = U[o + i];
+      for (let i = 0; i < w; i++) U[o + i] = tmp[mod(i - dx, w)];
+    }
+  }
+}
+// протяжка: строка тянется вниз или столбец вправо
+function applySmear(U, { G, R }) {
+  const n = Math.round(P.smear * R * 0.25);
+  for (let k = 0; k < n; k++) {
+    const r = rng('smear', k);
+    if (r.chance(0.65)) {
+      const w = r.int(3, Math.max(3, G >> 2)), x0 = r.int(0, G - w), y0 = r.int(0, R - 2), len = r.int(2, 14);
+      for (let y = y0 + 1; y <= Math.min(R - 1, y0 + len); y++) U.copyWithin(y * G + x0, y0 * G + x0, y0 * G + x0 + w);
+    } else {
+      const h = r.int(2, Math.max(2, R >> 3)), y0 = r.int(0, R - h), x0 = r.int(0, G - 2), len = r.int(2, 18);
+      for (let y = y0; y < y0 + h; y++) {
+        const v = U[y * G + x0];
+        for (let x = x0 + 1; x <= Math.min(G - 1, x0 + len); x++) U[y * G + x] = v;
+      }
+    }
+  }
+}
+
+// ---------- генерация и рендер ----------
+let GEN = null;
+function generate() {
+  const D = dims(), U = new Uint8Array(D.G * D.R), leaves = layout(D);
+  for (const b of leaves) fillLeaf(U, D.G, b);
+  applyMasses(U, D); applyXors(U, D); applyShift(U, D); applySmear(U, D);
+  return { ...D, U, blocks: leaves.length };
+}
+// s — пикселей на ячейку (целое, чтобы сетка была ровной)
+function render(cvs, s, g) {
+  const { G, R, M, TW, TH, U } = g, W = TW * s, H = TH * s, o = M * s;
+  cvs.width = W; cvs.height = H;
+  const ctx = cvs.getContext('2d'), img = ctx.createImageData(W, H), d = new Uint32Array(img.data.buffer);
+  const INK = rgba32(P.inkColor), PAP = rgba32(P.paperColor);
+  d.fill(PAP);
+  for (let uy = 0; uy < R; uy++) {
+    const row = (o + uy * s) * W;
+    for (let ux = 0; ux < G; ux++) if (U[uy * G + ux]) { const a = row + o + ux * s; d.fill(INK, a, a + s); }
+    for (let k = 1; k < s; k++) d.copyWithin(row + k * W, row, row + W);
+  }
+  ctx.putImageData(img, 0, 0);
+}
+const cv = $('cv');
+function fitScale(g) {
+  const st = $('stage'), pad = st.clientWidth < 500 ? 12 : 32, dpr = devicePixelRatio || 1;
+  const s = Math.max(1, Math.floor(Math.min((st.clientWidth - pad * 2) * dpr / g.TW, (st.clientHeight - pad * 2) * dpr / g.TH)));
+  cv.style.width = g.TW * s / dpr + 'px'; cv.style.height = g.TH * s / dpr + 'px';
+  return s;
+}
+const exportScale = g => Math.max(1, Math.round(+P.export / Math.max(g.TW, g.TH)));
+function draw() {
+  const t0 = performance.now();
+  GEN = generate();
+  render(cv, fitScale(GEN), GEN);
+  const es = exportScale(GEN);
+  $('status').textContent = `${GEN.G}×${GEN.R} ячеек · ${GEN.blocks} блоков · ${Math.round(performance.now() - t0)} ms\n` +
+    `PNG ${GEN.TW * es}×${GEN.TH * es} (${es} px на ячейку)`;
+  writeHash();
+}
+let raf = 0;
+function schedule() { if (!raf) raf = requestAnimationFrame(() => { raf = 0; draw(); }); }
+
+// состояние в адресе: seed и всё, что отличается от умолчаний
+function writeHash() {
+  const q = new URLSearchParams(); q.set('seed', SEED);
+  for (const it of SCHEMA) if (it.length > 1 && P[it[0]] !== it[it.length - 1]) q.set(it[0], P[it[0]]);
+  history.replaceState(null, '', '#' + q.toString());
+}
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (!q.has('seed')) return false;
+  SEED = q.get('seed'); $('seed').value = SEED;
+  for (const it of SCHEMA) {
+    if (it.length === 1 || !q.has(it[0])) continue;
+    const v = q.get(it[0]), def = it[it.length - 1];
+    setP(it[0], typeof def === 'boolean' ? v === 'true' : typeof def === 'number' ? +v : v);
+  }
+  return true;
+}
+
+// ---------- ui ----------
+const inputs = {};
+const fmt = (v, step) => step >= 1 ? String(Math.round(v)) : (+v).toFixed(2);
+function touched() { $('preset').value = ''; schedule(); }
+function buildUI() {
+  const root = $('controls');
+  for (const it of SCHEMA) {
+    if (it.length === 1) {
+      const h = document.createElement('h2'); h.textContent = it[0]; root.appendChild(h);
+      if (it[0] === 'Цвет') { const sw = document.createElement('div'); sw.className = 'sws'; sw.id = 'sws'; root.appendChild(sw); }
+      continue;
+    }
+    const [key, label, a, b, step] = it;
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = label; row.appendChild(lab);
+    if (a === 'sel') {
+      const sel = document.createElement('select');
+      for (const o of b) sel.add(new Option(o, o));
+      sel.value = P[key];
+      sel.onchange = () => { P[key] = sel.value; key === 'export' ? schedule() : touched(); };
+      row.append(sel, document.createElement('span'));
+      inputs[key] = { set: v => { sel.value = v; } };
+    } else if (a === 'chk') {
+      const ch = document.createElement('input'); ch.type = 'checkbox'; ch.checked = P[key];
+      ch.onchange = () => { P[key] = ch.checked; touched(); };
+      row.append(ch, document.createElement('span'));
+      inputs[key] = { set: v => { ch.checked = v; } };
+    } else if (a === 'color') {
+      const ci = document.createElement('input'); ci.type = 'color'; ci.value = P[key];
+      ci.oninput = () => { P[key] = ci.value; markSwatch(); schedule(); };
+      row.append(ci, document.createElement('span'));
+      inputs[key] = { set: v => { ci.value = v; } };
+    } else {
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = a; inp.max = b; inp.step = step; inp.value = P[key];
+      const out = document.createElement('output'); out.textContent = fmt(P[key], step);
+      inp.oninput = () => { P[key] = +inp.value; out.textContent = fmt(P[key], step); touched(); };
+      row.append(inp, out);
+      inputs[key] = { set: v => { inp.value = v; out.textContent = fmt(v, step); } };
+    }
+    root.appendChild(row);
+  }
+  $('seed').value = SEED;
+  $('seed').onchange = () => { SEED = $('seed').value.trim() || '0'; schedule(); };
+  const pr = $('preset');
+  pr.add(new Option('—', ''));
+  for (const k of Object.keys(PRESETS)) pr.add(new Option(k, k));
+  pr.onchange = () => { if (pr.value) applyPreset(pr.value); };
+  const box = $('sws');
+  SWATCHES.forEach(([ink, pap]) => {
+    const d = document.createElement('div'); d.className = 'sw'; d.title = `${ink} / ${pap}`;
+    const i = document.createElement('i');
+    i.style.background = `conic-gradient(${ink} 25%, ${pap} 0 50%, ${ink} 0 75%, ${pap} 0) 0 0 / 8px 8px`;
+    d.appendChild(i); d.onclick = () => { setP('inkColor', ink); setP('paperColor', pap); markSwatch(); schedule(); };
+    box.appendChild(d);
+  });
+  markSwatch();
+}
+function markSwatch() {
+  [...$('sws').children].forEach((d, k) => d.classList.toggle('on',
+    SWATCHES[k][0] === P.inkColor.toLowerCase() && SWATCHES[k][1] === P.paperColor.toLowerCase()));
+}
+function setP(key, v) { P[key] = v; inputs[key]?.set(v); }
+function applyPreset(name) {
+  const keep = { inkColor: P.inkColor, paperColor: P.paperColor, export: P.export };
+  for (const it of SCHEMA) if (it.length > 1) setP(it[0], it[it.length - 1]);
+  for (const k in keep) setP(k, keep[k]);
+  const s = PRESETS[name]; for (const k in s) setP(k, s[k]);
+  schedule();
+}
+
+function newSeed() { SEED = Math.random().toString(36).slice(2, 8); $('seed').value = SEED; schedule(); }
+function randomStyle() {
+  const r = Rng(String(Math.random())), w = () => r.chance(0.2) ? 0 : +r.range(0.1, 1).toFixed(2);
+  setP('cols', r.pick([64, 96, 112, 128, 144, 144, 160, 192, 224]));
+  setP('block', r.int(3, 18));
+  setP('spread', +r.range(0.15, 1).toFixed(2));
+  setP('stretch', +r.range(0.8, 7).toFixed(2));
+  setP('snap', r.pick([1, 1, 2, 2, 2, 3, 4]));
+  setP('gradient', +r.range(-0.6, 0.6).toFixed(2));
+  setP('coherence', +r.range(0, 0.8).toFixed(2));
+  for (const [, k] of FAMS) setP(k, w());
+  if (FAMS.every(([, k]) => P[k] === 0)) setP('wChecker', 1);
+  setP('scaleMax', r.int(2, 8));
+  setP('fine', +r.range(0.2, 1).toFixed(2));
+  setP('ink', +r.range(0.35, 0.65).toFixed(2));
+  setP('shift', r.chance(0.3) ? 0 : +r.range(0, 0.6).toFixed(2));
+  setP('smear', r.chance(0.4) ? 0 : +r.range(0, 0.4).toFixed(2));
+  setP('xors', r.chance(0.4) ? 0 : +r.range(0, 0.5).toFixed(2));
+  setP('masses', r.int(0, 4));
+  setP('shapeMode', r.pick(['смесь', 'смесь', 'чёрные', 'инверсия']));
+  $('preset').value = '';
+  newSeed();
+}
+function swapColors() { const a = P.inkColor; setP('inkColor', P.paperColor); setP('paperColor', a); markSwatch(); schedule(); }
+function savePng() {
+  $('status').textContent = 'рендер PNG…';
+  setTimeout(() => {
+    const off = document.createElement('canvas');
+    render(off, exportScale(GEN), GEN);
+    off.toBlob(b => {
+      if (!b) { $('status').textContent = 'не вышло: слишком большой холст для браузера'; return; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = `bitfield-${SEED}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      $('status').textContent = `сохранено ${off.width}×${off.height}`;
+    });
+  }, 30);
+}
+$('bNew').onclick = newSeed;
+$('bStyle').onclick = randomStyle;
+$('bSwap').onclick = swapColors;
+$('bSave').onclick = savePng;
+cv.onclick = newSeed;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n' || k === 'т') newSeed();
+  else if (k === 'm' || k === 'ь') randomStyle();
+  else if (k === 'i' || k === 'ш') swapColors();
+  else if (k === 's' || k === 'ы') savePng();
+});
+let rsT = 0;
+new ResizeObserver(() => { clearTimeout(rsT); rsT = setTimeout(schedule, 150); }).observe($('stage'));
+
+buildUI();
+if (!readHash()) $('preset').value = 'плакат';
+markSwatch();
+schedule();
+</script>
+</body>
+</html>

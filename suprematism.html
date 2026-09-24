@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Suprematism</title>
+<style>
+  :root { --bg:#111; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#e5462d; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262626, #121212 72%); }
+  #cv { display:block; cursor:pointer; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #panel { width:290px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 92px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  .row input[type=checkbox] { justify-self:start; accent-color:var(--acc); margin:0; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  .pals { display:grid; grid-template-columns: repeat(4, 1fr); gap:5px; margin:6px 0 8px; }
+  .pal { border:1px solid #2c2c2c; background:#0c0c0c; padding:3px; cursor:pointer; min-width:0; }
+  .pal:hover { border-color:#555; }
+  .pal.on { border-color:var(--acc); }
+  .pal canvas { width:100%; height:30px; display:block; }
+  .pal span { display:block; font-size:10px; color:var(--dim); margin-top:2px; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .pal.on span { color:var(--fg); }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Suprematism</h1>
+  <div class="btns">
+    <button id="bNew" title="N">новая композиция</button>
+    <button id="bStyle" title="M">случайный стиль</button>
+    <button id="bColor" title="C">перекрасить</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>seed</label><input type="text" id="seed"><span></span></div>
+  <div class="row"><label>стиль</label><select id="preset"></select><span></span></div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Супрематические композиции в духе Малевича, Поповой и Чашника. Картина собирается из групп:
+    тяжёлая плоскость с пучком брусьев вдоль края и вставками поверх, стопка брусьев с клином,
+    крест из двух полос, круг с касательной плоскостью, «ось» — квадрат на тонких полосах,
+    стаи мелких прямоугольников. Все группы тянутся к одному главному наклону и перпендикуляру к нему;
+    «пересечения» добавляют брусья под чужим углом, «прямые» — группы без наклона.<br><br>
+    Схемы: кластер — одна главная группа; полёт — несколько групп вдоль диагонали; конструкция —
+    широкие полосы поперёк косой ленты; минимум — два-три знака (круг и прямоугольник, круг и клин,
+    крест на овале, квадрат, фигура); архитектоника — ломаные ленты, клинья и полукольца на бледных
+    плоскостях.<br><br>
+    Цвет назначается отдельно от геометрии: фигуры, которые касаются, не повторяют цвет, «перекрасить»
+    меняет только раскраску. Масло — мазки вдоль длинной стороны, неровный край, переплетение холста,
+    кракелюр и пожелтевший лак; гуашь — бумага, карандашные построения и брусья, закрашенные не до конца;
+    плоско — чистый вектор.<br><br>
+    клик по холсту / N — новая · M — стиль · C — перекрасить · P — палитра · S — PNG
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const mix = (a, b, t) => a + (b - a) * t;
+const PI = Math.PI, TAU = PI * 2, DEG = PI / 180;
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+function Rng(key) {
+  const r = mulberry(hashStr(key));
+  r.range = (a, b) => a + (b - a) * r();
+  r.int = (a, b) => a + Math.floor(r() * (b - a + 1));
+  r.pick = a => a[Math.floor(r() * a.length)];
+  r.chance = p => r() < p;
+  r.sgn = () => r() < 0.5 ? -1 : 1;
+  // взвешенный выбор: {ключ: вес} или [[значение, вес], …]
+  r.pickW = o => {
+    const e = Array.isArray(o) ? o : Object.entries(o);
+    let t = 0; for (const [, w] of e) t += Math.max(0, w);
+    if (t <= 0) return e[0][0];
+    let x = r() * t;
+    for (const [v, w] of e) { x -= Math.max(0, w); if (x < 0) return v; }
+    return e[e.length - 1][0];
+  };
+  return r;
+}
+let SEED = Math.random().toString(36).slice(2, 8), CSEED = 0;
+// геометрия зависит только от seed, раскраска — ещё и от «перекрасить»
+const rng = (...k) => Rng(SEED + '/' + k.join('/'));
+const rngC = (...k) => Rng(SEED + '#' + CSEED + '/' + k.join('/'));
+
+function hash3(a, b, c) {
+  let h = Math.imul(a | 0, 0x27d4eb2d) ^ Math.imul(b | 0, 0x165667b1) ^ Math.imul(c | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b); h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function vnoise(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), fx = x - xi, fy = y - yi;
+  const u = fx * fx * (3 - 2 * fx), v = fy * fy * (3 - 2 * fy);
+  const a = hash3(xi, yi, s), b = hash3(xi + 1, yi, s), c = hash3(xi, yi + 1, s), d = hash3(xi + 1, yi + 1, s);
+  return (a + (b - a) * u + (c - a) * v + (a - b - c + d) * u * v) * 2 - 1;
+}
+const hex2rgb = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const rgb2hex = c => '#' + c.map(v => Math.round(clamp(v, 0, 255)).toString(16).padStart(2, '0')).join('');
+const mixHex = (a, b, t) => { const x = hex2rgb(a), y = hex2rgb(b); return rgb2hex(x.map((v, i) => mix(v, y[i], t))); };
+// t > 0 — к белому, t < 0 — к чёрному
+const shade = (h, t) => mixHex(h, t > 0 ? '#ffffff' : '#000000', Math.abs(t));
+const lum = h => { const [r, g, b] = hex2rgb(h); return (0.3 * r + 0.59 * g + 0.11 * b) / 255; };
+
+// ---------- палитры ----------
+// ink — главный тёмный, cols — пигменты с весами, pale — подложки (иначе смешиваются с грунтом)
+const PALS = [
+  { name: 'Супремус', ground: '#ebe7dc', ink: '#1b1b1e',
+    cols: [['#d8321f', 1], ['#ecbd1c', 0.9], ['#23349c', 0.7], ['#4a82cf', 0.5], ['#3e7c3a', 0.5], ['#6c2a24', 0.3]] },
+  { name: '1915', ground: '#e8e5da', ink: '#191a22',
+    cols: [['#ec6326', 1.2], ['#efcb25', 0.7], ['#1c2b9e', 0.6], ['#1e5c4b', 0.45], ['#d63459', 0.4]] },
+  { name: 'Красное и чёрное', ground: '#efe8d8', ink: '#161515',
+    cols: [['#d8281c', 1.4], ['#8d8c88', 0.5], ['#cfc3a8', 0.35]] },
+  { name: 'Попова', ground: '#ede9e0', ink: '#211f24',
+    cols: [['#f0532b', 0.7], ['#584033', 0.7], ['#1f2372', 0.7], ['#4b535d', 0.7], ['#2f5b3b', 0.6], ['#dca13e', 0.55],
+      ['#c8468a', 0.45], ['#3a1d44', 0.45], ['#7a1f33', 0.4]],
+    pale: ['#e2bcc2', '#ecd8c2', '#d6cad8'] },
+  { name: 'Спорт', ground: '#eceae3', ink: '#19181b',
+    cols: [['#efc11b', 1], ['#1f36b0', 0.8], ['#e0431f', 0.8], ['#3d9a45', 0.5], ['#3d1b4a', 0.6]] },
+  { name: 'Чёрный', ground: '#ebe8df', ink: '#151517', cols: [['#2d2d31', 0.6], ['#77766f', 0.25]] },
+  { name: 'Плакат', ground: '#f3f4f2', ink: '#20211e',
+    cols: [['#dc4417', 1], ['#243f6e', 0.8], ['#8f3522', 0.5], ['#d32a14', 0.6]] },
+  { name: 'Охра', ground: '#f0dcae', ink: '#37414a', cols: [['#cc5a4c', 1], ['#2f5f78', 0.5], ['#b8812e', 0.4]] },
+];
+const pal = () => PALS.find(p => p.name === P.pal) || PALS[0];
+
+// ---------- params ----------
+const ASPECTS = { '1:1': [1, 1], '4:5': [4, 5], '3:4': [3, 4], '2:3': [2, 3], '3:5': [3, 5], '1:2': [1, 2], '4:3': [4, 3] };
+const SCHEMA = [
+  ['Композиция'],
+  ['layout', 'схема', 'sel', ['смесь', 'кластер', 'полёт', 'конструкция', 'минимум', 'архитектоника'], 'смесь'],
+  ['aspect', 'формат', 'sel', Object.keys(ASPECTS), '3:4'],
+  ['scale', 'масштаб', 0.5, 1.3, 0.01, 0.92],
+  ['clusters', 'группы', 1, 6, 1, 3],
+  ['density', 'насыщенность', 0, 1, 0.01, 0.5],
+  ['bleed', 'за край', 0, 1, 0.01, 0.15],
+  ['Направление'],
+  ['tilt', 'наклон', 0, 75, 1, 30],
+  ['tiltVar', 'разброс', 0, 1, 0.01, 0.45],
+  ['cross', 'пересечения', 0, 1, 0.01, 0.4],
+  ['ortho', 'прямые', 0, 1, 0.01, 0.12],
+  ['Элементы'],
+  ['wBars', 'брусья', 0, 1, 0.01, 0.7],
+  ['wLines', 'линии', 0, 1, 0.01, 0.45],
+  ['wFlock', 'стаи', 0, 1, 0.01, 0.45],
+  ['wCircles', 'круги', 0, 1, 0.01, 0.3],
+  ['wWedges', 'клинья', 0, 1, 0.01, 0.3],
+  ['Цвет'],
+  ['pal', 'палитра', 'pal', 'Супремус'],
+  ['color', 'цветность', 0, 1, 0.01, 0.5],
+  ['Живопись'],
+  ['medium', 'техника', 'sel', ['масло', 'гуашь', 'плоско'], 'масло'],
+  ['texture', 'фактура', 0, 1, 0.01, 0.55],
+  ['wobble', 'рука', 0, 1, 0.01, 0.5],
+  ['cracks', 'кракелюр', 0, 1, 0.01, 0.3],
+  ['age', 'старение', 0, 1, 0.01, 0.35],
+  ['sketch', 'эскиз', 0, 1, 0.01, 0],
+  ['frame', 'рамка', 'chk', false],
+  ['Экспорт'],
+  ['export', 'PNG, px', 'sel', ['2400', '3600', '4800'], '3600'],
+];
+const P = {};
+for (const s of SCHEMA) if (s.length > 1) P[s[0]] = s[s.length - 1];
+
+const PRESETS = {
+  'смесь': {},
+  'Супремус': { layout: 'кластер', pal: 'Супремус', aspect: '1:1', tilt: 26, tiltVar: 0.25, cross: 0.15, ortho: 0, density: 0.45,
+    wBars: 0.95, wLines: 0.1, wFlock: 0.15, wCircles: 0, wWedges: 0.1 },
+  'Полёт': { layout: 'полёт', pal: '1915', aspect: '1:2', clusters: 4, tilt: 38, tiltVar: 0.6, cross: 0.5, ortho: 0.25, density: 0.55,
+    wLines: 0.55, wFlock: 0.7, cracks: 0.4 },
+  'Конструкция': { layout: 'конструкция', pal: 'Супремус', aspect: '1:1', wLines: 0.6, cracks: 0.55, age: 0.5 },
+  'Архитектоника': { layout: 'архитектоника', pal: 'Попова', aspect: '2:3', wWedges: 0.6, wCircles: 0.6, cracks: 0.08, wobble: 0.6 },
+  'Красный клин': { layout: 'полёт', pal: 'Красное и чёрное', medium: 'гуашь', aspect: '3:4', clusters: 2, wCircles: 0.7, wLines: 0.5,
+    sketch: 0.7, frame: true, cracks: 0, age: 0.25, texture: 0.5 },
+  'Минимум': { layout: 'минимум', pal: 'Чёрный', aspect: '3:4', cracks: 0.25, age: 0.4 },
+  'Плакат': { layout: 'кластер', pal: 'Плакат', medium: 'плоско', aspect: '3:4', tilt: 52, density: 0.7, wLines: 0.8, wCircles: 0.5,
+    wWedges: 0.6, cross: 0.6 },
+};
+
+// ---------- геометрия ----------
+// фигура: центр (x, y), угол a, w — вдоль, h — поперёк; role решает, какой цвет она получит
+const mk = (k, x, y, w, h, a, role, z, o) => Object.assign({ k, x, y, w, h, a, role, z }, o);
+const rect = (x, y, w, h, a, role, z, o) => mk('rect', x, y, w, h, a, role, z, o);
+const poly = (pts, role, z, a = 0) => mk('poly', 0, 0, 0, 0, a, role, z, { pts });
+
+function shapePoly(s, n = 128) {
+  const c = Math.cos(s.a), sn = Math.sin(s.a), T = (u, v) => [s.x + u * c - v * sn, s.y + u * sn + v * c];
+  const w = s.w / 2, h = s.h / 2, o = [];
+  switch (s.k) {
+    case 'rect': return [T(-w, -h), T(w, -h), T(w, h), T(-w, h)];
+    case 'trap': return [T(-w, -h), T(w, -h * s.t), T(w, h * s.t), T(-w, h)];      // сужение к концу
+    case 'tri': return [T(-w, -h), T(w, h * (s.sk || 0)), T(-w, h)];               // основание сзади, остриё впереди
+    case 'circ': case 'ell':
+      for (let i = 0; i < n; i++) { const t = i / n * TAU; o.push(T(Math.cos(t) * w, Math.sin(t) * (s.k === 'circ' ? w : h))); }
+      return o;
+    case 'disc':                                                                    // полукруг над диаметром
+      for (let i = 0; i <= n / 2; i++) { const t = PI + i / (n / 2) * PI; o.push(T(Math.cos(t) * w, Math.sin(t) * w)); }
+      return o;
+    case 'poly': return s.pts;
+  }
+}
+function bb(p) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const [x, y] of p) { if (x < x0) x0 = x; if (x > x1) x1 = x; if (y < y0) y0 = y; if (y > y1) y1 = y; }
+  return [x0, y0, x1, y1];
+}
+function bboxOf(items) {
+  let x0 = 1e9, y0 = 1e9, x1 = -1e9, y1 = -1e9;
+  for (const s of items) { const b = bb(shapePoly(s, 24)); x0 = Math.min(x0, b[0]); y0 = Math.min(y0, b[1]); x1 = Math.max(x1, b[2]); y1 = Math.max(y1, b[3]); }
+  return { x0, y0, x1, y1 };
+}
+// поворот A, масштаб S, сдвиг, fl = −1 — зеркало по поперечной оси
+function transform(items, A, S, tx, ty, fl = 1) {
+  const c = Math.cos(A), s = Math.sin(A);
+  const f = (x, y) => { y *= fl; return [tx + S * (x * c - y * s), ty + S * (x * s + y * c)]; };
+  for (const it of items) {
+    [it.x, it.y] = f(it.x, it.y);
+    it.a = it.a * fl + A; it.w *= S; it.h *= S;
+    if (fl < 0 && it.sk) it.sk = -it.sk;
+    if (it.pts) it.pts = it.pts.map(([x, y]) => f(x, y));
+  }
+}
+function inPoly(p, x, y) {
+  let c = false;
+  for (let i = 0, j = p.length - 1; i < p.length; j = i++) {
+    const [xi, yi] = p[i], [xj, yj] = p[j];
+    if ((yi > y) !== (yj > y) && x < (xj - xi) * (y - yi) / (yj - yi) + xi) c = !c;
+  }
+  return c;
+}
+// отрезок, обрезанный прямоугольником (Лианг — Барски)
+function clipSeg(x0, y0, x1, y1, xa, ya, xb, yb) {
+  let t0 = 0, t1 = 1; const dx = x1 - x0, dy = y1 - y0;
+  for (const [p, q] of [[-dx, x0 - xa], [dx, xb - x0], [-dy, y0 - ya], [dy, yb - y0]]) {
+    if (p === 0) { if (q < 0) return null; continue; }
+    const t = q / p;
+    if (p < 0) { if (t > t1) return null; if (t > t0) t0 = t; } else { if (t < t0) return null; if (t < t1) t1 = t; }
+  }
+  return [x0 + dx * t0, y0 + dy * t0, x0 + dx * t1, y0 + dy * t1];
+}
+function outside(x0, y0, x1, y1, W, H, m = 0.03) {
+  const A = (x1 - x0) * (y1 - y0) || 1e-9;
+  const ix = Math.max(0, Math.min(x1, W - m) - Math.max(x0, m)), iy = Math.max(0, Math.min(y1, H - m) - Math.max(y0, m));
+  return 1 - ix * iy / A;
+}
+// ломаная, сдвинутая вбок на d, с острыми стыками
+const nrm = (a, b) => { const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1; return [-dy / l, dx / l]; };
+function offsetLine(pts, d) {
+  return pts.map((p, i) => {
+    const n0 = i > 0 ? nrm(pts[i - 1], p) : null, n1 = i < pts.length - 1 ? nrm(p, pts[i + 1]) : null;
+    let nx, ny, k = 1;
+    if (!n0) [nx, ny] = n1; else if (!n1) [nx, ny] = n0;
+    else { nx = n0[0] + n1[0]; ny = n0[1] + n1[1]; const l = Math.hypot(nx, ny) || 1; nx /= l; ny /= l; k = 1 / Math.max(0.35, nx * n0[0] + ny * n0[1]); }
+    return [p[0] + nx * d * k, p[1] + ny * d * k];
+  });
+}
+const strip = (pts, w) => [...offsetLine(pts, w / 2), ...offsetLine(pts, -w / 2).reverse()];
+function irregular(r, cx, cy, R, n) {
+  const pts = [], a0 = r.range(0, TAU);
+  for (let i = 0; i < n; i++) { const t = a0 + (i + r.range(-0.3, 0.3)) / n * TAU, rr = R * r.range(0.72, 1.12); pts.push([cx + Math.cos(t) * rr, cy + Math.sin(t) * rr]); }
+  return pts;
+}
+
+// грубая карта занятости: где уже есть краска
+function Occ(G) {
+  const n = 64, cs = G.W / n, m = Math.ceil(G.H / cs), a = new Uint8Array(n * m);
+  const cells = (x0, y0, x1, y1, f) => {
+    const i0 = Math.max(0, Math.floor(x0 / cs)), i1 = Math.min(n - 1, Math.floor(x1 / cs));
+    const j0 = Math.max(0, Math.floor(y0 / cs)), j1 = Math.min(m - 1, Math.floor(y1 / cs));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) f(i, j);
+  };
+  return {
+    mark(list) {
+      for (const s of list) {
+        const p = shapePoly(s, 24), b = bb(p);
+        cells(b[0], b[1], b[2], b[3], (i, j) => { if (inPoly(p, (i + 0.5) * cs, (j + 0.5) * cs)) a[j * n + i] = 1; });
+      }
+    },
+    frac(x0, y0, x1, y1) { let t = 0, o = 0; cells(x0, y0, x1, y1, (i, j) => { t++; o += a[j * n + i]; }); return t ? o / t : 1; },
+  };
+}
+// свободное место под предмет w×h; near — штраф за пустоту вокруг (чтобы не улетало в никуда)
+function findSpot(r, o, G, w, h, near = 1, tries = 60) {
+  let best = [G.W / 2, G.H / 2], bc = 1e9; const m = 0.04;
+  for (let t = 0; t < tries; t++) {
+    const x = r.range(m + w / 2, G.W - m - w / 2), y = r.range(m + h / 2, G.H - m - h / 2);
+    const f = o.frac(x - w / 2, y - h / 2, x + w / 2, y + h / 2);
+    const g = o.frac(x - w * 1.5 - 0.06, y - h * 1.5 - 0.06, x + w * 1.5 + 0.06, y + h * 1.5 + 0.06);
+    const c = f * 8 + near * (g < 0.03 ? 1 : 0) + r() * 0.3;
+    if (c < bc) { bc = c; best = [x, y]; }
+  }
+  return best;
+}
+
+// ---------- группы ----------
+// строятся в своих координатах (главная ось — u, длина главной фигуры ≈ 1), потом вписываются в холст
+let PHI = 0;
+const crossA = r => r.sgn() * r.range(25, 65) * DEG;
+
+// тяжёлая плоскость: подложки выглядывают из-за края, брусья вдоль края, вставки поверх, спутники
+function cPlane(r) {
+  const it = [], D = P.density, sq = r.chance(0.2), T = sq ? r.range(0.6, 0.95) : r.range(0.2, 0.45);
+  it.push(r.chance(0.1 + 0.3 * P.wWedges) ? mk('trap', 0, 0, 1, T, 0, 'hero', 2, { t: r.range(0.5, 0.85) }) : rect(0, 0, 1, T, 0, 'hero', 2));
+  const nb = r.chance(0.3 + 0.5 * D) ? r.int(1, 1 + Math.round(D)) : 0;
+  for (let i = 0; i < nb; i++) {
+    const w = r.range(0.22, 0.5), h = r.range(0.14, 0.34) * (sq ? 0.7 : 1), sd = r.sgn();
+    it.push(rect(r.range(-0.38, 0.38), sd * (T / 2 + h * r.range(-0.15, 0.35)), w, h, r.chance(0.8) ? 0 : r.range(-0.2, 0.2), 'plane', 1));
+  }
+  const ng = r.chance(0.3 + 0.65 * P.wBars) ? (r.chance(0.3 * D) ? 2 : 1) : 0;
+  for (let g = 0, sd = r.sgn(); g < ng; g++, sd = -sd) {
+    const n = r.int(1, 2 + Math.round(D * 2)), dir = r.sgn();
+    let v = sd * (T / 2 + r.range(-0.12, 0.05)), u = r.range(-0.2, 0.2);
+    for (let i = 0; i < n; i++) {
+      const th = r.range(0.022, 0.07), len = r.range(0.45, 1.05);
+      it.push(rect(u + dir * len * r.range(0.05, 0.3), v + sd * th / 2, len, th, 0, 'bar', r.chance(0.55) ? 3 : 1.5));
+      v += sd * (th + (r.chance(0.5) ? 0 : r.range(0.004, 0.035)));
+      u += dir * r.range(0.02, 0.16);
+    }
+  }
+  const ni = r.chance(0.25 + 0.6 * D) ? r.int(1, Math.round(1 + 3 * D) * (sq ? 2 : 1)) : 0;
+  for (let i = 0; i < ni; i++) {
+    const big = sq && i === 0 && r.chance(0.6);
+    const s = big ? r.range(0.35, 0.55) : r.range(0.05, 0.16) * (sq ? 1.3 : 1), asp = r.chance(0.5) ? r.range(1, 1.6) : r.range(2, 5);
+    const w = s * Math.sqrt(asp), h = Math.min(T * 0.9, s / Math.sqrt(asp));
+    const a = r.chance(0.7) ? 0 : r.chance(0.5) ? PI / 2 : crossA(r) * 0.6;
+    it.push(rect(r.range(-0.4, 0.4) * (big ? 0.4 : 1), r.range(-0.35, 0.35) * T, w, h, a, 'inset', 4 + i * 0.01));
+  }
+  if (r.chance(P.cross * (0.3 + 0.7 * P.wBars)))
+    it.push(rect(r.range(-0.35, 0.35), r.range(-0.3, 0.3) * T, r.range(0.6, 1.2), r.range(0.02, 0.05),
+      r.chance(0.35) ? PI / 2 : crossA(r), 'bar', r.chance(0.6) ? 3.5 : 1.2));
+  const ns = r.chance(0.3 + 0.5 * D) ? r.int(1, 1 + Math.round(2.5 * D)) : 0;
+  for (let i = 0; i < ns; i++) {
+    const s = r.range(0.035, 0.1), asp = r.range(1, 2.6), e = r.sgn(), end = r.chance(0.5);
+    const u = end ? e * (0.5 + r.range(-0.06, 0.12)) : r.range(-0.45, 0.45);
+    const v = end ? r.range(-0.5, 0.5) * T : e * (T / 2 + s * r.range(0.3, 1.2));
+    it.push(rect(u, v, s * asp, s, r.chance(0.8) ? 0 : PI / 2, 'small', 3));
+  }
+  return it;
+}
+// стопка брусьев, клин под ней, длинный брус наискось с перекладиной
+function cStack(r) {
+  const it = [], n = r.int(3, 4 + Math.round(P.density * 2)), blockTop = r.chance(0.45);
+  let v = 0, len = r.range(0.55, 0.9);
+  for (let i = 0; i < n; i++) {
+    const top = i === 0 && blockTop;
+    const L = top ? r.range(0.2, 0.32) : (len = clamp(len * r.range(0.75, 1.3), 0.35, 1));
+    const th = top ? L * r.range(0.8, 1.3) : r.range(0.07, 0.17);
+    it.push(rect(r.range(-0.2, 0.2), v + th / 2, L, th, r.chance(0.12) ? r.range(-0.1, 0.1) : 0,
+      top || r.chance(0.25) ? 'hero' : 'bar', 2 + r.range(-0.3, 0.3)));
+    v += th * r.range(0.72, 1);
+  }
+  if (r.chance(0.25 + 0.65 * P.wWedges)) {
+    const L = r.range(0.3, 0.6);
+    it.push(mk('tri', r.range(-0.15, 0.15), v + L / 2 - 0.04, L, r.range(0.14, 0.3), PI / 2, 'wedge', 1.5, { sk: r.range(-0.4, 0.4) }));
+  }
+  if (r.chance(0.3 + 0.5 * P.cross)) {
+    const a = crossA(r) * 0.6, L = r.range(1.1, 1.5), th = r.range(0.045, 0.075), cy = v * r.range(0.45, 0.95), cx = r.range(-0.1, 0.25);
+    const bar = rect(cx, cy, L, th, a, 'bar', 3); it.push(bar);
+    if (r.chance(0.65)) {
+      const u = r.sgn() * L * r.range(0.36, 0.46);
+      it.push(rect(cx + Math.cos(a) * u, cy + Math.sin(a) * u, th * r.range(2.5, 4), th * 1.5, a + PI / 2, 'bar', 3.1, { tie: bar }));
+    }
+  }
+  return it;
+}
+// «ось»: квадрат на пучке тонких полос, ступеньки уходят вбок
+function cAxle(r) {
+  const it = [], s = r.range(0.26, 0.38);
+  it.push(rect(0, 0, s, s * r.range(0.92, 1.1), 0, 'hero', 3));
+  const vs = Array.from({ length: r.int(2, 3 + Math.round(P.density * 2)) }, () => r.range(-0.35, 0.55) * s).sort((a, b) => a - b);
+  let prev = -1;
+  for (const v0 of vs) {
+    const th = r.range(0.018, 0.045), l = r.range(0.1, 0.45) + s / 2, rr = r.range(0.1, 0.7) + s / 2;
+    const v = Math.max(v0, prev + th / 2 + 0.004); prev = v + th / 2;
+    it.push(rect((rr - l) / 2, v, l + rr, th, 0, 'bar', r.chance(0.8) ? 2 : 3.5));
+  }
+  if (r.chance(0.4 + 0.5 * P.wFlock)) {
+    const e = r.sgn(); let u = e * r.range(0.3, 0.5), v = prev + r.range(0.04, 0.1), L = r.range(0.15, 0.3);
+    for (let i = r.int(2, 4); i > 0; i--) {
+      it.push(rect(u, v, L, r.range(0.03, 0.06), 0, 'small', 3));
+      u += e * r.range(0.04, 0.12); v += r.range(0.06, 0.12); L *= r.range(0.55, 0.85);
+    }
+  }
+  return it;
+}
+// крест из двух полос, тонкие брусья рядом, круг за пересечением
+function cCross(r) {
+  const it = [], a2 = r.sgn() * r.range(55, 95) * DEG, t1 = r.range(0.07, 0.15), t2 = r.range(0.05, 0.12);
+  const o = r.range(-0.25, 0.25), oy = r.range(-0.05, 0.05);
+  it.push(rect(0, 0, 1, t1, 0, 'hero', 2));
+  it.push(rect(o, oy, r.range(0.6, 1), t2, a2, 'bar', r.chance(0.5) ? 3 : 1));
+  const c2 = Math.cos(a2), s2 = Math.sin(a2);
+  for (let i = r.int(0, 1 + Math.round(P.density * 3)); i > 0; i--) {
+    const th = r.range(0.015, 0.04), d = r.sgn() * r.range(0.01, 0.07);
+    if (r.chance(0.6)) { const v = Math.sign(d) * (t1 / 2 + th / 2) + d; it.push(rect(r.range(-0.3, 0.3), v, r.range(0.3, 0.8), th, 0, 'bar', r.chance(0.5) ? 3 : 1)); }
+    else { const v = Math.sign(d) * (t2 / 2 + th / 2) + d; it.push(rect(o - s2 * v, oy + c2 * v, r.range(0.3, 0.7), th, a2, 'bar', 3)); }
+  }
+  if (r.chance(0.2 + 0.7 * P.wCircles)) { const d = r.range(0.3, 0.55); it.push(mk('circ', o * 0.5 + r.range(-0.15, 0.15), r.range(-0.15, 0.15), d, d, 0, 'circle', 0.5)); }
+  for (let i = r.int(0, 1 + Math.round(P.density * 2)); i > 0; i--) {
+    const s = r.range(0.06, 0.15), first = r.chance(0.5), a = first ? 0 : a2, c = Math.cos(a), sn = Math.sin(a);
+    const u = r.sgn() * r.range(0.2, 0.42), v = r.sgn() * ((first ? t1 : t2) / 2 + s * r.range(0.2, 0.9));
+    const bx = first ? 0 : o, by = first ? 0 : oy;
+    it.push(rect(bx + c * u - sn * v, by + sn * u + c * v, s * r.range(1, 2.5), s, a, r.chance(0.5) ? 'small' : 'plane', r.chance(0.5) ? 2.5 : 0.9));
+  }
+  return it;
+}
+// круг, касательная плоскость, квадрат с другой стороны, брус через круг
+function cOrbit(r) {
+  const it = [], R = 0.3, a = r.range(-PI, PI), c = Math.cos(a), s = Math.sin(a);
+  it.push(mk('circ', 0, 0, 2 * R, 2 * R, 0, 'circle', 2));
+  const L = r.range(0.6, 0.9), T = r.range(0.25, 0.4), off = r.range(-0.25, 0.25) * L;
+  it.push(rect(-s * (R + T / 2) + c * off, c * (R + T / 2) + s * off, L, T, a, 'hero', 2));
+  if (r.chance(0.6)) {
+    const q = r.range(0.35, 0.55), d = R + q * 0.55, j = r.range(-0.2, 0.2);
+    it.push(rect(s * d + c * j, -c * d + s * j, q, q, a + r.range(-0.5, 0.5), 'plane', 1.5));
+  }
+  if (r.chance(0.5 + 0.4 * P.wBars))
+    it.push(rect(r.range(-0.1, 0.1), r.range(-0.1, 0.1), r.range(0.8, 1.3), r.range(0.04, 0.09), a + (r.chance(0.5) ? PI / 2 : crossA(r)), 'bar', r.chance(0.6) ? 3 : 1));
+  if (r.chance(0.4)) {
+    const t = r.range(0, TAU), d = r.range(0.1, 0.18), dist = R + d + r.range(0.05, 0.2);
+    it.push(mk('circ', Math.cos(t) * dist, Math.sin(t) * dist, d, d, 0, 'circle', 2.5));
+  }
+  return it;
+}
+// стая: лесенка убывающих брусков, россыпь вокруг квадрата или гребёнка
+function cFlock(r) {
+  const it = [], type = r.pickW({ steps: 1, scatter: 1, comb: 1 }), mono = r.chance(0.6);
+  let first = null;
+  const add = s => { if (!first) first = s; else if (mono) s.tie = first; it.push(s); };
+  if (type === 'steps') {
+    let u = 0, v = 0, L = 0.5; const asp = r.range(1.8, 4.5), dir = r.sgn(), q = r.range(0.62, 0.85);
+    for (let i = r.int(3, 6); i > 0; i--) {
+      const th = L / asp; add(rect(u, v, L, th, r.chance(0.15) ? r.range(-0.15, 0.15) : 0, 'small', 3));
+      u += L * r.range(0.35, 0.9); v += dir * th * r.range(1.3, 2.6); L *= q;
+    }
+  } else if (type === 'scatter') {
+    const q = r.range(0.25, 0.4), vert = r.chance(0.5); add(rect(0, 0, q, q, 0, 'small', 3));
+    for (let i = r.int(3, 6); i > 0; i--) {
+      const t = r.range(0, TAU), d = r.range(0.3, 0.6), L = r.range(0.2, 0.45);
+      add(rect(Math.cos(t) * d, Math.sin(t) * d, L, L * r.range(0.12, 0.25), (vert ? PI / 2 : 0) + (r.chance(0.25) ? PI / 2 : 0), 'small', 3));
+    }
+  } else {
+    let v = 0;
+    for (let i = r.int(3, 5); i > 0; i--) { const th = r.range(0.03, 0.06), L = r.range(0.3, 0.8); add(rect(r.range(-0.15, 0.15), v, L, th, 0, 'small', 3)); v += th + r.range(0.04, 0.12); }
+    if (r.chance(0.6)) add(rect(r.range(-0.1, 0.3), v + 0.1, 0.2, 0.2, 0, 'small', 3.1));
+    if (r.chance(0.5)) add(rect(r.range(-0.4, 0.4), v * 0.5, v * 1.3 + 0.1, 0.035, PI / 2 + r.range(-0.3, 0.3), 'small', 2.9));
+  }
+  return it;
+}
+// два квадрата один над другим, без наклона
+function cBlocks(r) {
+  const a = r.range(0.4, 0.55), b = a * r.range(0.9, 1.1), gap = r.range(0.04, 0.1);
+  return [rect(0, -(a + gap) / 2, a, a * r.range(0.9, 1.1), 0, 'hero', 2), rect(r.range(-0.03, 0.03), (b + gap) / 2, b, b * r.range(0.9, 1.1), 0, 'plane', 2)];
+}
+const CL = { plane: cPlane, stack: cStack, axle: cAxle, cross: cCross, orbit: cOrbit, flock: cFlock, blocks: cBlocks };
+function clusterKind(r, main) {
+  return r.pickW(main
+    ? { plane: 5, stack: 0.6 + 1.2 * P.wBars, cross: 0.4 + 1.6 * P.cross, orbit: 2.2 * P.wCircles, axle: 0.4 + 0.8 * P.wBars }
+    : { plane: 1.6, stack: 0.6 + P.wBars, cross: 0.3 + P.cross, orbit: 1.5 * P.wCircles, axle: 0.6 + P.wBars,
+        flock: 0.4 + 2 * P.wFlock, blocks: 1.5 * P.ortho });
+}
+function clusterAngle(r, kind) {
+  if (kind === 'blocks' || r.chance(P.ortho)) return r.chance(0.85) ? 0 : PI / 2;
+  let a = PHI + P.tiltVar * r.range(-20, 20) * DEG;
+  if (kind === 'stack' || kind === 'axle') { if (r.chance(0.6)) a *= r.range(0, 0.35); }
+  else if (r.chance(0.28)) a += PI / 2;
+  return a;
+}
+// повернуть, вписать и поставить центром в ноль: площадь рамки ≈ maxW×maxH, но не шире capW и не выше capH —
+// вытянутые группы (ось с длинными полосами) иначе выходят крошечными
+function fitCluster(it, A, fl, maxW, maxH, capW = maxW, capH = maxH) {
+  transform(it, A, 1, 0, 0, fl);
+  const b = bboxOf(it), bw = b.x1 - b.x0, bh = b.y1 - b.y0, S = Math.min(Math.sqrt(maxW * maxH / (bw * bh)), capW / bw, capH / bh);
+  transform(it, 0, S, -S * (b.x0 + b.x1) / 2, -S * (b.y0 + b.y1) / 2);
+  return { w: (b.x1 - b.x0) * S, h: (b.y1 - b.y0) * S };
+}
+
+// ---------- схемы ----------
+function layCluster(G, r) {
+  const kind = clusterKind(r, true), it = CL[kind](rng('cl', 0)), bl = r.chance(P.bleed * 0.6);
+  const sc = P.scale * (bl ? r.range(1.15, 1.45) : 1);
+  fitCluster(it, clusterAngle(r, kind), r.sgn(), G.W * 0.88 * sc, G.H * 0.84 * sc);
+  let cx = G.W * (0.5 + r.range(-0.07, 0.07)), cy = G.H * (0.5 + r.range(-0.08, 0.05));
+  if (bl) { cx += r.sgn() * r.range(0.05, 0.2) * G.W; cy += r.range(-0.1, 0.1) * G.H; }
+  transform(it, 0, 1, cx, cy); G.shapes.push(...it);
+  decorate(G, r, 1);
+}
+// несколько групп убывающего размера вдоль направляющей диагонали
+function layFlight(G, r) {
+  const W = G.W, H = G.H, U = Math.min(W, H), n = clamp(P.clusters + (r.chance(0.3) ? r.sgn() : 0), 1, 6);
+  const gA = H > 1.25 ? PI / 2 + r.range(-0.35, 0.35) : r.chance(0.5) ? PHI : PHI + PI / 2;
+  const gx = W * r.range(0.4, 0.6), gy = H * r.range(0.4, 0.6), gc = Math.cos(gA), gs = Math.sin(gA);
+  const o = Occ(G), K = [1, 0.6, 0.48, 0.4, 0.34, 0.3], Uf = Math.max(U, Math.sqrt(W * H) * 0.85);
+  for (let i = 0; i < n; i++) {
+    const kind = clusterKind(r, i === 0), it = CL[kind](rng('cl', i));
+    const sz = 0.7 * P.scale * K[i] * (i ? r.range(0.8, 1.2) : 1);
+    const d = fitCluster(it, clusterAngle(r, kind), r.sgn(), Uf * sz * 1.1, Uf * sz * 1.1, W * 0.94, H * 0.55);
+    let best = [W / 2, H / 2], bc = 1e9;
+    for (let t = 0; t < 60; t++) {
+      const x = r.range(-0.05, W + 0.05), y = r.range(-0.05, H + 0.05);
+      const x0 = x - d.w / 2, y0 = y - d.h / 2, x1 = x + d.w / 2, y1 = y + d.h / 2;
+      const c = o.frac(x0 + d.w * 0.1, y0 + d.h * 0.1, x1 - d.w * 0.1, y1 - d.h * 0.1) * 6
+        + outside(x0, y0, x1, y1, W, H) * (6 - 5 * P.bleed)
+        + Math.abs((x - gx) * gs - (y - gy) * gc) / U * 1.2
+        + (i === 0 ? Math.hypot(x - W / 2, y - H / 2) / U : 0);
+      if (c < bc) { bc = c; best = [x, y]; }
+    }
+    transform(it, 0, 1, best[0], best[1]); G.shapes.push(...it); o.mark(it);
+  }
+  decorate(G, r, 1);
+}
+// широкие почти горизонтальные полосы поперёк косой ленты
+function layConstruct(G, r) {
+  const W = G.W, H = G.H, U = Math.min(W, H), sc = P.scale, S = G.shapes, A0 = PHI * r.range(0, 0.2);
+  if (r.chance(0.75)) S.push(rect(W * r.range(0.3, 0.55), H * 0.5, Math.hypot(W, H) * 1.2, U * r.range(0.1, 0.2) * sc, r.sgn() * r.range(58, 78) * DEG, 'plane', 0.5));
+  if (r.chance(0.5)) S.push(rect(W * r.range(0.45, 0.7), H * r.range(0.55, 0.75), H * r.range(0.35, 0.55), U * r.range(0.05, 0.09) * sc, PI / 2 + r.range(-0.1, 0.1), 'accent', 0.8));
+  let y = H * r.range(0.16, 0.28), first = null;
+  for (let i = 0, n = r.int(2, 3 + Math.round(P.density * 2)); i < n && y < H * 0.82; i++) {
+    const th = U * r.range(0.06, 0.15) * sc * (i ? 1 : 1.5), len = Math.min(1.1, r.range(0.35, 0.95) * (i ? 1 : 1.1)) * W;
+    const x = len > W * 0.8 ? W * r.range(0.45, 0.55)
+      : r.chance(P.bleed) ? (r.chance(0.5) ? len / 2 - W * 0.06 : W - len / 2 + W * 0.06)
+      : W * r.range(0.08, 0.92 - len / W) + len / 2;
+    const b = rect(x, y + th / 2, len, th, A0 + r.range(-0.03, 0.03), i ? 'band' : 'hero', 2 + i * 0.05);
+    S.push(b); first = first || b;
+    y += th + H * r.range(0.03, 0.12);
+  }
+  if (r.chance(0.65)) {
+    const s = first.h * r.range(1.3, 2);
+    S.push(rect(first.x + first.w * r.range(-0.1, 0.3), first.y - first.h * r.range(-0.1, 0.35), s * r.range(0.9, 1.3), s, A0 + r.sgn() * r.range(0.15, 0.4), 'inset', 3));
+  }
+  if (r.chance(0.5 + 0.4 * P.cross)) {
+    const a = r.sgn() * r.range(25, 50) * DEG, L = Math.hypot(W, H) * r.range(0.5, 0.75), th = U * r.range(0.015, 0.03);
+    const cx = W * r.range(0.35, 0.65), cy = H * r.range(0.3, 0.5), c = Math.cos(a), s = Math.sin(a);
+    const cl = clipSeg(cx - c * L / 2, cy - s * L / 2, cx + c * L / 2, cy + s * L / 2, 0.03, 0.03, W - 0.03, H - 0.03);
+    if (cl) {
+      const mx = (cl[0] + cl[2]) / 2, my = (cl[1] + cl[3]) / 2, l2 = Math.hypot(cl[2] - cl[0], cl[3] - cl[1]);
+      const bar = rect(mx, my, l2, th, a, 'bar', 4); S.push(bar);
+      if (r.chance(0.7)) { const u = r.sgn() * l2 * 0.42; S.push(rect(mx + c * u, my + s * u, U * r.range(0.07, 0.12), th, a + PI / 2, 'bar', 4.01, { tie: bar })); }
+    }
+  }
+  decorate(G, r, 1);
+}
+// два-три знака
+function layMinimal(G, r) {
+  const W = G.W, H = G.H, U = Math.min(W, H), sc = P.scale, S = G.shapes, fl = r.chance(0.5), dx = fl ? -1 : 1;
+  const X = x => fl ? W - x : x, A = a => fl ? -a : a, j = v => v * r.range(0.88, 1.12);
+  const m = r.pickW({ 'круг и прямоугольник': 1.2, 'круг и клин': 1, 'крест': 0.7 + P.cross * 0.5, 'квадрат': 0.8, 'фигура': 1.2 + P.wFlock, 'пара': 1 });
+  G.motif = m;
+  if (m === 'круг и прямоугольник') {
+    const cr = U * r.range(0.1, 0.15) * sc, rw = W * r.range(0.38, 0.52) * sc, rh = Math.min(H * 0.6, rw * r.range(1.2, 1.7));
+    const ry = H * 0.94 - rh / 2 - H * r.range(0, 0.06), cy = Math.max(cr + H * 0.06, ry - rh / 2 - cr - H * r.range(0.04, 0.1));
+    S.push(mk('circ', X(W * r.range(0.22, 0.34)), cy, cr * 2, cr * 2, 0, 'ink', 2));
+    S.push(rect(X(W * r.range(0.52, 0.62)), ry, rw, rh, A(r.chance(0.3) ? r.range(0.03, 0.12) : 0), 'hero', 2));
+  } else if (m === 'круг и клин') {
+    const cr = U * r.range(0.24, 0.32) * sc, cx = W * r.range(0.36, 0.5), cy = H * r.range(0.26, 0.34);
+    S.push(mk('circ', X(cx), cy, cr * 2, cr * 2, 0, 'accent', 1));
+    S.push(poly([[X(cx + cr * r.range(-0.1, 0.25)), cy + cr * r.range(0.15, 0.5)], [X(W * r.range(0.26, 0.38)), H * r.range(0.86, 0.93)],
+      [X(W * r.range(0.86, 0.95)), H * r.range(0.64, 0.76)]], 'ink', 2, A(0.3)));
+  } else if (m === 'крест') {
+    const cx = W * r.range(0.45, 0.55), t = A(r.range(0, 0.07));
+    S.push(mk('ell', cx, H * r.range(0.44, 0.5), W * r.range(0.68, 0.84) * sc, H * r.range(0.72, 0.84) * sc, t * 0.5, 'accent', 1));
+    const vw = W * r.range(0.1, 0.15), vx = cx + W * r.range(-0.03, 0.03), vl = H * r.range(0.85, 0.95);
+    const v = rect(vx, vl / 2 - H * 0.02, vl, vw, PI / 2 + t, 'ink', 2); S.push(v);
+    S.push(rect(vx + W * r.range(-0.04, 0.06), H * r.range(0.2, 0.3), W * r.range(0.65, 0.8) * sc, H * r.range(0.06, 0.09), t * 1.4, 'ink', 2.1, { tie: v }));
+    if (r.chance(0.8)) S.push(rect(vx + W * r.range(-0.05, 0.05), vl - H * r.range(0.05, 0.1), W * r.range(0.35, 0.5), U * 0.012, A(-r.range(0.2, 0.45)), 'ink', 2.2, { tie: v }));
+  } else if (m === 'квадрат') {
+    const s = U * r.range(0.42, 0.58) * sc, cx = W * r.range(0.46, 0.54), cy = H * r.range(0.44, 0.5), a = r.chance(0.5) ? 0 : r.range(-0.12, 0.12);
+    const c = Math.cos(a), sn = Math.sin(a);
+    // у Малевича квадрат никогда не бывает точным
+    S.push(poly([[-1, -1], [1, -1], [1, 1], [-1, 1]].map(([u, v]) => {
+      u = u * s / 2 + r.range(-0.04, 0.04) * s; v = v * s / 2 + r.range(-0.04, 0.04) * s;
+      return [cx + u * c - v * sn, cy + u * sn + v * c];
+    }), 'hero', 2, a));
+    if (r.chance(0.35)) { const s2 = s * r.range(0.3, 0.5); S.push(rect(X(cx + s * r.range(0.3, 0.5)), cy + s * r.range(0.35, 0.6), s2, s2, r.sgn() * r.range(0.2, 0.5), 'accent', 1.5)); }
+  } else if (m === 'фигура') {
+    // мелкие знаки по вертикальной оси сверху, большой параллелограмм далеко внизу
+    const ax = X(W * r.range(0.38, 0.5)), top = H * r.range(0.08, 0.14), k = U * sc;
+    S.push(mk('circ', ax - dx * j(k * 0.05), top, j(k * 0.055), 0, 0, 'accent', 2));
+    S.push(rect(ax - dx * j(k * 0.03), top + j(k * 0.05), j(k * 0.16), k * 0.014, A(-0.02), 'accent', 2));
+    S.push(rect(ax + dx * j(k * 0.01), top + j(k * 0.09), j(k * 0.11), j(k * 0.042), A(-0.04), 'accent', 2));
+    S.push(rect(ax + dx * j(k * 0.18), top + j(k * 0.14), j(k * 0.17), j(k * 0.095), A(-r.range(0.35, 0.65)), 'ink', 2));
+    S.push(mk('trap', ax - dx * k * 0.05, top + k * 0.37, j(k * 0.3), j(k * 0.13), PI / 2, 'accent', 2, { t: r.range(0.75, 0.95) }));
+    const by = top + k * 0.26;
+    S.push(rect(ax + dx * k * 0.12, by, j(k * 0.66), k * 0.02, A(r.range(0.02, 0.08)), 'accent', 3));
+    S.push(rect(ax + dx * k * 0.3, by + k * 0.02, j(k * 0.18), k * 0.18, 0, 'ink', 3.5));
+    const px = X(W * r.range(0.35, 0.5)), py = H * r.range(0.8, 0.86), hw = W * r.range(0.16, 0.22), hh = H * r.range(0.09, 0.13), sh = dx * W * r.range(0.08, 0.13);
+    S.push(poly([[px - hw + sh, py - hh], [px + hw + sh, py - hh * 0.8], [px + hw - sh, py + hh * 1.1], [px - hw - sh, py + hh * 0.9]], 'hero', 1));
+  } else {
+    const L = W * r.range(0.5, 0.65) * sc, T = L * r.range(0.25, 0.4);
+    S.push(rect(X(W * 0.45), H * r.range(0.38, 0.48), L, T, A(PHI), 'hero', 2));
+    S.push(rect(X(W * r.range(0.45, 0.6)), H * r.range(0.62, 0.72), L * r.range(0.6, 0.9), T * r.range(0.12, 0.25), A(PHI + r.range(-0.1, 0.1)), 'bar', 2));
+    if (r.chance(0.6)) S.push(mk('circ', X(W * r.range(0.2, 0.35)), H * r.range(0.14, 0.24), U * 0.07, 0, 0, 'accent', 2));
+  }
+  for (const s of S) if (s.k === 'circ') s.h = s.w;
+  decorate(G, r, P.density * 0.4);
+}
+// архитектоника: бледные многоугольники, ломаные ленты, клинья, полукольца над горами
+function layArch(G, r) {
+  const W = G.W, H = G.H, U = Math.min(W, H), sc = P.scale, S = G.shapes, fl = r.chance(0.5), X = x => fl ? W - x : x, A = a => fl ? -a : a;
+  const cx = W * r.range(0.42, 0.58), cy = H * r.range(0.3, 0.4);
+  S.push(poly(irregular(r, X(cx - W * 0.04), cy, U * r.range(0.42, 0.52) * sc, r.int(5, 7)), 'bg', 0));
+  if (r.chance(0.65)) S.push(poly(irregular(r, X(W * r.range(0.68, 0.8)), H * r.range(0.55, 0.68), U * r.range(0.14, 0.22) * sc, r.int(4, 5)), 'bg', 0.1));
+  if (r.chance(0.35 + 0.6 * P.wCircles)) {
+    const ax = X(W * r.range(0.2, 0.3)), ay = H * r.range(0.8, 0.88), R0 = U * r.range(0.2, 0.28) * sc, rot = r.range(-0.15, 0.15);
+    for (let k = 0, n = r.int(2, 4); k < n; k++) S.push(mk('disc', ax + (fl ? -1 : 1) * k * R0 * 0.08, ay, 2 * R0 * (1 - k * 0.24), 0, rot, 'plane', 1 + k * 0.05));
+    if (r.chance(0.75)) {
+      const w = R0 * r.range(1.6, 2.4), x0 = ax - w * 0.35, np = r.int(3, 5), pts = [[x0, ay + U * 0.01]];
+      for (let i = 0; i <= np * 2; i++) pts.push([x0 + w * i / (np * 2), ay - (i % 2 ? r.range(0.25, 0.6) : r.range(0.02, 0.12)) * R0 * 0.8]);
+      pts.push([x0 + w, ay + U * 0.01]);
+      S.push(poly(pts, 'band', 1.4));
+    }
+  }
+  // хребет-молния: длинные почти вертикальные пролёты, между ними короткие косые ступени
+  const pts = [], sg = r.sgn(); let x = cx + r.range(-0.05, 0.05) * W, y = H * r.range(0.08, 0.14); pts.push([x, y]);
+  for (let i = 0, ns = r.int(4, 5); i < ns; i++) {
+    const run = i % 2 === 0, ang = PI / 2 + (run ? r.range(-0.3, 0.3) : sg * (i % 4 === 1 ? 1 : -0.7) * r.range(0.7, 1.05));
+    const L = H * (run ? r.range(0.12, 0.2) : r.range(0.06, 0.1)) * sc;
+    x = clamp(x + Math.cos(ang) * L, W * 0.3, W * 0.7); y += Math.sin(ang) * L; pts.push([x, y]);
+  }
+  const K = r.int(2, 3), w = U * r.range(0.07, 0.1) * sc, sh = r.range(0.2, 0.5) * w * r.sgn();
+  for (let k = 0; k < K; k++) {
+    const sp = offsetLine(pts, (k - (K - 1) / 2) * w * 0.85).map(([px, py]) => [px, py + k * sh]);
+    S.push(poly(strip(sp, w), 'band', 2 + (k % 2 ? 0.1 : -0.1) * k, PI / 2));
+  }
+  // клинья торчат из хребта наружу
+  for (let i = 0, nw = r.int(1, 1 + Math.round(3 * P.wWedges)); i < nw; i++) {
+    const k = r.int(0, pts.length - 2), p = pts[k], q = pts[k + 1], side = r.sgn();
+    const base = Math.atan2(q[1] - p[1], q[0] - p[0]), ang = base + side * r.range(0.6, 1.4) + (r.chance(0.4) ? PI : 0);
+    const L = U * r.range(0.14, 0.3) * sc, bw = U * r.range(0.025, 0.055) * sc, c = Math.cos(ang), s = Math.sin(ang);
+    const t = r.range(0.2, 0.8), ox = p[0] + (q[0] - p[0]) * t, oy = p[1] + (q[1] - p[1]) * t;
+    S.push(poly([[ox - s * bw / 2, oy + c * bw / 2], [ox + s * bw / 2, oy - c * bw / 2], [ox + c * L, oy + s * L]], 'wedge', 3 + i * 0.01, ang));
+  }
+  if (r.chance(0.6)) {
+    const e = pts[pts.length - 1], bx = e[0] + r.range(-0.1, 0.1) * W, by = Math.min(H * 0.85, e[1] + H * r.range(0.02, 0.08)), s = U * r.range(0.15, 0.25) * sc;
+    const vp = [[bx - s * r.range(0.8, 1.3), by - s * r.range(0.6, 1)], [bx, by], [bx + s * r.range(0.4, 0.8), by - s * r.range(0.9, 1.4)]];
+    S.push(poly(strip(vp, U * r.range(0.06, 0.1) * sc), 'plane', 2.5, -PI / 4));
+  }
+  if (r.chance(0.8)) {
+    const p = pts[r.int(0, 1)];
+    S.push(rect(p[0] + (fl ? -1 : 1) * U * 0.1, p[1] + H * 0.06, U * r.range(0.25, 0.4) * sc, U * r.range(0.06, 0.09) * sc, A(-r.range(0.9, 1.2)), 'accent', 3.5));
+  }
+  for (let i = r.int(1, 2); i > 0; i--)
+    S.push(rect(X(W * r.range(0.62, 0.8)), H * r.range(0.45, 0.6), H * r.range(0.5, 0.75), U * r.range(0.014, 0.028), A(PI / 2 - r.range(0.15, 0.35)), 'ink', 4));
+  if (r.chance(0.6)) {
+    const qx = X(W * r.range(0.68, 0.82)), qy = H * r.range(0.72, 0.82), s = U * r.range(0.1, 0.16);
+    S.push(poly([[qx - s * 0.6, qy - s], [qx + s * 0.7, qy - s * 0.7], [qx + s * 0.5, qy + s], [qx - s * 0.8, qy + s * 0.6]], 'band', 1.2));
+  }
+  decorate(G, r, 0.4);
+}
+const LAYOUTS = { 'кластер': layCluster, 'полёт': layFlight, 'конструкция': layConstruct, 'минимум': layMinimal, 'архитектоника': layArch };
+
+// ---------- мелочь вокруг ----------
+function addLine(G, r, major) {
+  const W = G.W, H = G.H, U = Math.min(W, H);
+  const an = major.length ? r.pick(major) : { x: W / 2, y: H / 2, a: PHI, h: 0.1 };
+  const a = r.pickW([[PHI, 3], [PHI + PI / 2, 1.5], [PHI + crossA(r), 0.4 + 2 * P.cross], [an.a, 2], [0, 0.6 * P.ortho + 0.1]]);
+  let len = U * r.range(0.25, 0.9), x, y;
+  const th = U * r.range(0.0025, 0.006), c = Math.cos(a), s = Math.sin(a), off = r.range(-0.5, 0.5) * len, side = r.range(-0.7, 0.7) * Math.max(an.h || 0, 0.06);
+  x = an.x + c * off - s * side; y = an.y + s * off + c * side;
+  if (!r.chance(P.bleed * 0.5)) {
+    const cl = clipSeg(x - c * len / 2, y - s * len / 2, x + c * len / 2, y + s * len / 2, 0.03, 0.03, W - 0.03, H - 0.03);
+    if (!cl) return;
+    len = Math.hypot(cl[2] - cl[0], cl[3] - cl[1]); x = (cl[0] + cl[2]) / 2; y = (cl[1] + cl[3]) / 2;
+    if (len < U * 0.15) return;
+  }
+  const L = rect(x, y, len, th, a, 'line', r.chance(0.65) ? 5 : 0.8); G.shapes.push(L);
+  if (r.chance(0.35)) {   // перекладина на конце
+    const e = r.sgn();
+    G.shapes.push(rect(x + c * e * len / 2, y + s * e * len / 2, U * r.range(0.03, 0.09), th * r.range(1.2, 2), a + PI / 2, 'line', L.z + 0.01, r.chance(0.5) ? { tie: L } : {}));
+  }
+}
+function decorate(G, r, amt) {
+  if (amt <= 0) return;
+  const W = G.W, H = G.H, U = Math.min(W, H), D = 0.4 + P.density, o = Occ(G), S = G.shapes;
+  o.mark(S);
+  const major = S.filter(s => s.role !== 'line' && (s.k === 'poly' || s.w * (s.h || s.w) > 0.003));
+  for (let i = 0, n = Math.round(P.wFlock * r.range(0, 2.2) * D * amt); i < n; i++) {
+    const it = cFlock(rng('fl', i)), sz = U * r.range(0.1, 0.2);
+    const d = fitCluster(it, clusterAngle(r, 'flock'), r.sgn(), sz, sz), p = findSpot(r, o, G, d.w, d.h);
+    transform(it, 0, 1, p[0], p[1]); S.push(...it); o.mark(it);
+  }
+  for (let i = 0, n = Math.round(P.wLines * r.range(0.5, 4.5) * D * amt); i < n; i++) addLine(G, r, major);
+  if (r.chance(P.wLines * 0.5 * amt)) for (let i = r.int(1, 2); i > 0; i--) {   // маленькие кресты
+    const s = U * r.range(0.04, 0.09), th = s * r.range(0.08, 0.14), p = findSpot(r, o, G, s, s), a = r.chance(0.5) ? 0 : PHI;
+    const v = rect(p[0], p[1], s * 1.3, th, a + PI / 2, 'line', 5);
+    S.push(v, rect(p[0] + Math.sin(a) * s * 0.2, p[1] - Math.cos(a) * s * 0.2, s, th, a, 'line', 5, { tie: v }));
+  }
+  for (let i = 0, n = Math.round(P.wCircles * r.range(0, 2.5) * amt); i < n; i++) {   // точки
+    const d = U * r.range(0.015, 0.05), p = findSpot(r, o, G, d * 2, d * 2), c = mk('circ', p[0], p[1], d, d, 0, 'circle', 4);
+    S.push(c); o.mark([c]);
+  }
+  if (r.chance(P.wCircles * 0.4 * amt)) {   // большой круг, иногда срезанный краем
+    const R = U * r.range(0.08, 0.18) * P.scale, e = R * r.range(-0.2, 0.5);
+    let p;
+    if (r.chance(0.25 + P.bleed * 0.6)) {
+      const side = r.int(0, 3), t = r.range(0.15, 0.85);
+      p = side === 0 ? [e, H * t] : side === 1 ? [W - e, H * t] : side === 2 ? [W * t, e] : [W * t, H - e];
+    } else p = findSpot(r, o, G, R * 2, R * 2, 0.5);
+    const c = mk('circ', p[0], p[1], 2 * R, 2 * R, 0, 'circle', 0.7); S.push(c); o.mark([c]);
+  }
+  for (let i = 0, n = Math.round(P.wFlock * r.range(0, 3) * amt); i < n; i++) {   // одиночные квадратики
+    const s = U * r.range(0.012, 0.035), p = findSpot(r, o, G, s * 3, s * 3);
+    S.push(rect(p[0], p[1], s * r.range(1, 1.5), s, r.chance(0.5) ? 0 : PHI * r.range(0, 1), 'small', 4));
+  }
+}
+
+// ---------- сборка и цвет ----------
+function generate() {
+  const [aw, ah] = ASPECTS[P.aspect], G = { W: 1, H: ah / aw, shapes: [] };
+  const r = rng('phi');
+  PHI = r.sgn() * (P.tilt + P.tiltVar * r.range(-15, 15)) * DEG;
+  G.layout = P.layout === 'смесь'
+    ? rng('layout').pickW({ 'кластер': 3, 'полёт': 3, 'конструкция': 1.5, 'минимум': 1, 'архитектоника': 1 }) : P.layout;
+  LAYOUTS[G.layout](G, rng('lay', G.layout));
+  for (const s of G.shapes) { s.poly0 = shapePoly(s); s.hull = s.k === 'poly' ? s.pts : shapePoly(s, 24); s.bb = bb(s.hull); }
+  colorize(G, pal());
+  G.shapes.sort((a, b) => a.z - b.z);
+  return G;
+}
+function sepAxis(p, q) {
+  for (let i = 0; i < p.length; i++) {
+    const [x0, y0] = p[i], [x1, y1] = p[(i + 1) % p.length], nx = y0 - y1, ny = x1 - x0;
+    let a0 = 1e9, a1 = -1e9, b0 = 1e9, b1 = -1e9;
+    for (const [x, y] of p) { const d = x * nx + y * ny; if (d < a0) a0 = d; if (d > a1) a1 = d; }
+    for (const [x, y] of q) { const d = x * nx + y * ny; if (d < b0) b0 = d; if (d > b1) b1 = d; }
+    if (a1 < b0 || b1 < a0) return true;
+  }
+  return false;
+}
+function overlap(a, b) {
+  const A = a.bb, B = b.bb;
+  if (A[2] < B[0] || B[2] < A[0] || A[3] < B[1] || B[3] < A[1]) return false;
+  if (a.k === 'poly' || b.k === 'poly') return true;
+  return !sepAxis(a.hull, b.hull) && !sepAxis(b.hull, a.hull);
+}
+// вероятность чёрного по роли; «цветность» сдвигает её
+const INKP = { hero: 0.62, plane: 0.12, bar: 0.28, inset: 0.05, small: 0.4, line: 0.55, circle: 0.5, band: 0.45, wedge: 0.2 };
+function colorize(G, p) {
+  const r = rngC('col'), cols = p.cols, used = {}, done = [];
+  const pale = p.pale || cols.map(([c]) => mixHex(c, p.ground, 0.6));
+  for (const s of G.shapes) {
+    if (s.tie) { s.col = s.tie.col; done.push(s); continue; }
+    if (s.role === 'bg') { s.col = pale.length ? r.pick(pale) : shade(p.ground, -0.08); continue; }
+    const avoid = new Set();
+    for (const o of done) if (overlap(s, o)) avoid.add(o.col);
+    let pi = s.role === 'ink' ? 1 : s.role === 'accent' ? 0 : clamp((INKP[s.role] ?? 0.3) + (0.5 - P.color) * 1.1, 0, 1);
+    if (!cols.length) pi = 1;
+    let c;
+    if (r.chance(pi) && (s.role === 'ink' || !avoid.has(p.ink))) c = p.ink;
+    else {
+      const opt = cols.filter(([h]) => !avoid.has(h)).map(([h, w]) => [h, w / (1 + 0.7 * (used[h] || 0))]);
+      if (opt.length) c = r.pickW(opt);
+      else if (!avoid.has(p.ink) && s.role !== 'accent') c = p.ink;
+      else { const b = cols.length && s.role !== 'ink' ? r.pickW(cols) : p.ink; c = shade(b, lum(b) < 0.35 ? 0.13 : -0.13); }   // тональный сдвиг
+    }
+    s.col = c; used[c] = (used[c] || 0) + 1; done.push(s);
+  }
+}
+
+// ---------- живопись ----------
+// край от руки: смещение по нормали шумом, непрерывным по плоскости
+function roughen(pts, amp, seed) {
+  if (amp <= 0) return pts;
+  const out = [], n = pts.length, step = 0.004;
+  for (let i = 0; i < n; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[(i + 1) % n], dx = bx - ax, dy = by - ay, L = Math.hypot(dx, dy);
+    if (L < 1e-9) continue;
+    const nx = -dy / L, ny = dx / L, m = Math.max(1, Math.ceil(L / step));
+    for (let k = 0; k < m; k++) {
+      const t = k / m, x = ax + dx * t, y = ay + dy * t;
+      const d = amp * (vnoise(x * 70, y * 70, seed) + 0.45 * vnoise(x * 240, y * 240, seed + 7));
+      out.push([x + nx * d, y + ny * d]);
+    }
+  }
+  return out;
+}
+function pathOf(ctx, pts, px) {
+  ctx.beginPath(); ctx.moveTo(pts[0][0] * px, pts[0][1] * px);
+  for (let i = 1; i < pts.length; i++) ctx.lineTo(pts[i][0] * px, pts[i][1] * px);
+  ctx.closePath();
+}
+// мазки вдоль угла ang по уже залитой (и обрезанной клипом) фигуре; mul — крупность кисти
+const TONES = [-0.14, -0.07, 0.035, 0.07, 0.12];
+function brush(ctx, pts, ang, col, px, r, mul = 1, jit = 1, hairA = 1) {
+  const tex = P.texture, gou = P.medium === 'гуашь';
+  if (tex <= 0) return;
+  const ca = Math.cos(ang), sa = Math.sin(ang);
+  let u0 = 1e9, u1 = -1e9, v0 = 1e9, v1 = -1e9;
+  for (const [x, y] of pts) { const u = x * ca + y * sa, v = -x * sa + y * ca; if (u < u0) u0 = u; if (u > u1) u1 = u; if (v < v0) v0 = v; if (v > v1) v1 = v; }
+  const sw = (gou ? 0.012 : 0.0055) * mul, sl = (gou ? 0.045 : 0.085) * mul;
+  const n = Math.min(1400, Math.round((u1 - u0) * (v1 - v0) / (sw * sl) * (gou ? 0.5 : 1.1) * (0.3 + tex)));
+  const ps = TONES.map(() => new Path2D()), hair = [new Path2D(), new Path2D()];
+  for (let i = 0; i < n; i++) {
+    const L = sl * r.range(0.35, 1.5), u = r.range(u0 - L * 0.6, u1 - L * 0.4), v = r.range(v0 - sw, v1 + sw);
+    const da = (r() - 0.5) * (gou ? 1.6 : 0.14) * jit, c2 = Math.cos(ang + da), s2 = Math.sin(ang + da), bend = (r() - 0.5) * sw * 2.5;
+    const x0 = u * ca - v * sa, y0 = u * sa + v * ca, x1 = x0 + c2 * L, y1 = y0 + s2 * L, p = ps[Math.floor(r() * ps.length)];
+    p.moveTo(x0 * px, y0 * px);
+    p.quadraticCurveTo(((x0 + x1) / 2 - s2 * bend) * px, ((y0 + y1) / 2 + c2 * bend) * px, x1 * px, y1 * px);
+  }
+  if (!gou) for (let i = 0, m = Math.round(n * 1.2); i < m; i++) {   // щетина: тонкие царапины
+    const L = sl * r.range(0.5, 2), u = r.range(u0 - L * 0.6, u1 - L * 0.4), v = r.range(v0, v1), da = (r() - 0.5) * 0.06 * jit;
+    const x0 = u * ca - v * sa, y0 = u * sa + v * ca, p = hair[i & 1];
+    p.moveTo(x0 * px, y0 * px); p.lineTo((x0 + Math.cos(ang + da) * L) * px, (y0 + Math.sin(ang + da) * L) * px);
+  }
+  ctx.lineCap = 'round';
+  const dark = lum(col) < 0.2;
+  ps.forEach((p, k) => {
+    ctx.strokeStyle = shade(col, TONES[k] * (dark && TONES[k] > 0 ? 0.8 : 1));
+    ctx.globalAlpha = (gou ? 0.12 : 0.22) * tex; ctx.lineWidth = Math.max(0.8, sw * px * (0.7 + 0.2 * k)); ctx.stroke(p);
+  });
+  if (!gou) {
+    ctx.lineWidth = Math.max(0.5, 0.0009 * px); ctx.globalAlpha = 0.14 * tex * hairA;
+    ctx.strokeStyle = shade(col, 0.1); ctx.stroke(hair[0]);
+    ctx.strokeStyle = shade(col, -0.18); ctx.stroke(hair[1]);
+  }
+  // тон по плоскости: краска легла неровно
+  const ga = r.range(0, TAU), gc = Math.cos(ga), gs = Math.sin(ga), b = bb(pts), mx = (b[0] + b[2]) / 2, my = (b[1] + b[3]) / 2, R = Math.hypot(b[2] - b[0], b[3] - b[1]) / 2;
+  const g = ctx.createLinearGradient((mx - gc * R) * px, (my - gs * R) * px, (mx + gc * R) * px, (my + gs * R) * px);
+  g.addColorStop(0, shade(col, 0.07)); g.addColorStop(1, shade(col, -0.09));
+  ctx.globalAlpha = (gou ? 0.45 : 0.3) * tex; ctx.fillStyle = g; ctx.fillRect(b[0] * px, b[1] * px, (b[2] - b[0]) * px, (b[3] - b[1]) * px);
+  ctx.globalAlpha = 1;
+}
+function paintShape(ctx, s, i, px) {
+  const flat = P.medium === 'плоско', r = rng('paint', i);
+  let pts = s.poly0;
+  // эскиз: брусок обведён целиком, а закрашен только кусок
+  if (!flat && P.sketch > 0 && s.k === 'rect' && s.w > s.h * 2.5 && s.role !== 'hero' && r.chance(P.sketch * 0.5)) {
+    pathOf(ctx, roughen(pts, P.wobble * 0.0006, i + 500), px);
+    ctx.strokeStyle = s.col; ctx.globalAlpha = 0.8; ctx.lineWidth = Math.max(0.7, 0.0008 * px); ctx.stroke(); ctx.globalAlpha = 1;
+    const t0 = r.chance(0.5) ? 0 : r.range(0.05, 0.3), t1 = r.chance(0.5) ? 1 : r.range(0.6, 0.92), u = s.w * ((t0 + t1) / 2 - 0.5);
+    pts = shapePoly({ ...s, x: s.x + Math.cos(s.a) * u, y: s.y + Math.sin(s.a) * u, w: s.w * (t1 - t0) });
+  }
+  const md = s.k === 'poly' ? 1 : s.k === 'circ' || s.k === 'disc' ? s.w : Math.min(s.w, s.h);
+  const q = roughen(pts, flat ? 0 : P.wobble * 0.0016 * clamp(md / 0.03, 0.2, 1), i * 13 + 1);
+  pathOf(ctx, q, px); ctx.fillStyle = s.col; ctx.fill();
+  if (!flat && P.texture > 0) {
+    ctx.save(); ctx.clip();
+    const lg = s.k === 'poly' || s.w >= s.h ? s.a : s.a + PI / 2;
+    brush(ctx, q, lg + (r.chance(0.15) ? r.range(-0.8, 0.8) : 0), s.col, px, r);
+    ctx.restore();
+  }
+}
+// карандашные построения под краской: продолженные края и пара диагоналей
+function pencil(ctx, G, px) {
+  const r = rng('pencil'), a = P.sketch, p = new Path2D();
+  for (const s of G.shapes) {
+    if (s.k === 'circ' || s.k === 'ell' || s.k === 'disc' || !r.chance(a * 0.6)) continue;
+    const pts = s.poly0;
+    for (let e = r.int(1, 2); e > 0; e--) {
+      const k = r.int(0, pts.length - 1), A = pts[k], B = pts[(k + 1) % pts.length], dx = B[0] - A[0], dy = B[1] - A[1], L = Math.hypot(dx, dy) || 1;
+      const e0 = r.range(0, 0.25) / L, e1 = r.range(0, 0.25) / L;
+      p.moveTo((A[0] - dx * e0) * px, (A[1] - dy * e0) * px); p.lineTo((B[0] + dx * e1) * px, (B[1] + dy * e1) * px);
+    }
+  }
+  for (let k = Math.round(r.range(0, 2.5) * a); k > 0; k--) { p.moveTo(r.range(0, G.W) * px, 0); p.lineTo(r.range(0, G.W) * px, G.H * px); }
+  ctx.strokeStyle = '#55524c'; ctx.globalAlpha = 0.15 + 0.25 * a; ctx.lineWidth = Math.max(0.5, 0.0005 * px); ctx.stroke(p); ctx.globalAlpha = 1;
+}
+function frame(ctx, G, px, p) {
+  const m = 0.035, pts = roughen([[m, m], [G.W - m, m], [G.W - m, G.H - m], [m, G.H - m]], P.medium === 'плоско' ? 0 : 0.0007, 99);
+  pathOf(ctx, pts, px);
+  ctx.strokeStyle = P.medium === 'гуашь' && p.cols.length ? p.cols[0][0] : p.ink;
+  ctx.globalAlpha = 0.7; ctx.lineWidth = Math.max(0.8, 0.0012 * px); ctx.stroke(); ctx.globalAlpha = 1;
+}
+// кракелюр: сетка из дрожащего решётчатого графа; светлее на тёмном (screen), темнее на светлом (multiply)
+function cracks(ctx, G, px) {
+  const amt = P.cracks; if (amt <= 0) return;
+  const r = rng('crack'), cs = 0.0105, nx = Math.ceil(G.W / cs) + 2, ny = Math.ceil(G.H / cs) + 2, s1 = r.int(1, 65535);
+  const pt = new Float32Array(nx * ny * 2);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const k = (j * nx + i) * 2; pt[k] = (i - 1 + r.range(0.08, 0.92)) * cs; pt[k + 1] = (j - 1 + r.range(0.08, 0.92)) * cs;
+  }
+  const ps = [new Path2D(), new Path2D(), new Path2D()];
+  const edge = (a, b) => {
+    const ax = pt[a * 2], ay = pt[a * 2 + 1], bx = pt[b * 2], by = pt[b * 2 + 1], mx = (ax + bx) / 2, my = (ay + by) / 2;
+    const v = amt * 1.8 - 0.75 + vnoise(mx * 3.2, my * 3.2, s1) * 0.7 + vnoise(mx * 12, my * 12, s1 + 1) * 0.3 - r() * 0.5;
+    if (v <= 0) return;
+    const p = ps[v > 0.9 ? 2 : v > 0.4 ? 1 : 0], dx = bx - ax, dy = by - ay, o1 = r.range(-0.15, 0.15), o2 = r.range(-0.15, 0.15);
+    p.moveTo(ax * px, ay * px);
+    p.lineTo((ax + dx / 3 - dy * o1) * px, (ay + dy / 3 + dx * o1) * px);
+    p.lineTo((ax + dx * 2 / 3 - dy * o2) * px, (ay + dy * 2 / 3 + dx * o2) * px);
+    p.lineTo(bx * px, by * px);
+  };
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const k = j * nx + i;
+    if (i < nx - 1) edge(k, k + 1);
+    if (j < ny - 1) edge(k, k + nx);
+    if (i < nx - 1 && j < ny - 1 && r.chance(0.3)) { if (r.chance(0.5)) edge(k, k + nx + 1); else edge(k + 1, k + nx); }
+  }
+  ctx.save(); ctx.lineWidth = Math.max(0.6, 0.0006 * px); ctx.lineJoin = 'round';
+  ps.forEach((p, k) => {
+    const a = [0.35, 0.6, 0.9][k];
+    ctx.globalCompositeOperation = 'screen'; ctx.strokeStyle = '#8c8a86'; ctx.globalAlpha = a * 0.55; ctx.stroke(p);
+    ctx.globalCompositeOperation = 'multiply'; ctx.strokeStyle = '#5f5a52'; ctx.globalAlpha = a * 0.3; ctx.stroke(p);
+  });
+  ctx.restore();
+}
+// попиксельно: переплетение холста, пятна, зерно, пожелтевший лак к краям
+function finish(cv) {
+  const W = cv.width, H = cv.height, ctx = cv.getContext('2d'), oil = P.medium === 'масло', tex = P.texture, age = P.age;
+  const img = ctx.getImageData(0, 0, W, H), d = img.data;
+  const pw = 0.0026 * W, wA = oil ? tex * clamp((pw - 2.2) / 2.5, 0, 1) : 0;
+  const tr = rng('weave'), nth = Math.ceil(Math.max(W, H) / pw) + 2, thr = Float32Array.from({ length: nth }, () => tr() * 2 - 1);
+  const sx = new Float32Array(W), tx = new Float32Array(W), sy = new Float32Array(H), ty = new Float32Array(H);
+  for (let x = 0; x < W; x++) { sx[x] = Math.sin(x / pw * TAU); tx[x] = thr[Math.floor(x / pw)]; }
+  for (let y = 0; y < H; y++) { sy[y] = Math.sin(y / pw * TAU + 1.3); ty[y] = thr[nth - 1 - Math.floor(y / pw)]; }
+  // пятна: шум на грубой сетке, дальше билинейно
+  const st = Math.max(4, Math.round(W / 180)), gw = Math.ceil(W / st) + 2, gh = Math.ceil(H / st) + 2, M = new Float32Array(gw * gh);
+  const s1 = hashStr(SEED + 'm') & 0xffff;
+  for (let j = 0; j < gh; j++) for (let i = 0; i < gw; i++) {
+    const x = i * st / W, y = j * st / W;
+    M[j * gw + i] = vnoise(x * 5, y * 5, s1) * 0.55 + vnoise(x * 17, y * 17, s1 + 1) * 0.3 + vnoise(x * 55, y * 55, s1 + 2) * 0.15;
+  }
+  const mA = 3 + 8 * age + (oil ? 2 : 7) * tex, gA = (oil ? 5 : 9) * (0.3 + tex), ew = 0.14 * W;
+  let g = hashStr(SEED + 'g') | 1;
+  for (let y = 0; y < H; y++) {
+    const fy = y / st, jy = fy | 0, vy = fy - jy, r0 = jy * gw, r1 = r0 + gw, ey = Math.min(y, H - 1 - y);
+    for (let x = 0; x < W; x++) {
+      const fx = x / st, ix = fx | 0, vx = fx - ix;
+      const m0 = M[r0 + ix] + (M[r0 + ix + 1] - M[r0 + ix]) * vx, m1 = M[r1 + ix] + (M[r1 + ix + 1] - M[r1 + ix]) * vx, m = m0 + (m1 - m0) * vy;
+      g ^= g << 13; g ^= g >>> 17; g ^= g << 5;
+      const i4 = (y * W + x) << 2, R = d[i4], Gc = d[i4 + 1], B = d[i4 + 2], L = (R * 0.3 + Gc * 0.59 + B * 0.11) / 255;
+      const k = wA * (sx[x] * sy[y] * 0.6 + (tx[x] + ty[y]) * 0.25) * (6 + 10 * L) + m * mA * (0.5 + 0.5 * L) + ((g >>> 0) / 4294967296 - 0.5) * gA;
+      const e = 1 - Math.min(Math.min(x, W - 1 - x), ey) / ew, yl = age * (0.35 + (e > 0 ? 0.65 * e * e : 0));
+      d[i4] = (R + k) * (1 - 0.04 * yl); d[i4 + 1] = (Gc + k) * (1 - 0.09 * yl); d[i4 + 2] = (B + k) * (1 - 0.22 * yl);
+    }
+  }
+  ctx.putImageData(img, 0, 0);
+}
+function render(cv, Wpx, G) {
+  const px = Wpx, p = pal(), flat = P.medium === 'плоско';
+  cv.width = Wpx; cv.height = Math.round(Wpx * G.H);
+  const ctx = cv.getContext('2d');
+  ctx.fillStyle = p.ground; ctx.fillRect(0, 0, cv.width, cv.height);
+  if (!flat) {
+    const r = rng('ground'), a = r.range(0, PI), full = [[0, 0], [G.W, 0], [G.W, G.H], [0, G.H]];
+    brush(ctx, full, a, p.ground, px, r, 2.4, 4, 0.25);
+    brush(ctx, full, a + PI / 2 + r.range(-0.3, 0.3), p.ground, px, r, 1.8, 5, 0);
+    if (P.sketch > 0) pencil(ctx, G, px);
+  }
+  G.shapes.forEach((s, i) => paintShape(ctx, s, i, px));
+  if (P.frame) frame(ctx, G, px, p);
+  if (P.medium === 'масло') cracks(ctx, G, px);
+  if (!flat) finish(cv);
+}
+
+// ---------- вывод ----------
+const cv = $('cv');
+let GEN = null;
+function exportSize(G) { const L = +P.export; return G.H > 1 ? [Math.round(L / G.H), L] : [L, Math.round(L * G.H)]; }
+function draw(q = 1) {
+  const t0 = performance.now();
+  GEN = generate();
+  const st = $('stage'), pad = st.clientWidth < 500 ? 12 : 32, dpr = devicePixelRatio || 1;
+  const cw = Math.max(50, Math.min(st.clientWidth - pad * 2, (st.clientHeight - pad * 2) / GEN.H));
+  cv.style.width = cw + 'px'; cv.style.height = cw * GEN.H + 'px';
+  render(cv, Math.round(Math.min(cw * dpr, 2400) * q), GEN);
+  const [ew, eh] = exportSize(GEN);
+  $('status').textContent = `${GEN.layout}${GEN.motif ? ' · ' + GEN.motif : ''} · ${GEN.shapes.length} фигур · ${Math.round(performance.now() - t0)} ms\n` +
+    `PNG ${ew}×${eh}`;
+  writeHash();
+}
+let raf = 0, wantQ = 1, idle = 0;
+function schedule(q = 1) {
+  wantQ = q; clearTimeout(idle);
+  if (!raf) raf = requestAnimationFrame(() => {
+    raf = 0; draw(wantQ);
+    if (wantQ < 1) idle = setTimeout(() => draw(1), 280);
+  });
+}
+
+// состояние в адресе: seed, раскраска и всё, что отличается от умолчаний
+function writeHash() {
+  const q = new URLSearchParams(); q.set('seed', SEED); if (CSEED) q.set('c', CSEED);
+  for (const it of SCHEMA) if (it.length > 1 && P[it[0]] !== it[it.length - 1]) q.set(it[0], P[it[0]]);
+  history.replaceState(null, '', '#' + q.toString());
+}
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (!q.has('seed')) return false;
+  SEED = q.get('seed'); CSEED = +(q.get('c') || 0); $('seed').value = SEED;
+  for (const it of SCHEMA) {
+    if (it.length === 1 || !q.has(it[0])) continue;
+    const v = q.get(it[0]), def = it[it.length - 1];
+    setP(it[0], typeof def === 'boolean' ? v === 'true' : typeof def === 'number' ? +v : v);
+  }
+  return true;
+}
+
+// ---------- ui ----------
+const inputs = {};
+const fmt = (v, step) => step >= 1 ? String(Math.round(v)) : (+v).toFixed(2);
+function touched(q = 1) { $('preset').value = ''; schedule(q); }
+function drawTile(c, p) {
+  const g = c.getContext('2d'), w = c.width, h = c.height, cols = p.cols.map(x => x[0]);
+  g.fillStyle = p.ground; g.fillRect(0, 0, w, h);
+  g.save(); g.translate(w * 0.46, h * 0.5); g.rotate(-0.42);
+  if (cols[1]) { g.fillStyle = cols[1]; g.fillRect(w * 0.04, -h * 0.5, w * 0.2, h * 0.3); }
+  g.fillStyle = p.ink; g.fillRect(-w * 0.3, -h * 0.26, w * 0.56, h * 0.36);
+  [cols[0], cols[2], cols[3]].forEach((c, k) => { if (!c) return; g.fillStyle = c; g.fillRect(-w * 0.2 + k * w * 0.05, h * 0.12 + k * h * 0.1, w * (0.5 - k * 0.08), h * 0.09); });
+  g.restore();
+  if (cols[4]) { g.fillStyle = cols[4]; g.fillRect(w * 0.08, h * 0.12, w * 0.07, w * 0.07); }
+}
+function markPal() { [...$('pals').children].forEach((d, k) => d.classList.toggle('on', PALS[k].name === P.pal)); }
+function buildUI() {
+  const root = $('controls');
+  for (const it of SCHEMA) {
+    if (it.length === 1) { const h = document.createElement('h2'); h.textContent = it[0]; root.appendChild(h); continue; }
+    const [key, label, a, b, step] = it;
+    if (a === 'pal') {
+      const box = document.createElement('div'); box.className = 'pals'; box.id = 'pals';
+      for (const p of PALS) {
+        const d = document.createElement('div'); d.className = 'pal'; d.title = p.name;
+        const c = document.createElement('canvas'); c.width = 90; c.height = 40; drawTile(c, p);
+        const s = document.createElement('span'); s.textContent = p.name;
+        d.append(c, s); d.onclick = () => { P.pal = p.name; markPal(); touched(); };
+        box.appendChild(d);
+      }
+      root.appendChild(box); inputs[key] = { set: markPal };
+      continue;
+    }
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = label; row.appendChild(lab);
+    if (a === 'sel') {
+      const sel = document.createElement('select');
+      for (const o of b) sel.add(new Option(o, o));
+      sel.value = P[key];
+      sel.onchange = () => { P[key] = sel.value; key === 'export' ? schedule() : touched(); };
+      row.append(sel, document.createElement('span'));
+      inputs[key] = { set: v => { sel.value = v; } };
+    } else if (a === 'chk') {
+      const ch = document.createElement('input'); ch.type = 'checkbox'; ch.checked = P[key];
+      ch.onchange = () => { P[key] = ch.checked; touched(); };
+      row.append(ch, document.createElement('span'));
+      inputs[key] = { set: v => { ch.checked = v; } };
+    } else {
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = a; inp.max = b; inp.step = step; inp.value = P[key];
+      const out = document.createElement('output'); out.textContent = fmt(P[key], step);
+      inp.oninput = () => { P[key] = +inp.value; out.textContent = fmt(P[key], step); touched(0.5); };
+      inp.onchange = () => schedule(1);
+      row.append(inp, out);
+      inputs[key] = { set: v => { inp.value = v; out.textContent = fmt(v, step); } };
+    }
+    root.appendChild(row);
+  }
+  $('seed').value = SEED;
+  $('seed').onchange = () => { SEED = $('seed').value.trim() || '0'; CSEED = 0; schedule(); };
+  const pr = $('preset');
+  pr.add(new Option('—', ''));
+  for (const k of Object.keys(PRESETS)) pr.add(new Option(k, k));
+  pr.onchange = () => { if (pr.value) applyPreset(pr.value); };
+}
+function setP(key, v) { P[key] = v; inputs[key]?.set(v); }
+function applyPreset(name) {
+  const keep = P.export;
+  for (const it of SCHEMA) if (it.length > 1) setP(it[0], it[it.length - 1]);
+  setP('export', keep);
+  const s = PRESETS[name]; for (const k in s) setP(k, s[k]);
+  schedule();
+}
+
+function newSeed() { SEED = Math.random().toString(36).slice(2, 8); CSEED = 0; $('seed').value = SEED; schedule(); }
+function recolor() { CSEED++; schedule(); }
+function nextPal() { const k = PALS.findIndex(p => p.name === P.pal); setP('pal', PALS[(k + 1) % PALS.length].name); touched(); }
+function randomStyle() {
+  const r = Rng(String(Math.random())), f = (a, b) => +r.range(a, b).toFixed(2);
+  setP('layout', r.pickW({ 'смесь': 1, 'кластер': 2, 'полёт': 2.5, 'конструкция': 1.2, 'минимум': 1, 'архитектоника': 0.8 }));
+  setP('aspect', r.pickW({ '1:1': 2, '4:5': 1, '3:4': 2, '2:3': 1.5, '3:5': 1, '1:2': 0.7, '4:3': 0.5 }));
+  setP('scale', f(0.75, 1.1)); setP('clusters', r.int(2, 5)); setP('density', f(0.2, 0.85)); setP('bleed', r.chance(0.5) ? 0 : f(0, 0.6));
+  setP('tilt', r.int(8, 60)); setP('tiltVar', f(0.1, 0.8)); setP('cross', f(0, 0.8)); setP('ortho', r.chance(0.5) ? 0 : f(0, 0.4));
+  for (const k of ['wBars', 'wLines', 'wFlock', 'wCircles', 'wWedges']) setP(k, r.chance(0.15) ? 0 : f(0.1, 1));
+  setP('pal', P.layout === 'архитектоника' && r.chance(0.6) ? 'Попова' : r.pick(PALS).name); setP('color', f(0.25, 0.8));
+  setP('medium', r.pickW({ 'масло': 5, 'гуашь': 2, 'плоско': 1 }));
+  setP('texture', f(0.25, 0.8)); setP('wobble', f(0.2, 0.8));
+  setP('cracks', P.medium === 'масло' && r.chance(0.7) ? f(0.1, 0.7) : 0);
+  setP('age', f(0, 0.6)); setP('sketch', P.medium === 'гуашь' ? f(0.2, 0.9) : 0); setP('frame', P.medium === 'гуашь' && r.chance(0.4));
+  $('preset').value = '';
+  newSeed();
+}
+function savePng() {
+  $('status').textContent = 'рендер PNG…';
+  setTimeout(() => {
+    const off = document.createElement('canvas');
+    render(off, exportSize(GEN)[0], GEN);
+    off.toBlob(b => {
+      if (!b) { $('status').textContent = 'не вышло: слишком большой холст для браузера'; return; }
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = `suprematism-${SEED}${CSEED ? '-' + CSEED : ''}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+      $('status').textContent = `сохранено ${off.width}×${off.height}`;
+    });
+  }, 30);
+}
+$('bNew').onclick = newSeed;
+$('bStyle').onclick = randomStyle;
+$('bColor').onclick = recolor;
+$('bSave').onclick = savePng;
+cv.onclick = newSeed;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n' || k === 'т') newSeed();
+  else if (k === 'm' || k === 'ь') randomStyle();
+  else if (k === 'c' || k === 'с') recolor();
+  else if (k === 'p' || k === 'з') nextPal();
+  else if (k === 's' || k === 'ы') savePng();
+});
+let rsT = 0;
+new ResizeObserver(() => { clearTimeout(rsT); rsT = setTimeout(() => schedule(), 150); }).observe($('stage'));
+
+buildUI();
+if (!readHash()) $('preset').value = 'смесь';
+markPal();
+schedule();
+</script>
+</body>
+</html>
