@@ -1,0 +1,1647 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Town</title>
+<style>
+  :root { --bg:#111; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#e0c27a; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center; overflow:hidden;
+    background: radial-gradient(ellipse at 50% 42%, #262626, #121212 72%); }
+  #cv { display:block; image-rendering: pixelated; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #panel { width:290px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 104px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  .row input[type=checkbox] { justify-self:start; accent-color:var(--acc); margin:0; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 40%; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Town</h1>
+  <div class="btns">
+    <button id="bNew" title="N">новый город</button>
+    <button id="bStyle" title="M">случайные параметры</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>seed</label><input type="text" id="seed"><span></span></div>
+  <div class="row"><label>пресет</label><select id="scene"></select><span></span></div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Однобитная пиксельная карта средневекового города. Порядок постройки: реки, море и пруды → замок со рвом →
+    сеть улиц по выбранной планировке (мосты там, где улица пересекает узкую воду) → площадь → городская стена
+    с воротами на дорогах → рынок, храмы → дома вдоль улиц и внутри кварталов → хутора, мельницы, поля, огороды →
+    пристани и лодки → лес по шумовому полю → жители и скот.<br><br>
+    Все объекты рисуются в косой проекции и сортируются по основанию, так что ближние перекрывают дальние.<br><br>
+    Состояние хранится в адресе — ссылку можно сохранить.<br><br>
+    N — новый · M — случайные параметры · S — PNG ≈2400px
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const mix = (a, b, t) => a + (b - a) * t;
+const smooth = (a, b, x) => { x = clamp((x - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); };
+const TAU = Math.PI * 2;
+
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+function Rng(key) {
+  const r = mulberry(hashStr(key));
+  r.range = (a, b) => a + (b - a) * r();
+  r.int = (a, b) => a + Math.floor(r() * (b - a + 1));
+  r.pick = a => a[Math.floor(r() * a.length)];
+  r.chance = p => r() < p;
+  r.sgn = () => r() < 0.5 ? -1 : 1;
+  return r;
+}
+let SEED = Math.random().toString(36).slice(2, 8);
+// у каждой подсистемы свой поток случайности
+const rng = (...k) => Rng(SEED + '/' + k.join('/'));
+const sd = k => hashStr(SEED + '#' + k) & 0xffffff;
+
+// ---------- noise ----------
+function h2(x, y, s) {
+  let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(s | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b); h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function n2(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return mix(mix(h2(xi, yi, s), h2(xi + 1, yi, s), u), mix(h2(xi, yi + 1, s), h2(xi + 1, yi + 1, s), u), v);
+}
+function fbm2(x, y, s, oct = 4) {
+  let v = 0, a = 0.5, n = 0;
+  for (let k = 0; k < oct; k++) { v += a * n2(x, y, s + k * 131); n += a; x *= 2.03; y *= 2.03; a *= 0.5; }
+  return v / n;
+}
+function fbm1(x, s) {
+  let v = 0, a = 0.5, f = 1;
+  for (let k = 0; k < 3; k++) { v += a * (n2(x * f, 0.5 + k * 7.3, s) * 2 - 1); f *= 2.1; a *= 0.5; }
+  return v / 0.875;
+}
+
+// ---------- растр: 0 — пусто, 1 — бумага, 2 — тушь ----------
+const PAPER = 1, INK = 2;
+let T = null;
+function px(x, y, v) { x = Math.floor(x); y = Math.floor(y); if (x >= 0 && y >= 0 && x < T.w && y < T.h) T.d[y * T.w + x] = v; }
+const V = (v, x, y) => typeof v === 'function' ? v(x, y) : v;
+function put(x, y, v) { const c = V(v, x, y); if (c) px(x, y, c); }
+function rect(x, y, w, h, v) { for (let j = 0; j < h; j++) for (let i = 0; i < w; i++) put(x + i, y + j, v); }
+function hl(x0, x1, y, v = INK) { for (let x = x0; x <= x1; x++) put(x, y, v); }
+function vl(x, y0, y1, v = INK) { for (let y = y0; y <= y1; y++) put(x, y, v); }
+function box(x, y, w, h, fill, edge = INK) {
+  rect(x, y, w, h, fill); hl(x, x + w - 1, y, edge); hl(x, x + w - 1, y + h - 1, edge); vl(x, y, y + h - 1, edge); vl(x + w - 1, y, y + h - 1, edge);
+}
+function line(x0, y0, x1, y1, v = INK) {
+  x0 = Math.round(x0); y0 = Math.round(y0); x1 = Math.round(x1); y1 = Math.round(y1);
+  const dx = Math.abs(x1 - x0), dy = -Math.abs(y1 - y0), sx = x0 < x1 ? 1 : -1, sy = y0 < y1 ? 1 : -1; let e = dx + dy;
+  for (;;) {
+    put(x0, y0, v); if (x0 === x1 && y0 === y1) break;
+    const e2 = 2 * e; if (e2 >= dy) { e += dy; x0 += sx; } if (e2 <= dx) { e += dx; y0 += sy; }
+  }
+}
+// фигура по предикату: заливка + контур по краю
+function shape(x0, y0, x1, y1, inside, fill, edge = INK) {
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    if (!inside(x, y)) continue;
+    const e = !inside(x - 1, y) || !inside(x + 1, y) || !inside(x, y - 1) || !inside(x, y + 1);
+    put(x, y, e && edge ? edge : fill);
+  }
+}
+const inEll = (cx, cy, rx, ry) => (x, y) => ((x + 0.5 - cx) / rx) ** 2 + ((y + 0.5 - cy) / ry) ** 2 <= 1;
+function ell(cx, cy, rx, ry, fill, edge = INK) {
+  shape(Math.floor(cx - rx) - 1, Math.floor(cy - ry) - 1, Math.ceil(cx + rx) + 1, Math.ceil(cy + ry) + 1, inEll(cx, cy, rx, ry), fill, edge);
+}
+function sprite(w, h, fn) { const s = { w, h, d: new Uint8Array(w * h) }, p = T; T = s; fn(s); T = p; return s; }
+function strSprite(rows) {
+  const h = rows.length, w = Math.max(...rows.map(s => s.length));
+  return sprite(w, h, () => rows.forEach((row, y) => [...row].forEach((c, x) => { if (c === '#') px(x, y, INK); else if (c === '.') px(x, y, PAPER); })));
+}
+// halo — бумажная обводка вокруг туши, отделяет объект от фона
+function blit(s, x, y, flip = false, halo = false) {
+  x = Math.round(x); y = Math.round(y);
+  const at = (i, j) => (i < 0 || j < 0 || i >= s.w || j >= s.h) ? 0 : s.d[j * s.w + i];
+  const X = i => x + (flip ? s.w - 1 - i : i);
+  if (halo) for (let j = -1; j <= s.h; j++) for (let i = -1; i <= s.w; i++) {
+    if (at(i, j)) continue;
+    let n = 0;
+    for (let b = -1; b <= 1 && !n; b++) for (let a = -1; a <= 1; a++) if (at(i + a, j + b) === INK) { n = 1; break; }
+    if (n) px(X(i), y + j, PAPER);
+  }
+  for (let j = 0; j < s.h; j++) for (let i = 0; i < s.w; i++) { const v = s.d[j * s.w + i]; if (v) px(X(i), y + j, v); }
+}
+const BAY = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5];
+const dith = (x, y, t) => BAY[((y & 3) << 2) | (x & 3)] < t * 16;
+const dv = t => (x, y) => dith(x, y, t) ? INK : PAPER;
+
+// ---------- фактуры ----------
+const ROOF = {
+  tile: (x, y) => (y % 3 === 1 && (x + ((y / 3) | 0) * 2) % 4 === 0) ? PAPER : INK,
+  slate: (x, y) => y % 2 === 0 ? INK : ((x * 3 + y) % 7 === 0 ? INK : PAPER),
+  thatch: (x, y) => (x % 2 === 0 && (y + (x >> 1) * 3) % 5 !== 0) ? INK : PAPER,
+};
+const WALL = {
+  plain: PAPER,
+  stone: (x, y) => h2(x, y, 91) < 0.07 ? INK : PAPER,
+  brick: (x, y) => (y % 3 === 2 && (x + (((y / 3) | 0) & 1) * 2) % 4 === 0) ? INK : PAPER,
+};
+const FP = {
+  rows: (x, y) => y % 3 === 0 ? INK : PAPER,
+  cols: (x, y) => x % 3 === 0 ? INK : PAPER,
+  cabbage: (x, y) => { const a = x % 4, b = y % 4; return (a === 1 && b !== 3) || (b === 1 && a !== 3) ? (a === 1 && b === 1 ? PAPER : INK) : PAPER; },
+  wheat: (x, y) => ((x + y) % 4 === 0 && y % 2 === 0) ? INK : PAPER,
+  vine: (x, y) => x % 4 === 0 ? (y % 3 !== 2 ? INK : PAPER) : (x % 4 === 1 && y % 3 === 0 ? INK : PAPER),
+  plowed: (x, y) => y % 2 === 0 ? INK : PAPER,
+  meadow: (x, y) => h2(x, y, 17) < 0.05 ? INK : PAPER,
+  orchard: (x, y) => { const a = x % 7, b = y % 6; return ((a === 2 || a === 4) && b >= 1 && b <= 3) || (a === 3 && (b === 0 || b === 4)) ? INK : PAPER; },
+};
+
+// ---------- спрайты: здания ----------
+function houseA(r, o = {}) {           // фронтон + скат вбок
+  const fw = o.fw ?? r.pick([7, 9, 9, 11, 11, 13]);
+  const sw = o.sw ?? (r.chance(0.2) ? 0 : r.int(3, 8));
+  const hw = o.hw ?? r.int(5, 8);
+  const gh = ((fw + 1) >> 1) + r.int(0, 2);
+  const roof = o.roof ?? r.pick(['tile', 'tile', 'tile', 'slate', 'slate', 'thatch']);
+  const wall = r.pick(['plain', 'plain', 'plain', 'stone', 'brick']);
+  const timber = r.chance(0.3), tall = hw >= 9, chim = sw >= 3 && r.chance(0.6), gd = r.int(0, 3);
+  const top = chim ? 3 : 0, w = fw + 2 + sw, h = top + gh + hw + 1;
+  let cp = null;
+  const s = sprite(w, h, () => {
+    const base = h - 1, eave = base - hw, apex = eave - gh, xL = 1, xR = fw, cx = (fw + 1) >> 1;
+    if (sw) box(xR, eave, sw + 1, hw + 1, WALL[wall]);
+    box(xL, eave, fw, hw + 1, WALL[wall]);
+    if (timber) {
+      hl(xL, xR + sw, eave + (hw >> 1), INK);
+      for (let x = xR + 3; x < xR + sw; x += 3) vl(x, eave, base, INK);
+      if (fw >= 9) { line(xL, eave + (hw >> 1), xL + 3, eave, INK); line(xR, eave + (hw >> 1), xR - 3, eave, INK); }
+    }
+    for (let y = apex; y <= eave; y++) {
+      const k = Math.round((y - apex) / gh * ((fw + 1) / 2));
+      hl(cx - k, cx + k, y, PAPER); px(cx - k, y, INK); px(cx + k, y, INK);
+      if (sw) { hl(cx + k + 1, cx + k + sw, y, ROOF[roof]); px(cx + k + sw, y, INK); }
+    }
+    if (sw) hl(cx, cx + sw, apex, INK);
+    hl(0, w - 1, eave, INK);
+    if (gh >= 5 && gd === 0) rect(cx, apex + gh - 3, 1, 2, INK);
+    else if (gh >= 4 && gd === 1) px(cx, apex + gh - 2, INK);
+    else if (gd === 2 && timber) vl(cx, apex + 2, eave - 1, INK);
+    const dw = fw >= 9 ? 3 : 2, dh = Math.min(hw - 1, 4);
+    const dx = r.chance(0.65) ? cx - (dw >> 1) : r.chance(0.5) ? xL + 1 : xR - dw;
+    rect(dx, base - dh, dw, dh, INK);
+    if (dw === 3 && r.chance(0.5)) { px(dx, base - dh, PAPER); px(dx + 2, base - dh, PAPER); }
+    const rows = tall ? [eave + 2, eave + 6] : hw >= 5 ? [eave + 2] : [];
+    for (const wy of rows) for (const wx of fw >= 9 ? [xL + 2, xR - 3] : [xL + 1, xR - 2]) {
+      const hitsDoor = wy + 2 >= base - dh && wx + 1 >= dx - 1 && wx <= dx + dw;
+      if (!hitsDoor) rect(wx, wy, 2, 2, INK);
+    }
+    if (sw >= 4) for (let wx = xR + 2; wx + 1 < xR + sw; wx += 4) for (const wy of rows) rect(wx, wy, 2, 2, INK);
+    if (chim) { const chx = cx + 2 + r.int(0, Math.max(0, sw - 4)); box(chx, apex - 3, 3, 4, PAPER); cp = { x: chx + 1, y: apex - 4 }; }
+  });
+  return { s, chim: cp };
+}
+function houseC(r, o = {}) {           // длинный дом под вальмовой крышей
+  const L = o.L ?? r.int(12, 22), hw = o.hw ?? r.int(4, 7), rh = o.rh ?? r.int(4, 8);
+  const roof = o.roof ?? r.pick(['tile', 'tile', 'slate', 'thatch', 'thatch']);
+  const wall = r.pick(['plain', 'plain', 'stone', 'brick']);
+  const slope = r.range(0.5, 1), chim = !o.barn && r.chance(0.45);
+  const top = chim ? 3 : 0, w = L, h = top + rh + hw + 1;
+  let cp = null;
+  const s = sprite(w, h, () => {
+    const base = h - 1, eave = base - hw, rt = eave - rh;
+    box(1, eave, w - 2, hw + 1, WALL[wall]);
+    if (!o.barn && r.chance(0.3)) { hl(1, w - 2, eave + (hw >> 1), INK); for (let x = 4; x < w - 3; x += 4) vl(x, eave, base, INK); }
+    let kTop = 0;
+    for (let y = rt; y <= eave; y++) {
+      const k = Math.min(Math.round((eave - y) * slope), (w >> 1) - 2);
+      if (y === rt) kTop = k;
+      hl(k, w - 1 - k, y, ROOF[roof]); px(k, y, INK); px(w - 1 - k, y, INK);
+      if (y === rt) hl(k, w - 1 - k, y, INK);
+    }
+    hl(0, w - 1, eave, INK);
+    if (!o.barn && rh >= 6 && w >= 14 && r.chance(0.45)) {        // слуховое окно
+      const dx = r.int(kTop + 3, w - kTop - 4);
+      for (let y = eave - 5; y < eave; y++) { const k = (y - (eave - 5) + 1) >> 1; hl(dx - k, dx + k, y, PAPER); px(dx - k, y, INK); px(dx + k, y, INK); }
+      px(dx, eave - 2, INK);
+    }
+    if (o.barn) {
+      const bw = Math.min(5, w - 6), bx = (w - bw) >> 1;
+      rect(bx, base - hw + 2, bw, hw - 2, INK); vl(bx + (bw >> 1), base - hw + 3, base - 1, PAPER);
+    } else {
+      const dh = Math.min(hw - 1, 4), dx = r.int(2, w - 5);
+      rect(dx, base - dh, 2, dh, INK);
+      if (hw >= 5) for (let x = 3; x < w - 4; x += 4) if (x + 2 < dx || x > dx + 2) rect(x, eave + 2, 2, 2, INK);
+    }
+    const lo = kTop + 1, hi = w - kTop - 4;
+    if (chim && hi >= lo) { const chx = r.int(lo, hi); box(chx, rt - 3, 3, 4, PAPER); cp = { x: chx + 1, y: rt - 4 }; }
+  });
+  return { s, chim: cp };
+}
+function flagAt(x, yb, len) {
+  vl(x, yb - len + 1, yb, INK); const y0 = yb - len + 1;
+  hl(x + 1, x + 3, y0, INK); hl(x + 1, x + 2, y0 + 1, INK); px(x + 1, y0 + 2, INK);
+}
+function towerSprite(r, w, bh, roof, flag, wall = WALL.stone) {
+  const cw = w + 2, ch = roof === 'cone' ? Math.round(w * 0.9) + 2 : 3, fh = flag ? 7 : 0, h = fh + ch + bh + 1;
+  return sprite(cw, h, () => {
+    const cx = cw >> 1, base = h - 1, top = base - bh;
+    box(1, top, w, bh + 1, wall);
+    for (let y = top + 1; y < base; y++) { if (dith(w - 1, y, 0.5)) px(w - 1, y, INK); if (w > 6 && dith(w - 2, y, 0.25)) px(w - 2, y, INK); }
+    for (let y = top + 4; y < base - 3; y += 7) vl(cx, y, y + 2, INK);
+    if (roof === 'cone') {
+      const ct = top - ch + 1;
+      for (let y = ct; y <= top; y++) {
+        const k = Math.round((y - ct) / (ch - 1) * (cw - 1) / 2);
+        hl(cx - k, cx + k, y, ROOF.tile); px(cx - k, y, INK); px(cx + k, y, INK);
+      }
+      hl(0, cw - 1, top, INK);
+      if (flag) flagAt(cx, ct - 1, fh);
+    } else {
+      box(0, top - 2, cw, 4, PAPER);
+      for (let x = 1; x < cw - 1; x += 2) px(x, top, INK);
+      for (let x = 0; x < cw; x += 2) px(x, top - 3, INK);
+      if (flag) flagAt(cx, top - 4, fh);
+    }
+  });
+}
+function church(r) {
+  const tw = r.pick([7, 9, 9, 11]), naveL = r.int(18, 28), nhw = r.int(7, 9), nrh = r.int(6, 9);
+  const tH = nhw + nrh + r.int(7, 12), sh = r.int(8, 14);
+  const w = tw + 2 + naveL, h = 4 + sh + tH + 1;
+  return sprite(w, h, () => {
+    const base = h - 1, tt = base - tH, cxT = (tw + 1) >> 1, nx0 = tw, eave = base - nhw, rt = eave - nrh;
+    box(nx0, eave, w - nx0 - 1, nhw + 1, WALL.stone);
+    for (let y = rt; y <= eave; y++) {
+      const k = Math.round((eave - y) * 0.7);
+      hl(nx0, w - 1 - k, y, ROOF.slate); px(w - 1 - k, y, INK); if (y === rt) hl(nx0, w - 1 - k, y, INK);
+    }
+    hl(nx0, w - 1, eave, INK);
+    for (let x = nx0 + 3; x + 3 < w - 1; x += 5) {
+      rect(x, eave + 2, 3, 4, INK); px(x, eave + 2, PAPER); px(x + 2, eave + 2, PAPER);
+      if (x + 4 < w - 2) vl(x + 4, eave + 1, base, INK);
+    }
+    box(1, tt, tw, tH + 1, WALL.stone);
+    rect(cxT - 1, tt + 2, 3, 4, INK); px(cxT - 1, tt + 2, PAPER); px(cxT + 1, tt + 2, PAPER);
+    ell(cxT + 0.5, tt + 10.5, 2.6, 2.6, PAPER); px(cxT, tt + 10, INK); px(cxT, tt + 9, INK); px(cxT + 1, tt + 10, INK);
+    if (tt + 15 < base - 7) vl(cxT, tt + 15, tt + 17, INK);
+    rect(cxT - 1, base - 5, 3, 5, INK); px(cxT - 1, base - 5, PAPER); px(cxT + 1, base - 5, PAPER);
+    const st = tt - sh;
+    for (let y = st; y <= tt; y++) {
+      const k = Math.round((y - st) / sh * ((tw + 1) / 2));
+      hl(cxT - k, cxT + k, y, ROOF.slate); px(cxT - k, y, INK); px(cxT + k, y, INK);
+    }
+    hl(0, tw + 1, tt, INK);
+    vl(cxT, st - 4, st, INK); hl(cxT - 1, cxT + 1, st - 3, INK);
+  });
+}
+function keepSprite(r, kw, kh, cs) {
+  const tu = Math.max(5, Math.round(7 * cs) | 1), tur = towerSprite(r, tu, kh + Math.round(5 * cs), 'cone', true);
+  const w = kw + 4, h = Math.max(tur.h, kh + 12) + 1;
+  return sprite(w, h, () => {
+    const base = h - 1, top = base - kh, cx = w >> 1;
+    box(2, top, kw, kh + 1, WALL.brick);
+    box(1, top - 2, kw + 2, 4, PAPER);
+    for (let x = 2; x < kw + 2; x += 2) px(x, top, INK);
+    for (let x = 1; x < kw + 3; x += 2) px(x, top - 3, INK);
+    for (let y = top + 5; y < base - 4; y += 7) for (let x = tu + 3; x < kw - tu; x += 5) rect(x, y, 2, 3, INK);
+    flagAt(cx, top - 4, 8);
+    blit(tur, 0, base - tur.h + 1); blit(tur, w - tur.w, base - tur.h + 1, true);
+  });
+}
+function wallBand(x0, x1, base, wh) {
+  box(x0, base - wh, x1 - x0 + 1, wh + 1, WALL.brick);
+  for (let x = x0; x <= x1; x++) {
+    if (((x - x0) >> 1) % 2 === 0) { px(x, base - wh - 1, INK); px(x, base - wh - 2, INK); }
+    if (x % 2 === 0) px(x, base - wh + 2, INK);
+  }
+}
+function buildCastle(r, cs) {
+  const odd = v => Math.max(3, Math.round(v) | 1);
+  const cw = Math.round(92 * cs), cd = Math.round(34 * cs), wh = Math.max(7, Math.round(12 * cs));
+  const tw = odd(13 * cs), th = Math.round(26 * cs), kw = odd(40 * cs), kh = Math.round(30 * cs), gw = odd(7 * cs);
+  const roof = r.chance(0.5) ? 'cone' : 'crenel';
+  const tB = towerSprite(r, tw, th + Math.round(4 * cs), roof, true), tF = towerSprite(r, tw, th, roof, r.chance(0.6));
+  const keep = keepSprite(r, kw, kh, cs), gt = towerSprite(r, odd(5 * cs), wh + Math.round(5 * cs), 'crenel', false);
+  const yb = -cd, yk = yb + Math.round(cd * 0.45);
+  const topRel = Math.min(yb + 3 - tB.h, yk - keep.h + 1, 2 - tF.h, -wh - 3);
+  const w = cw + tB.w + 2, F = -topRel, h = F + 2;
+  let L = 0, R = 0;
+  const s = sprite(w, h, () => {
+    L = 1 + (tB.w >> 1); R = w - 2 - (tB.w >> 1);
+    const Yb = F + yb, Yk = F + yk, gx = (L + R) >> 1;
+    rect(L, Yb - wh, R - L + 1, F - Yb + wh + 1, (x, y) => h2(x, y, 3) < 0.06 ? INK : PAPER);
+    wallBand(L, R, Yb, wh);
+    blit(keep, gx - (keep.w >> 1), Yk - keep.h + 1);
+    blit(tB, L - (tB.w >> 1), Yb + 3 - tB.h); blit(tB, R - (tB.w >> 1), Yb + 3 - tB.h, true);
+    for (const x of [L, R]) {
+      box(x - 2, Yb, 5, F - wh - Yb + 1, PAPER);
+      for (let y = Yb + 1; y < F - wh; y += 2) { px(x - 3, y, INK); px(x + 3, y, INK); }
+    }
+    wallBand(L, R, F, wh);
+    const gh = Math.max(5, Math.round(wh * 0.8)), g0 = gx - (gw >> 1);
+    rect(g0, F - gh + 1, gw, gh, INK); px(g0, F - gh + 1, PAPER); px(g0 + gw - 1, F - gh + 1, PAPER);
+    for (let y = F - gh + 2; y < F - (gh >> 1); y++) for (let x = g0 + 1; x < g0 + gw - 1; x++)
+      if ((x - g0) % 2 === 0 || (F - y) % 3 === 0) px(x, y, PAPER);
+    blit(gt, g0 - gt.w + 1, F - gt.h + 1); blit(gt, g0 + gw - 1, F - gt.h + 1, true);
+    blit(tF, L - (tF.w >> 1), F + 2 - tF.h); blit(tF, R - (tF.w >> 1), F + 2 - tF.h, true);
+  });
+  return { s, F, gx0: L - (tB.w >> 1), gx1: R + (tB.w >> 1), gyb: F + yb, gw };
+}
+
+// ---------- спрайты: природа ----------
+function conifer(r) {
+  const h = r.int(9, 16), hw = Math.max(3, Math.round(h * r.range(0.26, 0.34))), tiers = r.int(2, 4);
+  const w = hw * 2 + 1;
+  return sprite(w, h + 2, () => {
+    const cx = hw;
+    for (let y = 0; y < h; y++) {
+      const t = y / (h - 1), ti = Math.min(tiers - 1, Math.floor(t * tiers)), loc = t * tiers - ti;
+      const k = y === 0 ? 0 : Math.round(hw * (0.15 + 0.85 * (ti + 0.3 + 0.7 * loc) / tiers));
+      for (let x = cx - k; x <= cx + k; x++) px(x, y, (x < cx && x > cx - k && (x + y * 2) % 4 === 0) ? PAPER : INK);
+    }
+    vl(cx, h, h + 1, INK);
+  });
+}
+function roundTree(r, dark = false, Rr) {
+  const R = Rr ?? r.int(4, 7), trunk = r.int(2, 3), w = 2 * R + 3, h = 2 * R + trunk + 2;
+  const cx = R + 1.5, cy = R + 1.5, lob = r.int(5, 8), ph = r.range(0, TAU), rs = r.int(0, 1e6);
+  const inside = (x, y) => {
+    const dx = x + 0.5 - cx, dy = y + 0.5 - cy;
+    return Math.hypot(dx, dy) <= R * (0.87 + 0.13 * Math.sin(Math.atan2(dy, dx) * lob + ph));
+  };
+  return sprite(w, h, () => {
+    const tx = Math.floor(cx);
+    vl(tx, Math.floor(cy + R * 0.5), h - 1, INK); if (R >= 6) vl(tx + 1, Math.floor(cy + R * 0.7), h - 1, INK);
+    px(tx - 1, h - 1, INK); px(tx + (R >= 6 ? 2 : 1), h - 1, INK);
+    shape(0, 0, w - 1, Math.ceil(cy + R), inside, (x, y) => {
+      const dx = x + 0.5 - cx, dy = y + 0.5 - cy, sh = (dx * 0.6 + dy) / R;
+      if (dark) return (sh < 0 && (x + y * 2) % 4 === 0) || (sh < -0.4 && (x + y) % 2 === 0) ? PAPER : INK;
+      return sh > 0.35 && Math.hypot(dx, dy) > R * 0.72 ? INK : PAPER;     // тень — толстый край справа снизу
+    });
+    if (!dark) for (let k = 0; k < R; k++) {       // листва дужками
+      const x = Math.floor(cx + r.range(-R * 0.7, R * 0.6)), y = Math.floor(cy + r.range(-R * 0.7, R * 0.4));
+      if (inside(x - 1, y) && inside(x + 1, y) && inside(x, y + 1)) { px(x - 1, y, INK); px(x, y + 1, INK); px(x + 1, y, INK); }
+    }
+  });
+}
+function willow(r) {
+  const R = r.int(6, 8), w = 2 * R + 3, h = 2 * R + 4, cx = R + 1.5, cy = R + 1;
+  const fr = []; for (let x = 0; x < w; x++) fr.push(r.int(0, 3));
+  const inside = (x, y) => x >= 0 && x < w && ((x + 0.5 - cx) / R) ** 2 + ((y + 0.5 - cy) / (R * 0.85)) ** 2 <= 1 || (x >= 0 && x < w && y >= cy && y <= cy + R * 0.55 + fr[x] && Math.abs(x + 0.5 - cx) < R - 0.5);
+  return sprite(w, h, () => {
+    vl(Math.floor(cx), Math.floor(cy), h - 1, INK); vl(Math.floor(cx) + 1, Math.floor(cy + R * 0.6), h - 1, INK);
+    shape(0, 0, w - 1, Math.ceil(cy + R * 0.55 + 3), inside, (x, y) => y > cy - R * 0.3 ? (x % 2 === 0 ? INK : PAPER) : (h2(x, y, 4) < 0.25 ? INK : PAPER));
+  });
+}
+function cypress(r) {
+  const h = r.int(11, 17), rw = r.pick([2, 3]), w = 2 * rw + 3;
+  return sprite(w, h + 2, () => {
+    const cx = rw + 1.5;
+    shape(0, 0, w - 1, h, inEll(cx, h / 2 + 0.5, rw + 0.6, h / 2), (x, y) => (x < cx - 1 && (x + y) % 3 === 0) ? PAPER : INK);
+    vl(Math.floor(cx), h, h + 1, INK);
+  });
+}
+function bush(r) {
+  const R = r.int(2, 3), dark = r.chance(0.5), w = 2 * R + 3, h = 2 * R + 2;
+  return sprite(w, h, () => shape(0, 0, w - 1, h - 1, inEll(R + 1.5, R + 1, R + 0.6, R * 0.85 + 0.3), dark ? (x, y) => h2(x, y, 9) < 0.2 ? PAPER : INK : (x, y) => h2(x, y, 9) < 0.2 ? INK : PAPER));
+}
+function rock(r) {
+  const w = r.int(3, 6), h = r.int(2, 4);
+  return sprite(w + 1, h + 1, () => { shape(0, 0, w, h, inEll((w + 1) / 2, (h + 1) / 2, (w + 1) / 2, (h + 1) / 2), PAPER); px(w - 1, h - 1, INK); });
+}
+const TREES = {
+  conifer, willow, cypress, bush,
+  round: r => roundTree(r), dark: r => roundTree(r, true, r.int(3, 5)), fruit: r => roundTree(r, false, r.int(3, 4)),
+};
+
+// ---------- спрайты: мелочи ----------
+const STR = {
+  man:    [' # ', '###', '###', '###', '# #', '# #'],
+  woman:  [' # ', '###', '###', '###', '###', '###'],
+  hat:    ['###', ' # ', '###', '###', '# #', '# #'],
+  apron:  [' # ', '###', '#.#', '###', '# #', '# #'],
+  load:   ['## ', '## ', ' # ', '###', '###', '# #'],
+  kid:    [' # ', '###', '###', '# #'],
+  guard:  ['#   ', '# # ', '####', '# ##', '# ##', '# # ', '# # '],
+  sheep:  [' #### ', '#....##', '#....##', ' ####  ', ' #  #  '],
+  cow:    [' ######   ', '#..##..###', '#.###..## ', ' ######   ', ' # #  # # '],
+  barrel: ['###', '#.#', '###', '#.#', '###'],
+  crate:  ['####', '##.#', '#.##', '####'],
+  wood:   ['#####', '#.#.#', '#####', '#.#.#', '#####'],
+  cart:   ['#######   ', '#.#.#.#   ', '##########', ' ###  ### ', ' #.#  #.# ', ' ###  ### '],
+  well:   ['#######', ' #   # ', ' # # # ', '#######', '#.....#', '#######'],
+  scare:  [' ### ', '  #  ', '#####', '  #  ', ' ### ', '  #  ', '  #  '],
+  row:    ['########', '#..#...#', ' ###### '],
+};
+const SPR = {};
+const spr = k => SPR[k] || (SPR[k] = strSprite(STR[k]));
+const FOLK = ['man', 'man', 'woman', 'woman', 'hat', 'apron', 'load', 'kid'];
+
+function stall(r) {
+  const w = r.pick([9, 11]), h = 9;
+  return sprite(w, h, () => {
+    for (let y = 0; y < 3; y++) for (let x = 0; x < w; x++) px(x, y, (x >> 1) % 2 ? INK : PAPER);
+    hl(0, w - 1, 0, INK); vl(0, 0, 2, INK); vl(w - 1, 0, 2, INK);
+    for (let x = 0; x < w; x += 2) px(x, 3, INK);
+    vl(0, 3, h - 1, INK); vl(w - 1, 3, h - 1, INK);
+    box(1, 5, w - 2, 4, PAPER); for (let x = 2; x < w - 2; x += 2) px(x, 6, INK);
+  });
+}
+function fountain(R) {
+  const w = 2 * R + 1, h = R + 10;
+  return sprite(w, h, () => {
+    const cx = R + 0.5, cy = h - 1 - R * 0.45;
+    ell(cx, cy, R + 0.5, R * 0.45 + 0.5, PAPER);
+    ell(cx, cy, R - 1.5, Math.max(1, R * 0.45 - 1.2), dv(0.5));
+    box(R - 1, Math.round(cy) - 7, 3, 7, PAPER);
+    hl(R - 2, R + 2, Math.round(cy) - 7, INK); px(R - 3, Math.round(cy) - 8, INK); px(R + 3, Math.round(cy) - 8, INK);
+    px(R, Math.round(cy) - 9, INK); px(R - 4, Math.round(cy) - 6, INK); px(R + 4, Math.round(cy) - 6, INK);
+  });
+}
+function haystack(r) {
+  const w = r.pick([7, 9]), h = 6;
+  return sprite(w, h, () => shape(0, 0, w - 1, h - 1, (x, y) => x >= 0 && x < w && y < h && ((x + 0.5 - w / 2) / (w / 2)) ** 2 + ((y + 0.5 - h) / h) ** 2 <= 1, (x, y) => x % 2 === 0 ? INK : PAPER));
+}
+function windmill(r) {
+  const L = r.int(10, 14), bh = r.int(14, 18), bw = r.pick([9, 11]);
+  const w = 2 * L + 9, cx = L + 4, hub = L + 4, h = hub + bh + 1, a0 = r.range(0, TAU);
+  return sprite(w, h, () => {
+    const base = h - 1;
+    for (let y = hub + 1; y <= base; y++) {
+      const k = Math.round(mix(bw * 0.3, bw * 0.5, (y - hub) / bh));
+      hl(cx - k, cx + k, y, PAPER); px(cx - k, y, INK); px(cx + k, y, INK);
+    }
+    hl(cx - Math.round(bw * 0.5), cx + Math.round(bw * 0.5), base, INK);
+    for (let y = hub - 3; y <= hub + 1; y++) {
+      const k = Math.min(y - hub + 4, Math.round(bw * 0.35) + 1);
+      hl(cx - k, cx + k, y, ROOF.tile); px(cx - k, y, INK); px(cx + k, y, INK); if (y === hub - 3) hl(cx - k, cx + k, y, INK);
+    }
+    rect(cx - 1, base - 4, 3, 4, INK); rect(cx, hub + 6, 1, 2, INK);
+    for (let k = 0; k < 4; k++) {
+      const a = a0 + k * Math.PI / 2, c = Math.cos(a), s = Math.sin(a);
+      for (let t = 3; t <= L; t += 0.5) for (let u = 0; u <= 3; u += 0.5) px(cx + c * t - s * u, hub + s * t + c * u, PAPER);
+      line(cx, hub, cx + c * L, hub + s * L, INK);
+      for (let t = 3; t <= L; t += 2) line(cx + c * t, hub + s * t, cx + c * t - s * 3, hub + s * t + c * 3, INK);
+      line(cx + c * 3 - s * 3, hub + s * 3 + c * 3, cx + c * L - s * 3, hub + s * L + c * 3, INK);
+    }
+    rect(cx - 1, hub - 1, 2, 2, INK);
+  });
+}
+function wheel() {
+  return sprite(11, 11, () => {
+    ell(5.5, 5.5, 5.5, 5.5, PAPER); ell(5.5, 5.5, 2.4, 2.4, PAPER);
+    for (let k = 0; k < 4; k++) { const a = k * Math.PI / 4; line(5 + Math.cos(a) * 2, 5 + Math.sin(a) * 2, 5 + Math.cos(a) * 5, 5 + Math.sin(a) * 5, INK); line(5 - Math.cos(a) * 2, 5 - Math.sin(a) * 2, 5 - Math.cos(a) * 5, 5 - Math.sin(a) * 5, INK); }
+    px(5, 5, INK);
+  });
+}
+function sailboat(r) {
+  const L = r.int(11, 15), mh = r.int(9, 13), w = L + 2, h = mh + 4, m = Math.round(L * 0.45);
+  return sprite(w, h, () => {
+    const hb = h - 1, sl = hb - 4;
+    hl(1, L, hb - 2, INK); hl(2, L - 1, hb - 1, INK); hl(3, L - 2, hb, INK);
+    for (let x = 3; x < L - 1; x += 2) px(x, hb - 1, PAPER);
+    for (let y = 2; y <= sl; y++) {
+      const k = Math.round((y - 1) / (sl - 1) * (L - m - 2));
+      if (k >= 1) { hl(m + 1, m + k, y, PAPER); px(m + k, y, INK); }
+    }
+    hl(m, L - 2, sl, INK);
+    for (let y = 3; y <= sl; y++) {
+      const k = Math.round((y - 2) / (sl - 2) * (m - 2));
+      if (k >= 1) { hl(m - k, m - 1, y, PAPER); px(m - k, y, INK); }
+    }
+    vl(m, 0, hb - 3, INK); px(m + 1, 0, INK); px(m + 2, 0, INK); px(m + 1, 1, INK);
+  });
+}
+
+// ---------- параметры ----------
+const PALS = {
+  'чернила': ['#f2efe6', '#161616'],
+  'сепия': ['#eee2c6', '#3a2a1c'],
+  'пергамент': ['#e3d2ad', '#4b2d1f'],
+  'синька': ['#1f3f73', '#e9eef7'],
+  'гейм-бой': ['#c7d3a0', '#27381f'],
+  'ночь': ['#0f1216', '#d8d2bd'],
+  'киноварь': ['#f4ede1', '#a3291c'],
+  'индиго': ['#eef0f4', '#1f2a5a'],
+};
+const SCHEMA = [
+  ['Карта'],
+  ['aspect', 'формат', 'sel', ['5:8', '3:4', '1:1', '4:3', '16:9'], '5:8'],
+  ['size', 'размер, px', 240, 760, 10, 480],
+  ['Город'],
+  ['layout', 'планировка', 'sel', ['осевая', 'сетка', 'радиальная', 'органическая', 'вдоль реки'], 'осевая'],
+  ['townR', 'размер города', 0.15, 0.6, 0.01, 0.4],
+  ['density', 'плотность', 0, 1, 0.01, 0.7],
+  ['falloff', 'к окраинам', 0, 1, 0.01, 0.5],
+  ['block', 'кварталы', 22, 80, 1, 44],
+  ['wobble', 'кривизна улиц', 0, 1, 0.01, 0.3],
+  ['tall', 'этажность', 0, 1, 0.01, 0.35],
+  ['plaza', 'площадь', 0, 1, 0.01, 0.5],
+  ['market', 'рынок', 0, 12, 1, 5],
+  ['church', 'храмы', 0, 3, 1, 1],
+  ['walls', 'стены', 'sel', ['нет', 'частокол', 'каменные'], 'нет'],
+  ['gardens', 'огороды', 0, 1, 0.01, 0.3],
+  ['Замок'],
+  ['castle', 'замок', 'sel', ['нет', 'сверху', 'в центре', 'сбоку'], 'сверху'],
+  ['castleSize', 'размер замка', 0.5, 1.6, 0.01, 1],
+  ['moat', 'ров', 'chk', true],
+  ['avenue', 'аллея', 'chk', true],
+  ['Вода'],
+  ['river', 'река', 'sel', ['нет', 'слева', 'справа', 'через центр', 'поперёк', 'две'], 'слева'],
+  ['riverW', 'ширина реки', 4, 44, 1, 18],
+  ['meander', 'извилистость', 0, 1, 0.01, 0.5],
+  ['sea', 'море', 'sel', ['нет', 'снизу', 'слева', 'справа', 'угол', 'остров'], 'угол'],
+  ['seaAmt', 'сколько моря', 0, 1, 0.01, 0.3],
+  ['lakes', 'пруды', 0, 6, 1, 1],
+  ['docks', 'пристани', 0, 1, 0.01, 0.5],
+  ['boats', 'лодки', 0, 24, 1, 4],
+  ['Природа'],
+  ['forest', 'лес', 0, 1, 0.01, 0.55],
+  ['clump', 'кучность леса', 0, 1, 0.01, 0.5],
+  ['treeKind', 'породы', 'sel', ['смесь', 'хвойные', 'лиственные'], 'смесь'],
+  ['cityTrees', 'деревья в городе', 0, 1, 0.01, 0.35],
+  ['rocks', 'камни, кусты', 0, 1, 0.01, 0.3],
+  ['Окраины'],
+  ['fields', 'поля', 0, 1, 0.01, 0.45],
+  ['farms', 'хутора', 0, 10, 1, 2],
+  ['mills', 'мельницы', 0, 5, 1, 1],
+  ['animals', 'скот', 0, 1, 0.01, 0.4],
+  ['roadsOut', 'дороги наружу', 0, 6, 1, 2],
+  ['Жизнь'],
+  ['people', 'жители', 0, 1, 0.01, 0.45],
+  ['clutter', 'мелочи', 0, 1, 0.01, 0.5],
+  ['smoke', 'дым из труб', 'chk', true],
+  ['Вид'],
+  ['pal', 'палитра', 'sel', Object.keys(PALS), 'чернила'],
+  ['grain', 'зерно земли', 0, 1, 0.01, 0.5],
+  ['waves', 'рябь на воде', 0, 1, 0.01, 0.5],
+  ['shadows', 'тени', 'chk', false],
+  ['frame', 'рамка', 'chk', true],
+  ['pix', 'пиксель', 'sel', ['авто', '1', '2', '3', '4', '5'], 'авто'],
+];
+const DEF = {};
+for (const it of SCHEMA) if (it.length > 1) DEF[it[0]] = it[it.length - 1];
+const P = { ...DEF };
+const VIEW_ONLY = new Set(['pal', 'pix']);
+const SCENES = {
+  'королевский град': {},
+  'бастида': { layout: 'сетка', walls: 'каменные', castle: 'нет', river: 'поперёк', riverW: 14, sea: 'нет', block: 30, wobble: 0.05, density: 0.8, falloff: 0.15, church: 1, market: 8, forest: 0.4, fields: 0.6, farms: 3, mills: 2, avenue: false },
+  'торг на реке': { layout: 'вдоль реки', river: 'через центр', riverW: 22, meander: 0.35, sea: 'нет', castle: 'сбоку', castleSize: 0.8, walls: 'нет', docks: 0.9, boats: 7, density: 0.75, townR: 0.36, fields: 0.35, mills: 2 },
+  'лесная деревня': { layout: 'органическая', townR: 0.24, density: 0.4, falloff: 0.7, wobble: 0.7, castle: 'нет', river: 'справа', riverW: 9, sea: 'нет', walls: 'частокол', church: 1, market: 0, plaza: 0.2, forest: 0.85, clump: 0.3, treeKind: 'хвойные', fields: 0.25, farms: 3, mills: 1, lakes: 2, animals: 0.6, tall: 0 },
+  'порт': { layout: 'радиальная', sea: 'снизу', seaAmt: 0.5, river: 'нет', castle: 'сбоку', walls: 'каменные', docks: 1, boats: 14, density: 0.8, townR: 0.42, forest: 0.35, fields: 0.3, lakes: 0 },
+  'остров': { layout: 'органическая', sea: 'остров', seaAmt: 0.55, river: 'нет', castle: 'в центре', castleSize: 0.8, walls: 'каменные', townR: 0.3, density: 0.85, falloff: 0.2, boats: 10, docks: 0.8, forest: 0.4, fields: 0.3, farms: 1, lakes: 0 },
+  'замок в лесу': { layout: 'органическая', castle: 'в центре', castleSize: 1.2, moat: true, townR: 0.2, density: 0.35, falloff: 0.8, river: 'нет', sea: 'нет', lakes: 3, forest: 0.95, clump: 0.2, walls: 'нет', market: 0, church: 0, plaza: 0.1, fields: 0.15, farms: 1, mills: 0, avenue: false },
+};
+
+// ---------- мир ----------
+let W, H, WAT, RD, OCC, RDIST, OBJ, ROADS, BRIDGES, FIELDS, RIVERS, TC, TR, CASTLE, PLAZA, SMOKE, STATS, BUF, sTown;
+const RW = [0, 3, 3, 5, 7, 0];        // тропа, переулок, улица, главная
+const I = (x, y) => Math.floor(y) * W + Math.floor(x);
+const inMap = (x, y) => x >= 0 && y >= 0 && x < W && y < H;
+const wat = (x, y) => inMap(x, y) && WAT[I(x, y)] === 1;
+const td = (x, y) => Math.hypot((x - TC.x) / TR.x, (y - TC.y) / TR.y) * (1 + 0.24 * (fbm2(x / 45, y / 45, sTown) - 0.5));
+const falloff = t => 1 - smooth(1 - P.falloff * 0.85, 1.12, t);
+
+function dense(pts) {
+  const out = [];
+  for (let i = 0; i < pts.length - 1; i++) {
+    const [ax, ay] = pts[i], [bx, by] = pts[i + 1], n = Math.max(1, Math.ceil(Math.hypot(bx - ax, by - ay)));
+    for (let k = 0; k < n; k++) out.push([ax + (bx - ax) * k / n, ay + (by - ay) * k / n]);
+  }
+  out.push(pts[pts.length - 1].slice());
+  return out;
+}
+function tan(d, i) {
+  const a = d[Math.max(0, i - 3)], b = d[Math.min(d.length - 1, i + 3)];
+  const dx = b[0] - a[0], dy = b[1] - a[1], l = Math.hypot(dx, dy) || 1;
+  return [dx / l, dy / l];
+}
+function chaikin(p, it = 2) {
+  for (let k = 0; k < it; k++) {
+    const q = [p[0]];
+    for (let i = 0; i < p.length - 1; i++) {
+      const [ax, ay] = p[i], [bx, by] = p[i + 1];
+      q.push([ax * 0.75 + bx * 0.25, ay * 0.75 + by * 0.25], [ax * 0.25 + bx * 0.75, ay * 0.25 + by * 0.75]);
+    }
+    q.push(p[p.length - 1]); p = q;
+  }
+  return p;
+}
+// извилистость: смещение по нормали, начало не двигаем — к нему примыкает улица
+function wob(pts, amt, r) {
+  if (amt <= 0.001) return pts;
+  const d = dense(pts), s = r.int(0, 1e6), A = amt * 10, out = [];
+  const at = i => { const [tx, ty] = tan(d, i), o = fbm1(i / 45, s) * A * Math.min(1, i / 14); return [d[i][0] - ty * o, d[i][1] + tx * o]; };
+  for (let i = 0; i < d.length; i += 4) out.push(at(i));
+  out.push(at(d.length - 1));
+  return out;
+}
+function stampDisc(A, x, y, rad, v) {
+  const R = Math.ceil(rad), cx = Math.round(x), cy = Math.round(y);
+  for (let dy = -R; dy <= R; dy++) for (let dx = -R; dx <= R; dx++) {
+    if (dx * dx + dy * dy > rad * rad + 0.3) continue;
+    const X = cx + dx, Y = cy + dy;
+    if (X >= 0 && Y >= 0 && X < W && Y < H && A[Y * W + X] < v) A[Y * W + X] = v;
+  }
+}
+// pad — отступ от воды и дорог, opad — от других построек
+function free(x0, y0, w, h, pad = 0, opad = pad) {
+  if (x0 - pad < 1 || y0 - pad < 1 || x0 + w + pad > W - 1 || y0 + h + pad > H - 1) return false;
+  for (let y = y0 - pad; y < y0 + h + pad; y++) for (let x = x0 - pad; x < x0 + w + pad; x++) {
+    const i = y * W + x; if (WAT[i] || RD[i]) return false;
+    if (OCC[i] && x >= x0 - opad && x < x0 + w + opad && y >= y0 - opad && y < y0 + h + opad) return false;
+  }
+  return true;
+}
+function mark(x0, y0, w, h, v = 1) {
+  for (let y = y0; y < y0 + h; y++) for (let x = x0; x < x0 + w; x++) if (inMap(x, y)) OCC[y * W + x] = v;
+}
+function addObj(s, x, y, o = {}) {
+  const ob = { s, x: Math.round(x), y0: Math.round(y), flip: !!o.flip, halo: o.halo ?? true, sh: o.sh || null };
+  ob.y = o.base ?? ob.y0 + s.h - 1;
+  OBJ.push(ob); return ob;
+}
+
+// ---------- вода ----------
+function genRivers(r) {
+  RIVERS = [];
+  if (P.river === 'нет') return;
+  const m = P.meander, rw = P.riverW * clamp(Math.min(W, H) / 320, 0.7, 1.6);
+  const vert = (x0, x1) => {
+    const s = r.int(0, 1e6), p = [];
+    for (let y = -14; y <= H + 14; y += 4) p.push([mix(x0, x1, (y + 14) / (H + 28)) + fbm1(y / 110, s) * m * W * 0.2, y]);
+    return p;
+  };
+  const horz = (y0, y1, xa, xb) => {
+    const s = r.int(0, 1e6), p = [], st = xb > xa ? 4 : -4;
+    for (let x = xa; st > 0 ? x <= xb : x >= xb; x += st) p.push([x, mix(y0, y1, (x - xa) / (xb - xa)) + fbm1(x / 110, s) * m * H * 0.14]);
+    return p;
+  };
+  const add = (p, w, vertical) => {
+    if (CASTLE) {                                  // река обходит замок
+      const Z = CASTLE.zone, pad = w / 2 + 4;
+      for (const q of p) {
+        if (q[1] > Z.y0 - pad && q[1] < Z.y1 + pad && q[0] > Z.x0 - pad && q[0] < Z.x1 + pad) {
+          if (vertical) q[0] = q[0] < (Z.x0 + Z.x1) / 2 ? Z.x0 - pad : Z.x1 + pad;
+          else q[1] = q[1] < (Z.y0 + Z.y1) / 2 ? Z.y0 - pad : Z.y1 + pad;
+        }
+      }
+    }
+    const d = dense(chaikin(p, 3)), s = r.int(0, 1e6);
+    for (let i = 0; i < d.length; i++) stampDisc(WAT, d[i][0], d[i][1], w * (0.8 + 0.4 * n2(i / 60, 1.5, s)) / 2, 1);
+    RIVERS.push({ pts: d, w });
+  };
+  switch (P.river) {
+    case 'слева': add(vert(W * 0.13, W * 0.11), rw, true); break;
+    case 'справа': add(vert(W * 0.87, W * 0.89), rw, true); break;
+    case 'через центр': add(vert(W * 0.3, W * 0.68), rw, true); break;
+    case 'поперёк': add(horz(H * 0.72, H * 0.66, -14, W + 14), rw, false); break;
+    case 'две': add(vert(W * 0.13, W * 0.11), rw, true); add(horz(H * 0.7, H * 0.64, W + 14, W * 0.12), rw * 0.6, false); break;
+  }
+}
+function genSea() {
+  if (P.sea === 'нет' || P.seaAmt <= 0) return;
+  const a = P.seaAmt, s = sd('sea'), m = Math.min(W, H);
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    let v;
+    switch (P.sea) {
+      case 'снизу': v = y - H * (1 - a * 0.42) + (fbm2(x / 60, 0.5, s) - 0.5) * H * 0.2; break;
+      case 'слева': v = W * a * 0.42 - x + (fbm2(0.5, y / 60, s) - 0.5) * W * 0.3; break;
+      case 'справа': v = x - W * (1 - a * 0.42) + (fbm2(0.5, y / 60, s) - 0.5) * W * 0.3; break;
+      case 'угол': v = a * m * 0.95 - Math.hypot(x, H - y) + (fbm2(x / 50, y / 50, s) - 0.5) * m * 0.35; break;
+      case 'остров': v = Math.hypot((x - W / 2) / (W / 2), (y - H / 2) / (H / 2)) - (1.15 - a * 0.55) + (fbm2(x / 70, y / 70, s) - 0.5) * 0.55; break;
+    }
+    if (v > 0) WAT[y * W + x] = 1;
+  }
+}
+function genLakes(r) {
+  const sc = clamp(Math.min(W, H) / 320, 0.7, 1.6);
+  for (let k = 0; k < P.lakes; k++) for (let t = 0; t < 40; t++) {
+    const x = r.range(10, W - 10), y = r.range(10, H - 10);
+    if (td(x, y) < 1.08) continue;
+    if (CASTLE && x > CASTLE.zone.x0 - 30 && x < CASTLE.zone.x1 + 30 && y > CASTLE.zone.y0 - 30 && y < CASTLE.zone.y1 + 30) continue;
+    const R = r.range(6, 15) * sc, ry = R * r.range(0.55, 0.8), s = r.int(0, 1e6);
+    for (let yy = Math.floor(y - ry * 1.4); yy <= y + ry * 1.4; yy++) for (let xx = Math.floor(x - R * 1.4); xx <= x + R * 1.4; xx++) {
+      if (inMap(xx, yy) && Math.hypot((xx - x) / R, (yy - y) / ry) + (n2(xx / 9, yy / 9, s) - 0.5) * 0.6 < 1) WAT[I(xx, yy)] = 1;
+    }
+    break;
+  }
+}
+
+// ---------- замок ----------
+function planCastle(r) {
+  if (P.castle === 'нет') return null;
+  const cs = P.castleSize * clamp(Math.min(W, H) / 320, 0.7, 1.5);
+  const c = buildCastle(r, cs);
+  let cx, Y0;
+  if (P.castle === 'сверху') { cx = W / 2 + r.range(-0.04, 0.04) * W; Y0 = 4 + (P.sea === 'остров' ? H * P.seaAmt * 0.22 : 0); }
+  else if (P.castle === 'в центре') { cx = W / 2; Y0 = Math.max(4, H * 0.4 - c.F); }
+  else { cx = W * (P.river === 'справа' ? 0.27 : 0.73); Y0 = Math.max(4, H * 0.07); }
+  const X0 = Math.round(cx - c.s.w / 2); Y0 = Math.round(Y0);
+  cx = X0 + (c.s.w >> 1);
+  const mw = P.moat ? Math.max(5, Math.round(7 * cs)) : 0, mg = P.moat ? Math.round(4 * cs) : 2;
+  const gx0 = X0 + c.gx0 - 1, gx1 = X0 + c.gx1 + 1, gy0 = Y0 + c.gyb - 3, gy1 = Y0 + c.F + 2;
+  const zone = { x0: gx0 - mg - mw, x1: gx1 + mg + mw, y0: Math.min(Y0, gy0 - mg - mw), y1: gy1 + mg + mw };
+  return { c, cs, X0, Y0, cx, gx0, gx1, gy0, gy1, mw, mg, zone, gateX: cx, gateY: zone.y1 + 1 };
+}
+function placeCastle(r) {
+  const C = CASTLE, Z = C.zone;
+  for (let y = Z.y0 - 3; y <= Z.y1 + 3; y++) for (let x = Z.x0 - 3; x <= Z.x1 + 3; x++) if (inMap(x, y)) WAT[I(x, y)] = 0;
+  if (C.mw) {
+    const mx = (C.gx0 + C.gx1) / 2, my = (C.gy0 + C.gy1) / 2, bx = (C.gx1 - C.gx0) / 2 + C.mg, by = (C.gy1 - C.gy0) / 2 + C.mg, rr = 5;
+    for (let y = Z.y0 - 2; y <= Z.y1 + 2; y++) for (let x = Z.x0 - 2; x <= Z.x1 + 2; x++) {
+      if (!inMap(x, y)) continue;
+      const qx = Math.abs(x + 0.5 - mx) - (bx - rr), qy = Math.abs(y + 0.5 - my) - (by - rr);
+      const d = Math.hypot(Math.max(qx, 0), Math.max(qy, 0)) + Math.min(Math.max(qx, qy), 0) - rr;
+      if (d >= 0 && d < C.mw) WAT[I(x, y)] = 1;
+    }
+    BRIDGES.push({ pts: [[C.cx, C.gy1 - 1], [C.cx, C.gateY + 1]], w: C.c.gw + 4 });
+  }
+  for (let y = Z.y0; y <= Z.y1; y++) for (let x = Z.x0; x <= Z.x1; x++) if (inMap(x, y)) OCC[I(x, y)] = 1;
+  mark(C.X0, C.Y0, C.c.s.w, C.c.s.h, 1);
+  for (let y = C.gy1; y <= C.gateY; y++) stampDisc(RD, C.cx, y, 3.5, 4);
+  addObj(C.c.s, C.X0, C.Y0, { base: C.gy1, sh: { x0: C.gx0 + 4, y0: C.gy0 + 10, x1: C.gx1 + 4, y1: C.gy1 + 3 } });
+}
+
+// ---------- дороги ----------
+// режет дорогу о замок и широкую воду, через узкую — мост
+function addRoad(pts, kind, o = {}) {
+  if (!pts || pts.length < 2) return [];
+  const d = dense(pts), w = RW[kind], maxB = [0, 36, 0, 56, 90][kind] * clamp(Math.min(W, H) / 320, 0.8, 1.6);
+  const pieces = []; let cur = [], i = 0;
+  const close = () => { if (cur.length >= (o.min ?? 6)) pieces.push(cur); cur = []; };
+  const W_ = (p) => inMap(p[0], p[1]) && WAT[I(p[0], p[1])];
+  while (i < d.length) {
+    const p = d[i];
+    if (!inMap(p[0], p[1])) { cur.push(p); i++; continue; }
+    if (i > 4 && OCC[I(p[0], p[1])] === 1) { close(); while (i < d.length && inMap(d[i][0], d[i][1]) && OCC[I(d[i][0], d[i][1])] === 1) i++; continue; }
+    if (W_(p)) {
+      let j = i; while (j < d.length && W_(d[j])) j++;
+      const len = j - i, edge = j >= d.length || !inMap(d[j][0], d[j][1]) || cur.length === 0;
+      if (len <= maxB && !edge) {
+        BRIDGES.push({ pts: [d[Math.max(0, i - 2)], d[Math.min(d.length - 1, j + 1)]], w: w + 2 });
+        for (let k = i; k < j; k++) cur.push(d[k]);
+      } else close();
+      i = j; continue;
+    }
+    cur.push(p); i++;
+  }
+  close();
+  const out = [];
+  for (const pc of pieces) {
+    for (const [x, y] of pc) stampDisc(RD, x, y, w / 2, kind);
+    const R = { pts: pc, kind, w }; ROADS.push(R); out.push(R);
+  }
+  return out;
+}
+const startTop = () => CASTLE && Math.abs(CASTLE.gateX - TC.x) < 4 ? CASTLE.gateY : TC.y - TR.y * 0.95;
+const aligned = () => CASTLE && Math.abs(CASTLE.gateX - TC.x) < 4;
+
+function layAxial(r) {
+  const x = TC.x, top = startTop(), bl = P.block;
+  addRoad(wob([[x, top], [x, TC.y], [x, H + 8]], P.wobble * 0.3, r), 4, { min: 2 });
+  for (let y = top + bl * r.range(0.7, 1); y < Math.min(H - 6, TC.y + TR.y); y += bl * r.range(0.85, 1.2)) {
+    const e = 1 - ((y - TC.y) / TR.y) ** 2; if (e < 0.08) continue;
+    const half = TR.x * Math.sqrt(e);
+    for (const s of [-1, 1]) {
+      if (r.chance(0.1)) continue;
+      const L = half * r.range(0.7, 1), tl = r.range(-0.15, 0.15) * L;
+      addRoad(wob([[x + s * 3, y], [x + s * L, y + tl]], P.wobble, r), 3);
+    }
+  }
+  for (const s of [-1, 1]) for (const f of [0.42, 0.78]) {
+    if (r.chance(0.3)) continue;
+    const vx = x + s * TR.x * f * r.range(0.9, 1.1), e = 1 - ((vx - TC.x) / TR.x) ** 2;
+    if (e < 0.1) continue;
+    const hh = TR.y * Math.sqrt(e) * r.range(0.55, 0.85);
+    addRoad(wob([[vx, Math.max(top + 12, TC.y - hh)], [vx, TC.y + hh]], P.wobble, r), 2);
+  }
+}
+function layGrid(r) {
+  const sp = P.block, top = startTop(), nx = Math.floor(TR.x / sp), ny = Math.floor(TR.y / sp);
+  const lim = CASTLE ? CASTLE.zone.y1 + 6 : -8;
+  for (let i = -nx; i <= nx; i++) {
+    const x = TC.x + i * sp, e = 1 - ((x - TC.x) / TR.x) ** 2; if (e <= 0.05) continue;
+    const hh = TR.y * Math.sqrt(e);
+    const y0 = i === 0 && aligned() ? top : Math.max(TC.y - hh, lim), y1 = i === 0 ? H + 8 : TC.y + hh;
+    addRoad(wob([[x, y0], [x, y1]], P.wobble * 0.35, r), i === 0 ? 4 : 3, { min: 2 });
+  }
+  for (let j = -ny; j <= ny; j++) {
+    const y = TC.y + j * sp; if (y < lim) continue;
+    const e = 1 - ((y - TC.y) / TR.y) ** 2; if (e <= 0.05) continue;
+    const hw = TR.x * Math.sqrt(e);
+    addRoad(wob([[TC.x - hw, y], [TC.x + hw, y]], P.wobble * 0.35, r), j === 0 ? 4 : 3);
+  }
+}
+function layRadial(r) {
+  const n = r.int(5, 8), a0 = r.range(0, TAU), pr = plazaR();
+  for (let k = 0; k < n; k++) {
+    const a = a0 + k * TAU / n + r.range(-0.18, 0.18), c = Math.cos(a), s = Math.sin(a);
+    addRoad(wob([[TC.x + c * pr, TC.y + s * pr * 0.7], [TC.x + c * TR.x * 1.02, TC.y + s * TR.y * 1.02]], P.wobble, r), k % 2 ? 3 : 4);
+  }
+  for (const t of TR.x > 110 ? [0.4, 0.7, 0.95] : [0.45, 0.85]) {
+    const pts = [], s = r.int(0, 1e6), N = 90, a0r = r.range(0, TAU);
+    for (let k = 0; k <= N; k++) {
+      const a = a0r + k / N * TAU, f = 1 + (n2(Math.cos(a) * 1.5 + 5, Math.sin(a) * 1.5 + 5, s) - 0.5) * 0.4 * P.wobble;
+      pts.push([TC.x + Math.cos(a) * TR.x * t * f, TC.y + Math.sin(a) * TR.y * t * f]);
+    }
+    addRoad(pts, t < 0.6 ? 3 : 2);
+  }
+}
+function layOrganic(r) {
+  const n = r.int(3, 4), a0 = r.range(0, TAU), s = r.int(0, 1e6);
+  for (let k = 0; k < n; k++) {
+    let ang = a0 + k * TAU / n + r.range(-0.3, 0.3), x = TC.x, y = TC.y;
+    const pts = [[x, y]];
+    for (let st = 0; st < 500; st++) {
+      ang += (n2(st * 0.06, k * 3.1, s) - 0.5) * 0.5 * (0.2 + P.wobble);
+      x += Math.cos(ang) * 3; y += Math.sin(ang) * 3; pts.push([x, y]);
+      if (!inMap(x, y) && (x < -6 || y < -6 || x > W + 6 || y > H + 6)) break;
+      if (td(x, y) > 1.3) break;
+    }
+    addRoad(pts, k < 2 ? 4 : 3);
+  }
+  const bl = P.block, want = Math.round(TR.x * TR.y / (bl * bl) * (0.6 + 1.2 * P.density));
+  for (let it = 0, got = 0; it < want * 8 && got < want; it++) {
+    const cand = ROADS.filter(q => q.kind >= 2);
+    const R0 = r.pick(cand); if (!R0) break;
+    const i = r.int(0, R0.pts.length - 1), p = R0.pts[i];
+    if (td(p[0], p[1]) > 0.95) continue;
+    const [tx, ty] = tan(R0.pts, i), side = r.sgn(), nx = -ty * side, ny = tx * side, clear = R0.w / 2 + 2;
+    const probe = (a, b) => { const X = p[0] + nx * (clear + 4) + tx * a, Y = p[1] + ny * (clear + 4) + ty * a; return inMap(X, Y) && RD[I(X, Y)]; };
+    if (probe(bl * 0.7) || probe(-bl * 0.7) || probe(0)) continue;
+    let ang = Math.atan2(ny, nx) + r.range(-0.3, 0.3), x = p[0], y = p[1], len = 0;
+    const L = bl * r.range(0.9, 2.6), pts = [[x, y]]; let hit = false;
+    while (len < L) {
+      ang += (r() - 0.5) * 0.4 * P.wobble;
+      x += Math.cos(ang) * 2; y += Math.sin(ang) * 2; len += 2;
+      if (!inMap(x, y) || WAT[I(x, y)] || OCC[I(x, y)] === 1 || td(x, y) > 1.02) break;
+      if (len > clear && RD[I(x, y)]) { pts.push([x, y]); hit = true; break; }
+      const d = bl * 0.6, sx = -Math.sin(ang) * d, sy = Math.cos(ang) * d;
+      if (len > clear + d && (RD[I(clamp(x + sx, 0, W - 1), clamp(y + sy, 0, H - 1))] || RD[I(clamp(x - sx, 0, W - 1), clamp(y - sy, 0, H - 1))])) break;
+      pts.push([x, y]);
+    }
+    if (len < bl * 0.6 && !hit) continue;
+    if (addRoad(pts, got < want * 0.3 ? 3 : 2).length) got++;
+  }
+}
+let RS = null;
+function riverSide() {
+  const rv = RIVERS[0], d = rv.pts;
+  let ic = 0, best = 1e9;
+  const target = [W / 2, H / 2];
+  for (let i = 0; i < d.length; i++) {
+    if (!inMap(d[i][0], d[i][1])) continue;
+    const q = Math.hypot(d[i][0] - target[0], d[i][1] - target[1]); if (q < best) { best = q; ic = i; }
+  }
+  const [tx, ty] = tan(d, ic), nx = -ty, ny = tx;
+  const side = Math.sign((W / 2 - d[ic][0]) * nx + (H / 2 - d[ic][1]) * ny + 0.01) || 1;
+  return { rv, d, ic, side };
+}
+function layRiverside(r) {
+  if (!RS) return layAxial(r);
+  const { rv, d, ic, side } = RS, off = rv.w / 2 + 14, bl = P.block;
+  const span = Math.round(Math.max(TR.x, TR.y)), i0 = Math.max(0, ic - span), i1 = Math.min(d.length - 1, ic + span);
+  const along = (o, a = i0, b = i1) => { const out = []; for (let i = a; i <= b; i += 6) { const [tx, ty] = tan(d, i); out.push([d[i][0] - ty * side * o, d[i][1] + tx * side * o]); } return out; };
+  addRoad(along(off), 4);
+  if (P.density > 0.25) addRoad(wob(along(off + bl * 1.1, i0 + 20, i1 - 20), P.wobble * 0.5, r), 3);
+  for (let i = i0 + r.int(4, 12); i < i1; i += Math.round(bl * r.range(0.6, 1))) {
+    const [tx, ty] = tan(d, i), nx = -ty * side, ny = tx * side, a = rv.w / 2 + 1, L = off + bl * r.range(1.2, 2.4);
+    addRoad(wob([[d[i][0] + nx * a, d[i][1] + ny * a], [d[i][0] + nx * L, d[i][1] + ny * L]], P.wobble, r), 2, { min: 4 });
+  }
+  const [tx, ty] = tan(d, ic), nx = -ty * side, ny = tx * side, far = rv.w / 2 + Math.min(TR.x, TR.y) * 0.7;
+  addRoad([[d[ic][0] + nx * (off + bl * 2), d[ic][1] + ny * (off + bl * 2)], [d[ic][0] - nx * far, d[ic][1] - ny * far]], 4);
+  addRoad(wob(along(-(rv.w / 2 + 12), Math.max(0, ic - (span >> 1)), Math.min(d.length - 1, ic + (span >> 1))), P.wobble * 0.5, r), 3);
+}
+const plazaR = () => P.plaza < 0.03 ? 0 : 8 + P.plaza * 26;
+function addPlaza(r) {
+  PLAZA = null;
+  const pr = plazaR(); if (!pr) return;
+  let x = TC.x, y = TC.y;
+  if (P.layout === 'вдоль реки' && RS) { const { d, ic, side, rv } = RS, [tx, ty] = tan(d, ic); x = d[ic][0] - ty * side * (rv.w / 2 + 14 + pr * 0.7); y = d[ic][1] + tx * side * (rv.w / 2 + 14 + pr * 0.7); }
+  const rx = pr * 1.25, ry = pr * 0.85, sq = P.layout === 'сетка';
+  for (let yy = Math.floor(y - ry - 1); yy <= y + ry + 1; yy++) for (let xx = Math.floor(x - rx - 1); xx <= x + rx + 1; xx++) {
+    if (!inMap(xx, yy) || WAT[I(xx, yy)] || OCC[I(xx, yy)]) continue;
+    const inside = sq ? Math.abs(xx + 0.5 - x) <= rx && Math.abs(yy + 0.5 - y) <= ry : ((xx + 0.5 - x) / rx) ** 2 + ((yy + 0.5 - y) / ry) ** 2 <= 1;
+    if (inside) RD[I(xx, yy)] = 5;
+  }
+  PLAZA = { x, y, rx, ry };
+}
+function roadsOut(r) {
+  for (let k = 0; k < P.roadsOut; k++) {
+    let a = r.range(0, TAU);
+    if (CASTLE) { const ac = Math.atan2(CASTLE.gateY - TC.y, CASTLE.gateX - TC.x); if (Math.abs(Math.atan2(Math.sin(a - ac), Math.cos(a - ac))) < 0.6) a += Math.PI / 2; }
+    let x = TC.x + Math.cos(a) * TR.x * 0.75, y = TC.y + Math.sin(a) * TR.y * 0.75;
+    const pts = [[x, y]], s = r.int(0, 1e6);
+    for (let st = 0; st < 600; st++) {
+      a += (n2(st * 0.05, 1.7, s) - 0.5) * 0.35;
+      x += Math.cos(a) * 3; y += Math.sin(a) * 3; pts.push([x, y]);
+      if (x < -6 || y < -6 || x > W + 6 || y > H + 6) break;
+    }
+    addRoad(pts, 1);
+  }
+}
+function connect(x, y, r) {
+  let best = null;
+  for (let rr = 4; rr < 170 && !best; rr += 3) for (let k = 0; k < 32; k++) {
+    const a = k / 32 * TAU, X = x + Math.cos(a) * rr, Y = y + Math.sin(a) * rr;
+    if (inMap(X, Y) && RD[I(X, Y)]) { best = [X, Y, rr]; break; }
+  }
+  if (!best) return;
+  const [bx, by, bd] = best, mx = (x + bx) / 2 + r.range(-0.25, 0.25) * bd, my = (y + by) / 2 + r.range(-0.25, 0.25) * bd;
+  addRoad(chaikin([[x, y], [mx, my], [bx, by]], 2), 1, { min: 3 });
+}
+function distField(src) {
+  const D = new Float32Array(W * H);
+  for (let i = 0; i < W * H; i++) D[i] = src[i] ? 0 : 1e6;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x; let v = D[i];
+    if (x > 0) v = Math.min(v, D[i - 1] + 1);
+    if (y > 0) { v = Math.min(v, D[i - W] + 1); if (x > 0) v = Math.min(v, D[i - W - 1] + 1.414); if (x < W - 1) v = Math.min(v, D[i - W + 1] + 1.414); }
+    D[i] = v;
+  }
+  for (let y = H - 1; y >= 0; y--) for (let x = W - 1; x >= 0; x--) {
+    const i = y * W + x; let v = D[i];
+    if (x < W - 1) v = Math.min(v, D[i + 1] + 1);
+    if (y < H - 1) { v = Math.min(v, D[i + W] + 1); if (x < W - 1) v = Math.min(v, D[i + W + 1] + 1.414); if (x > 0) v = Math.min(v, D[i + W - 1] + 1.414); }
+    D[i] = v;
+  }
+  return D;
+}
+
+// ---------- стены ----------
+function buildWalls(r) {
+  if (P.walls === 'нет') return;
+  const stone = P.walls === 'каменные', WH = stone ? 7 : 5, N = 480, loop = [];
+  const troof = r.chance(0.5) ? 'cone' : 'crenel';
+  for (let k = 0; k < N; k++) {
+    const a = k / N * TAU; let rho = 1.02;
+    for (let it = 0; it < 4; it++) rho = 1.02 * rho / td(TC.x + Math.cos(a) * TR.x * rho, TC.y + Math.sin(a) * TR.y * rho);
+    // стена не уходит за край карты — прижимается к нему
+    const c = Math.cos(a) * TR.x, s = Math.sin(a) * TR.y, m = 9;
+    if (c > 0) rho = Math.min(rho, (W - m - TC.x) / c); else if (c < 0) rho = Math.min(rho, (m - TC.x) / c);
+    if (s > 0) rho = Math.min(rho, (H - m - TC.y) / s); else if (s < 0) rho = Math.min(rho, (m + WH + 4 - TC.y) / s);
+    loop.push([TC.x + Math.cos(a) * TR.x * rho, TC.y + Math.sin(a) * TR.y * rho]);
+  }
+  loop.push(loop[0]);
+  const ring = [];
+  for (const [x, y] of dense(loop)) { const q = [Math.round(x), Math.round(y)], l = ring[ring.length - 1]; if (!l || l[0] !== q[0] || l[1] !== q[1]) ring.push(q); }
+  const n = ring.length, gate = new Uint8Array(n);
+  const okp = ring.map(([x, y]) => inMap(x, y) && y > WH + 2 && !WAT[I(x, y)] && OCC[I(x, y)] !== 1);
+  for (let i = 0; i < n; i++) { const [x, y] = ring[i]; if (inMap(x, y) && RD[I(x, y)]) for (let j = -5; j <= 5; j++) gate[(i + j + n) % n] = 1; }
+  const wp = okp.map((v, i) => v && !gate[i]);
+  const WM = new Uint8Array(W * H), OWN = new Int32Array(W * H).fill(-1), chunks = [];
+  let cur = null, cnt = 0;
+  for (let i = 0; i < n; i++) {
+    if (!wp[i]) { cur = null; continue; }
+    if (!cur || cnt >= 10) { cur = { id: chunks.length, pts: [], base: -1 }; chunks.push(cur); cnt = 0; }
+    cnt++; const [x, y] = ring[i]; cur.pts.push([x, y]); cur.base = Math.max(cur.base, y);
+    for (let dx = stone ? -1 : 0; dx <= (stone ? 1 : 0); dx++) for (let yy = y - WH; yy <= y; yy++) if (inMap(x + dx, yy)) { const j = I(x + dx, yy); WM[j] = 1; OWN[j] = cur.id; }
+  }
+  const wm = (x, y) => inMap(x, y) && WM[I(x, y)];
+  for (const c of chunks) {
+    let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+    for (const [x, y] of c.pts) { x0 = Math.min(x0, x - 1); x1 = Math.max(x1, x + 1); y0 = Math.min(y0, y - WH - 2); y1 = Math.max(y1, y); }
+    const s = sprite(x1 - x0 + 1, y1 - y0 + 1, () => {
+      for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+        if (!inMap(x, y)) continue; const j = I(x, y);
+        if (!WM[j] || OWN[j] !== c.id) continue;
+        const edge = !wm(x - 1, y) || !wm(x + 1, y) || !wm(x, y - 1) || !wm(x, y + 1);
+        px(x - x0, y - y0, edge ? INK : stone ? WALL.brick(x, y) : (x % 2 === 0 ? INK : PAPER));
+        if (!wm(x, y - 1) && (stone ? ((x >> 1) & 1) === 0 : x % 2 === 0)) { px(x - x0, y - y0 - 1, INK); if (stone) px(x - x0, y - y0 - 2, INK); }
+      }
+    });
+    addObj(s, x0, y0, { halo: false, base: c.base });
+  }
+  for (let i = 0; i < W * H; i++) if (WM[i]) OCC[i] = 1;
+  let acc = 0;
+  const every = stone ? 44 : 70;
+  for (let i = 0; i < n; i++) {
+    acc++;
+    if (!wp[i]) continue;
+    const endp = !wp[(i - 1 + n) % n] || !wp[(i + 1) % n];
+    if (acc > every || endp) {
+      acc = 0;
+      const [x, y] = ring[i];
+      const s = stone ? towerSprite(r, 9, WH + 8, troof, r.chance(0.3)) : towerSprite(r, 7, WH + 6, 'cone', false, WALL.plain);
+      addObj(s, x - (s.w >> 1), y - s.h + 2);
+      mark(x - (s.w >> 1), y - s.h + 2, s.w, s.h, 1);
+    }
+  }
+}
+
+// ---------- постройки ----------
+function makeHouse(r, x, y, small = false) {
+  const core = 1 - smooth(0.2, 0.8, td(x, y));
+  if (small) return r.chance(0.5) ? houseC(r, { L: r.int(8, 12), hw: r.int(3, 5), rh: r.int(3, 5) }) : houseA(r, { fw: 7, sw: r.int(0, 4), hw: r.int(4, 5) });
+  if (r() < P.tall * core * 0.8) return houseA(r, { hw: r.int(9, 12), fw: r.pick([9, 11]), sw: r.int(2, 6) });
+  const u = r();
+  if (u < 0.62) return houseA(r);
+  if (u < 0.97) return houseC(r);
+  return { s: towerSprite(r, 7, r.int(11, 15), r.chance(0.7) ? 'cone' : 'crenel', false, WALL.plain), chim: null };
+}
+function putHouse(b, x0, y0, r) {
+  const flip = r.chance(0.5), w = b.s.w, h = b.s.h;
+  mark(x0, y0, w, h, 1);
+  addObj(b.s, x0, y0, { flip, sh: { x0: x0 + 2, y0: y0 + Math.round(h * 0.4), x1: x0 + w + 1, y1: y0 + h + 1 } });
+  if (b.chim && P.smoke && r.chance(0.5)) SMOKE.push([x0 + (flip ? w - 1 - b.chim.x : b.chim.x), y0 + b.chim.y]);
+  STATS.houses++;
+  if (r() < P.clutter * 0.35) {
+    const s = spr(r.pick(['barrel', 'barrel', 'crate', 'crate', 'wood', 'cart']));
+    const cx = r.chance(0.5) ? x0 + w + 1 : x0 - s.w - 1, cy = y0 + h - s.h;
+    if (free(cx, cy, s.w, s.h, 0)) { mark(cx, cy, s.w, s.h, 1); addObj(s, cx, cy, { flip: r.chance(0.5) }); }
+  }
+}
+function frontage(road, r) {
+  const d = road.pts, n = d.length, hw = road.w / 2, kw = [0, 0.14, 0.9, 1, 1.1][road.kind];
+  for (const side of [-1, 1]) {
+    let i = r.int(0, 6);
+    while (i < n - 1) {
+      const p = d[i], [tx, ty] = tan(d, i), nx = -ty * side, ny = tx * side, t = td(p[0], p[1]);
+      const pr = road.kind === 1 ? (t > 1.1 && t < 2.2 ? kw * P.density * 0.3 : 0) : P.density * kw * falloff(t);
+      if (r() > pr) { i += r.int(3, 8); continue; }
+      const b = makeHouse(r, p[0], p[1]), w = b.s.w, h = b.s.h, gap = 2 + (r() < 0.3 ? 1 : 0);
+      const ext = Math.abs(nx) * w / 2 + Math.abs(ny) * h / 2;
+      const x0 = Math.round(p[0] + nx * (hw + gap + ext) - w / 2), y0 = Math.round(p[1] + ny * (hw + gap + ext) - h / 2);
+      if (free(x0, y0, w, h, 1, 0)) {
+        putHouse(b, x0, y0, r);
+        i += Math.ceil(Math.abs(tx) * w + Math.abs(ty) * h) + r.int(0, Math.round((1 - P.density) * 8));
+      } else i += 2;
+    }
+  }
+}
+// дворы и глубина кварталов: перебор сетки в случайном порядке
+function backfill(r) {
+  const st = 5, cells = [];
+  for (let y = Math.max(2, TC.y - TR.y * 1.3); y < Math.min(H - 2, TC.y + TR.y * 1.3); y += st)
+    for (let x = Math.max(2, TC.x - TR.x * 1.3); x < Math.min(W - 2, TC.x + TR.x * 1.3); x += st) cells.push([x, y]);
+  for (let i = cells.length - 1; i > 0; i--) { const j = Math.floor(r() * (i + 1)); [cells[i], cells[j]] = [cells[j], cells[i]]; }
+  for (const [cx, cy] of cells) {
+    const x = cx + r() * st, y = cy + r() * st;
+    if (r() > falloff(td(x, y)) * P.density ** 1.5) continue;
+    const d = RDIST[I(x, y)]; if (d > P.block * 0.75 || d < 4) continue;
+    const b = makeHouse(r, x, y, r.chance(0.5)), x0 = Math.round(x - b.s.w / 2), y0 = Math.round(y - b.s.h / 2);
+    if (free(x0, y0, b.s.w, b.s.h, 1, 0)) putHouse(b, x0, y0, r);
+  }
+}
+function plazaItems(r) {
+  if (!PLAZA) return;
+  const { x, y, rx, ry } = PLAZA;
+  const onPlaza = (x0, y0, w, h) => {
+    for (let yy = y0; yy < y0 + h; yy++) for (let xx = x0; xx < x0 + w; xx++) if (!inMap(xx, yy) || RD[I(xx, yy)] !== 5 || OCC[I(xx, yy)]) return false;
+    return true;
+  };
+  const R = Math.round(clamp(Math.min(rx, ry) * 0.3, 3, 6));
+  const f = rx >= 14 ? fountain(R) : spr('well');
+  const fx = Math.round(x - f.w / 2), fy = Math.round(y - f.h * 0.7);
+  if (onPlaza(fx, fy, f.w, f.h)) { addObj(f, fx, fy); mark(fx, fy, f.w, f.h, 1); }
+  const a0 = r.range(0, TAU);
+  for (let k = 0; k < P.market; k++) {
+    const s = stall(r), a = a0 + k * TAU / Math.max(P.market, 5);
+    for (const q of [0.6, 0.5, 0.7, 0.4, 0.8]) {
+      const sx = Math.round(x + Math.cos(a) * rx * q - s.w / 2), sy = Math.round(y + Math.sin(a) * ry * q - s.h / 2);
+      if (onPlaza(sx, sy, s.w, s.h)) { addObj(s, sx, sy); mark(sx - 1, sy - 1, s.w + 2, s.h + 2, 1); break; }
+    }
+  }
+}
+function genChurches(r) {
+  for (let k = 0; k < P.church; k++) {
+    const s = church(r); let done = false;
+    const put = (x0, y0) => { mark(x0, y0, s.w, s.h, 1); addObj(s, x0, y0, { flip: r.chance(0.5), sh: { x0: x0 + 2, y0: y0 + (s.h >> 1), x1: x0 + s.w + 2, y1: y0 + s.h + 1 } }); done = true; };
+    if (k === 0 && PLAZA) {
+      const a0 = r.range(0, TAU);
+      for (let j = 0; j < 16 && !done; j++) {
+        const a = a0 + j * TAU / 16, c = Math.cos(a), sn = Math.sin(a), ext = Math.abs(c) * s.w / 2 + Math.abs(sn) * s.h / 2 + 3;
+        const x0 = Math.round(PLAZA.x + c * (PLAZA.rx + ext) - s.w / 2), y0 = Math.round(PLAZA.y + sn * (PLAZA.ry + ext) - s.h / 2);
+        if (free(x0, y0, s.w, s.h, 1)) put(x0, y0);
+      }
+    }
+    for (let t = 0; t < 400 && !done; t++) {
+      const x = r.range(0, W), y = r.range(0, H); if (td(x, y) > 0.85) continue;
+      const x0 = Math.round(x - s.w / 2), y0 = Math.round(y - s.h / 2), by = Math.min(H - 1, y0 + s.h + 2);
+      if (free(x0, y0, s.w, s.h, 1) && RDIST[I(clamp(x, 0, W - 1), by)] < 6) put(x0, y0);
+    }
+  }
+}
+function genGardens(r) {
+  const n = Math.round(P.gardens * TR.x * TR.y / 260);
+  for (let k = 0, t = 0; k < n && t < n * 10; t++) {
+    const x = r.range(0, W), y = r.range(0, H); if (td(x, y) > 1.15) continue;
+    const dd = RDIST[I(x, y)]; if (dd > P.block || dd < 3) continue;
+    const gw = r.int(10, 20), gh = r.int(7, 13), x0 = Math.round(x - gw / 2), y0 = Math.round(y - gh / 2);
+    if (!free(x0, y0, gw, gh, 1)) continue;
+    FIELDS.push({ x0, y0, x1: x0 + gw - 1, y1: y0 + gh - 1, pat: r.pick(['cabbage', 'rows', 'cols', 'orchard', 'vine']), border: r.pick(['fence', 'fence', 'hedge', 'stone']) });
+    mark(x0, y0, gw, gh, 3); k++;
+  }
+}
+function outskirts(r) {
+  // хутора
+  for (let k = 0; k < P.farms; k++) for (let tries = 0; tries < 60; tries++) {
+    const x = Math.round(r.range(6, W - 60)), y = Math.round(r.range(6, H - 50)), t = td(x, y);
+    if (t < 1.15 || t > 2.8) continue;
+    const hA = houseA(r, { fw: r.pick([7, 9]), hw: r.int(4, 6) });
+    const barn = houseC(r, { L: r.int(14, 20), hw: r.int(5, 6), rh: r.int(5, 7), roof: 'thatch', barn: true });
+    const mh = Math.max(hA.s.h, barn.s.h), pw = r.int(28, 44), ph = r.int(14, 22);
+    const tw = Math.max(hA.s.w + 3 + barn.s.w, pw), th = mh + 3 + ph;
+    if (!free(x, y, tw, th, 3)) continue;
+    putHouse(hA, x, y + mh - hA.s.h, r); putHouse(barn, x + hA.s.w + 3, y + mh - barn.s.h, r);
+    const f = { x0: x, y0: y + mh + 3, x1: x + pw - 1, y1: y + mh + 2 + ph, pat: 'meadow', border: 'fence' };
+    FIELDS.push(f); mark(f.x0, f.y0, pw, ph, 3);
+    const na = Math.round(P.animals * pw * ph / 70);
+    for (let a = 0; a < na; a++) {
+      const s = spr(r.chance(0.6) ? 'sheep' : 'cow'), ax = r.int(f.x0 + 2, f.x1 - s.w - 1), ay = r.int(f.y0 + 2, f.y1 - s.h - 1);
+      addObj(s, ax, ay, { flip: r.chance(0.5) });
+    }
+    if (r.chance(0.7)) { const s = haystack(r), hx = x + tw + 3, hy = y + mh - s.h; if (free(hx, hy, s.w, s.h, 0)) { mark(hx, hy, s.w, s.h, 1); addObj(s, hx, hy); } }
+    connect(x + (hA.s.w >> 1), y + mh + 1, r);
+    break;
+  }
+  // мельницы
+  for (let k = 0; k < P.mills; k++) for (let tries = 0; tries < 80; tries++) {
+    const x = r.range(20, W - 20), y = r.range(30, H - 6), t = td(x, y);
+    if (t < 1.08 || t > 2.4) continue;
+    const s = windmill(r), x0 = Math.round(x - s.w / 2), y0 = Math.round(y - s.h + 1);
+    if (!free(x0, y0, s.w, s.h, 2)) continue;
+    mark(x0, y0, s.w, s.h, 1); addObj(s, x0, y0, { sh: { x0: Math.round(x) + 2, y0: Math.round(y) - 8, x1: Math.round(x) + 9, y1: Math.round(y) + 2 } });
+    connect(Math.round(x), Math.round(y) + 2, r);
+    break;
+  }
+  // водяная мельница
+  if (P.mills > 0 && RIVERS.length) {
+    const d = RIVERS[0].pts;
+    for (let tries = 0; tries < 200; tries++) {
+      const i = r.int(10, d.length - 10), p = d[i];
+      if (!inMap(p[0], p[1])) continue;
+      const t = td(p[0], p[1]); if (t < 0.7 || t > 1.7) continue;
+      const [tx, ty] = tan(d, i); if (Math.abs(ty) < 0.8) continue;     // только вдоль вертикального русла
+      const s = r.sgn(); let k = 0; while (k < 40 && wat(p[0] + s * k, p[1])) k++;
+      if (k >= 40) continue;
+      const bx = Math.round(p[0] + s * k), hb = houseA(r, { fw: 9, sw: r.int(4, 6), hw: 6 }), wh = wheel();
+      const x0 = s > 0 ? bx + 4 : bx - 4 - hb.s.w, y0 = Math.round(p[1] - hb.s.h + 4);
+      if (!free(x0, y0, hb.s.w, hb.s.h, 1)) continue;
+      putHouse(hb, x0, y0, r);
+      addObj(wh, s > 0 ? x0 - 8 : x0 + hb.s.w - 3, y0 + hb.s.h - 11, { base: y0 + hb.s.h + 1 });
+      connect(x0 + (hb.s.w >> 1), y0 + hb.s.h + 1, r);
+      break;
+    }
+  }
+  // поля
+  const nC = Math.round(P.fields * W * H / 6500);
+  for (let c = 0; c < nC; c++) {
+    let x = 0, y = 0, ok = false;
+    for (let tries = 0; tries < 30 && !ok; tries++) {
+      x = r.range(0, W - 20); y = r.range(0, H - 14);
+      const i = I(x, y); ok = td(x, y) > 1.08 && !WAT[i] && !OCC[i] && !RD[i];
+    }
+    if (!ok) continue;
+    const cols = r.int(1, 3), rows = r.int(1, 3), pw = r.int(16, 34), ph = r.int(10, 22), g = r.pick([2, 3, 4]);
+    for (let i = 0; i < cols; i++) for (let j = 0; j < rows; j++) {
+      const fx = Math.round(x + i * (pw + g)), fy = Math.round(y + j * (ph + g)), fw = pw + r.int(-4, 4), fh = ph + r.int(-3, 3);
+      if (!free(fx, fy, fw, fh, 1)) continue;
+      const pat = r.pick(['rows', 'rows', 'cols', 'cabbage', 'wheat', 'wheat', 'vine', 'plowed', 'meadow', 'orchard']);
+      FIELDS.push({ x0: fx, y0: fy, x1: fx + fw - 1, y1: fy + fh - 1, pat, border: r.pick(['fence', 'none', 'none', 'hedge', 'dots']) });
+      mark(fx, fy, fw, fh, 3);
+      if (r.chance(0.15)) { const s = spr('scare'); addObj(s, r.int(fx + 2, fx + fw - 7), r.int(fy + 1, fy + fh - 8)); }
+      else if (r.chance(P.people * 0.4)) { const s = spr(r.pick(['hat', 'man', 'woman'])); addObj(s, r.int(fx + 2, fx + fw - 5), r.int(fy + 1, fy + fh - 7)); }
+    }
+  }
+  // отары на лугах
+  const flocks = Math.round(P.animals * 4 * W * H / 150000);
+  for (let k = 0; k < flocks; k++) for (let tries = 0; tries < 30; tries++) {
+    const cx = r.range(10, W - 10), cy = r.range(10, H - 10), t = td(cx, cy);
+    if (t < 1.1 || t > 2.6) continue;
+    const n = r.int(3, 8);
+    for (let a = 0; a < n; a++) {
+      const s = spr('sheep'), x0 = Math.round(cx + r.range(-14, 14)), y0 = Math.round(cy + r.range(-9, 9));
+      if (free(x0, y0, s.w, s.h, 1)) { mark(x0, y0, s.w, s.h, 4); addObj(s, x0, y0, { flip: r.chance(0.5) }); }
+    }
+    break;
+  }
+}
+function waterside(r) {
+  // пристани
+  if (P.docks > 0) {
+    const piers = [], s = sd('dock');
+    for (let y = 3; y < H - 3; y += 2) for (let x = 3; x < W - 3; x += 2) {
+      const i = I(x, y); if (WAT[i] || OCC[i]) continue;
+      if (td(x, y) > 1.25) continue;
+      for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+        if (!wat(x + dx * 2, y + dy * 2) || wat(x - dx, y - dy)) continue;
+        if (h2(x, y, s + dx * 3 + dy) > P.docks * 0.06) continue;
+        if (piers.some(p => Math.hypot(p[0] - x, p[1] - y) < 18)) continue;
+        let L = 0; while (L < 24 && wat(x + dx * (L + 1), y + dy * (L + 1)) && wat(x + dx * (L + 5), y + dy * (L + 5))) L++;
+        if (L < 6) continue;
+        L = Math.min(L, r.int(8, 20));
+        const ex = x + dx * L, ey = y + dy * L;
+        piers.push([x, y]);
+        BRIDGES.push({ pts: [[x - dx, y - dy], [ex, ey]], w: 5, pier: true });
+        for (let k = 0; k <= L; k++) stampDisc(RD, x + dx * k, y + dy * k, 2.5, 2);
+        if (r.chance(0.6)) { const b = spr('row'), bx = dx ? ex - (dx > 0 ? b.w : 0) : ex + 4, by = dy ? ey - (dy > 0 ? 2 : 0) : ey + 4; addObj(b, bx, by, { flip: r.chance(0.5) }); }
+        if (r.chance(P.people)) addObj(spr('man'), ex - 1, ey - 6);
+      }
+    }
+  }
+  // лодки на открытой воде
+  for (let k = 0; k < P.boats; k++) for (let tries = 0; tries < 80; tries++) {
+    const x = r.range(8, W - 8), y = r.range(12, H - 4), big = r.chance(0.6), rad = big ? 9 : 5;
+    let ok = wat(x, y) && !RD[I(x, y)] && OCC[I(x, y)] !== 5;
+    for (let a = 0; a < 8 && ok; a++) ok = wat(x + Math.cos(a * TAU / 8) * rad, y + Math.sin(a * TAU / 8) * rad * 0.6);
+    if (!ok) continue;
+    const s = big ? sailboat(r) : spr('row'), x0 = Math.round(x - s.w / 2), y0 = Math.round(y + 2 - s.h);
+    addObj(s, x0, y0, { flip: r.chance(0.5) });
+    for (let yy = y - 6; yy < y + 6; yy++) for (let xx = x - rad - 2; xx < x + rad + 2; xx++) if (inMap(xx, yy)) OCC[I(xx, yy)] = 5;
+    break;
+  }
+}
+// ---------- деревья ----------
+function tryTree(r, x, y, kind, loose = false) {
+  const s = TREES[kind](r), bx = Math.round(x), by = Math.round(y), x0 = bx - (s.w >> 1), y0 = by - s.h + 1;
+  if (inMap(bx, by) && WAT[I(bx, by)]) return false;
+  const yA = loose ? by - 2 : y0 + Math.floor(s.h * 0.5), xa = loose ? bx - 1 : x0, xb = loose ? bx + 1 : x0 + s.w - 1;
+  for (let yy = yA; yy <= by + 1; yy++) for (let xx = xa; xx <= xb; xx++) {
+    if (!inMap(xx, yy)) continue; const i = I(xx, yy), o = OCC[i];
+    if (WAT[i] || RD[i] || o === 1 || o >= 3) return false;
+  }
+  for (let yy = y0; yy < by; yy++) for (let xx = x0; xx < x0 + s.w; xx++) if (inMap(xx, yy) && OCC[I(xx, yy)] === 1) return false;
+  // лиственным нужно больше места, хвойные можно ставить густо
+  const cw = kind === 'conifer' || kind === 'cypress' || loose ? 1 : Math.round(s.w * 0.3);
+  for (let yy = by - 3; yy <= by; yy++) for (let xx = bx - cw; xx <= bx + cw; xx++) if (inMap(xx, yy) && OCC[I(xx, yy)] === 2) return false;
+  addObj(s, x0, y0, { flip: r.chance(0.5), sh: { e: true, x: bx + 2, y: by, rx: (s.w >> 1) + 1, ry: 2 } });
+  for (let yy = by - 1; yy <= by; yy++) for (let xx = bx - cw; xx <= bx + cw; xx++) if (inMap(xx, yy)) OCC[I(xx, yy)] = 2;
+  STATS.trees++;
+  return true;
+}
+function nearWater(x, y, d) {
+  for (let a = 0; a < 8; a++) if (wat(x + Math.cos(a * TAU / 8) * d, y + Math.sin(a * TAU / 8) * d)) return true;
+  return false;
+}
+function genTrees(r) {
+  const sK = sd('kind');
+  const pick = (x, y) => {
+    const t = td(x, y);
+    if (nearWater(x, y, 7) && r.chance(0.35)) return 'willow';
+    if (t < 1) return r.pick(['round', 'round', 'fruit', 'cypress', 'dark']);
+    const pc = P.treeKind === 'хвойные' ? 0.88 : P.treeKind === 'лиственные' ? 0.06 : smooth(0.38, 0.62, fbm2(x / 110, y / 110, sK));
+    return r() < pc ? 'conifer' : r.pick(['round', 'round', 'dark', 'round', 'bush']);
+  };
+  if (P.avenue) for (const R of ROADS) {
+    if (R.kind !== 4) continue;
+    const d = R.pts, kind = r.pick(['cypress', 'round', 'cypress']);
+    for (let i = 4; i < d.length * 0.45; i += 9) {
+      if (td(d[i][0], d[i][1]) > 1.3) continue;
+      const [tx, ty] = tan(d, i), off = R.w / 2 + 3;
+      for (const s of [-1, 1]) tryTree(r, d[i][0] - ty * off * s, d[i][1] + tx * off * s + 1, kind, true);
+    }
+  }
+  const c = 5, sF = sd('forest'), thr = 1 - P.forest, soft = mix(0.3, 0.04, P.clump);
+  for (let gy = -2; gy < H + 10; gy += c) for (let gx = -3; gx < W + 3; gx += c) {
+    const x = gx + r() * c, y = gy + r() * c, t = td(x, y);
+    const f = clamp((fbm2(x / 75, y / 75, sF) - 0.5) * 2.4 + 0.5, 0, 1);
+    let p = smooth(thr - soft, thr + soft, f) * smooth(0.92, 1.3, t) * (P.forest > 0 ? 1 : 0);
+    p = Math.max(p, P.forest * 0.05 * smooth(0.95, 1.2, t), P.cityTrees * 0.3 * (1 - smooth(0.85, 1.15, t)));
+    if (r() < p) tryTree(r, x, y, pick(x, y));
+  }
+  const nr = Math.round(P.rocks * W * H / 1600);
+  for (let k = 0; k < nr; k++) {
+    const x = r.range(2, W - 2), y = r.range(4, H - 2);
+    if (td(x, y) < 0.9 && r.chance(0.7)) continue;
+    if (r.chance(0.5)) { tryTree(r, x, y, 'bush'); continue; }
+    const s = rock(r), x0 = Math.round(x), y0 = Math.round(y);
+    if (free(x0, y0, s.w, s.h, 0)) { mark(x0, y0, s.w, s.h, 2); addObj(s, x0, y0); }
+  }
+}
+function genPeople(r) {
+  const cand = [], plaza = [];
+  for (let i = 0; i < W * H; i++) { if (RD[i] >= 2) cand.push(i); if (RD[i] === 5) plaza.push(i); }
+  const place = (i, key) => {
+    const x = i % W, y = (i / W) | 0, s = spr(key), x0 = x - 1, y0 = y - s.h + 1;
+    for (let yy = y0; yy <= y + 1; yy++) for (let xx = x0 - 1; xx <= x0 + s.w; xx++) {
+      if (!inMap(xx, yy)) return false; const j = I(xx, yy);
+      if (OCC[j] || (WAT[j] && !RD[j])) return false;
+    }
+    addObj(s, x0, y0, { flip: r.chance(0.5) }); mark(x0 - 1, y0, s.w + 2, s.h + 1, 4); STATS.people++;
+    return true;
+  };
+  const nP = Math.round(P.people * cand.length / 100);
+  for (let k = 0, t = 0; k < nP && t < nP * 6 && cand.length; t++) {
+    const i = cand[r.int(0, cand.length - 1)];
+    if (r() > 1.15 - td(i % W, (i / W) | 0) * 0.6) continue;
+    if (place(i, r.pick(FOLK))) k++;
+  }
+  const nPl = Math.round(P.people * plaza.length / 45);
+  for (let k = 0, t = 0; k < nPl && t < nPl * 6 && plaza.length; t++) if (place(plaza[r.int(0, plaza.length - 1)], r.pick(FOLK))) k++;
+  if (CASTLE && P.people > 0) for (const s of [-1, 1]) {
+    const g = spr('guard'), gx = CASTLE.cx + s * ((CASTLE.c.gw >> 1) + 4) - (s < 0 ? g.w - 1 : 0);
+    addObj(g, gx, CASTLE.gy1 + 1, { flip: s < 0 });
+  }
+  const nc = Math.round(P.clutter * 5);
+  const mains = cand.filter(i => RD[i] >= 3);
+  for (let k = 0, t = 0; k < nc && t < 60 && mains.length; t++) {
+    const i = mains[r.int(0, mains.length - 1)], s = spr('cart'), x0 = (i % W) - 4, y0 = ((i / W) | 0) - 4;
+    if (x0 < 1 || y0 < 1 || x0 + s.w >= W || y0 + s.h >= H) continue;
+    let ok = true;
+    for (let yy = y0; yy < y0 + s.h && ok; yy++) for (let xx = x0; xx < x0 + s.w; xx++) if (OCC[I(xx, yy)] || !RD[I(xx, yy)]) { ok = false; break; }
+    if (ok) { addObj(s, x0, y0, { flip: r.chance(0.5) }); mark(x0, y0, s.w, s.h, 4); k++; }
+  }
+}
+
+// ---------- генерация ----------
+function generate() {
+  const [aw, ah] = P.aspect.split(':').map(Number);
+  if (aw >= ah) { W = Math.round(P.size); H = Math.round(P.size * ah / aw); } else { H = Math.round(P.size); W = Math.round(P.size * aw / ah); }
+  WAT = new Uint8Array(W * H); RD = new Uint8Array(W * H); OCC = new Uint8Array(W * H);
+  OBJ = []; ROADS = []; BRIDGES = []; FIELDS = []; SMOKE = []; RS = null; PLAZA = null;
+  STATS = { houses: 0, trees: 0, people: 0 };
+  sTown = sd('town');
+  TR = { x: P.townR * W * 1.25, y: P.townR * H * 0.85 };
+  TC = { x: W / 2, y: H * 0.5 };
+  CASTLE = planCastle(rng('castle'));
+  if (CASTLE) {
+    if (P.castle === 'сверху') TC = { x: CASTLE.cx, y: CASTLE.gateY + (H - CASTLE.gateY) * 0.42 };
+    else if (P.castle === 'в центре') TC = { x: CASTLE.cx, y: CASTLE.gateY + 10 + plazaR() };
+    else TC = { x: P.river === 'справа' ? W * 0.58 : W * 0.42, y: H * 0.56 };
+  }
+  genRivers(rng('river'));
+  genSea();
+  if (P.layout === 'вдоль реки' && RIVERS.length) {
+    RS = riverSide();
+    const { d, ic, side, rv } = RS, [tx, ty] = tan(d, ic), o = rv.w / 2 + 14 + P.block * 0.6;
+    TC = { x: d[ic][0] - ty * side * o, y: d[ic][1] + tx * side * o };
+  }
+  for (let k = 0; k < 40 && wat(TC.x, TC.y); k++) { TC.x = mix(TC.x, W / 2, 0.15); TC.y = mix(TC.y, H * 0.4, 0.15); }
+  genLakes(rng('lakes'));
+  if (CASTLE) placeCastle(rng('castle2'));
+
+  const rr = rng('roads');
+  if (CASTLE && !(aligned() && (P.layout === 'осевая' || P.layout === 'сетка'))) {
+    const g = [CASTLE.gateX, CASTLE.gateY];
+    addRoad(wob([g, [g[0], g[1] + 10], [TC.x, TC.y]], 0.3, rr), 4, { min: 2 });
+  }
+  ({ 'осевая': layAxial, 'сетка': layGrid, 'радиальная': layRadial, 'органическая': layOrganic, 'вдоль реки': layRiverside })[P.layout](rr);
+  addPlaza(rr);
+  roadsOut(rng('out'));
+  RDIST = distField(RD);
+  buildWalls(rng('walls'));
+
+  const rb = rng('build');
+  plazaItems(rb);
+  genChurches(rb);
+  for (const R of ROADS.slice().sort((a, b) => b.kind - a.kind)) frontage(R, rb);
+  backfill(rb);
+  genGardens(rng('gardens'));
+  outskirts(rng('outskirts'));
+  waterside(rng('water'));
+  genTrees(rng('trees'));
+  genPeople(rng('people'));
+}
+
+// ---------- рендер ----------
+function drawField(f) {
+  const { x0, y0, x1, y1 } = f, pat = FP[f.pat];
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const b = x === x0 || x === x1 || y === y0 || y === y1, b2 = x <= x0 + 1 || x >= x1 - 1 || y <= y0 + 1 || y >= y1 - 1;
+    let v = pat(x, y);
+    if (f.border === 'fence' && b) v = (y === y0 || y === y1) ? INK : (y % 2 ? INK : PAPER);
+    else if (f.border === 'hedge' && b2) v = dith(x, y, 0.75) ? INK : PAPER;
+    else if (f.border === 'stone' && b) v = (x + y) % 3 === 0 ? PAPER : INK;
+    else if (f.border === 'dots' && b) v = (x + y) % 3 === 0 ? INK : PAPER;
+    else if (b2 && f.border !== 'none') v = PAPER;
+    px(x, y, v);
+  }
+  if (f.border === 'fence') for (let x = x0; x <= x1; x += 4) { px(x, y0 - 1, INK); px(x, y1 - 1, INK); }
+}
+function drawBridge(b) {
+  const [a, c] = [b.pts[0], b.pts[b.pts.length - 1]], L = Math.hypot(c[0] - a[0], c[1] - a[1]) || 1;
+  const tx = (c[0] - a[0]) / L, ty = (c[1] - a[1]) / L, hw = (b.w - 1) / 2;
+  const x0 = Math.floor(Math.min(a[0], c[0]) - b.w), x1 = Math.ceil(Math.max(a[0], c[0]) + b.w);
+  const y0 = Math.floor(Math.min(a[1], c[1]) - b.w), y1 = Math.ceil(Math.max(a[1], c[1]) + b.w);
+  for (let y = y0; y <= y1; y++) for (let x = x0; x <= x1; x++) {
+    const qx = x + 0.5 - a[0], qy = y + 0.5 - a[1], al = qx * tx + qy * ty, ac = Math.abs(-qx * ty + qy * tx);
+    if (al < 0 || al > L) continue;
+    if (ac <= hw + 0.5) px(x, y, ac > hw - 0.5 ? INK : (Math.floor(al) % 3 === 0 ? INK : PAPER));
+    else if (ac <= hw + 1.5 && inMap(x, y) && WAT[I(x, y)]) px(x, y, !b.pier && Math.floor(al) % 4 === 0 ? INK : PAPER);
+  }
+}
+function render() {
+  const buf = new Uint8Array(W * H).fill(PAPER); T = { w: W, h: H, d: buf };
+  const sg = sd('grain'), sg2 = sg + 11;
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x;
+    if (WAT[i]) { buf[i] = INK; continue; }
+    const k = RD[i];
+    if (k) {
+      const e = (x > 0 && !RD[i - 1] && !WAT[i - 1]) || (x < W - 1 && !RD[i + 1] && !WAT[i + 1]) || (y > 0 && !RD[i - W] && !WAT[i - W]) || (y < H - 1 && !RD[i + W] && !WAT[i + W]);
+      if (e) buf[i] = k !== 5 && (x + y) % 2 ? INK : PAPER;
+      else if (k <= 2) buf[i] = h2(x, y, 5) < 0.025 ? INK : PAPER;
+      else if (k === 3) buf[i] = h2(x, y, 7) < 0.05 ? INK : PAPER;
+      else if (k === 4) buf[i] = ((x & 3) === 0 && (y & 3) === 0) || ((x & 3) === 2 && (y & 3) === 2) ? INK : PAPER;
+      else buf[i] = (x % 5 === 0 && y % 2 === 0) || (y % 4 === 0 && x % 2 === 0) ? INK : PAPER;
+      continue;
+    }
+    if (P.grain > 0 && h2(x, y, sg) < P.grain * 0.1 * (0.15 + 1.7 * n2(x / 15, y / 15, sg2) ** 2)) buf[i] = INK;
+  }
+  // берег: растушёвка суши у воды
+  for (let y = 0; y < H; y++) for (let x = 0; x < W; x++) {
+    const i = y * W + x; if (WAT[i] || RD[i]) continue;
+    if (wat(x - 1, y) || wat(x + 1, y) || wat(x, y - 1) || wat(x, y + 1)) { if (dith(x, y, 0.5)) buf[i] = INK; }
+    else if (wat(x - 2, y) || wat(x + 2, y) || wat(x, y - 2) || wat(x, y + 2)) { if (dith(x, y, 0.19)) buf[i] = INK; }
+  }
+  const rt = rng('tufts'), nT = Math.round(P.grain * W * H / 150);
+  for (let k = 0; k < nT; k++) {
+    const x = rt.int(1, W - 2), y = rt.int(1, H - 1), i = y * W + x;
+    if (!WAT[i] && !RD[i] && OCC[i] !== 3 && !RD[i - W] && !WAT[i - 1] && !WAT[i + 1]) { px(x - 1, y, INK); px(x, y - 1, INK); px(x + 1, y, INK); px(x, y, PAPER); }
+  }
+  for (const f of FIELDS) drawField(f);
+  // рябь
+  const rw = rng('waves'), nW = Math.round(P.waves * W * H / 90);
+  for (let k = 0; k < nW; k++) {
+    const x = rw.int(2, W - 6), y = rw.int(2, H - 4);
+    let ok = true;
+    for (let yy = y - 2; yy <= y + 3 && ok; yy++) for (let xx = x - 2; xx <= x + 5; xx++) if (!wat(xx, yy) || RD[I(xx, yy)]) { ok = false; break; }
+    if (ok) { px(x, y + 1, PAPER); px(x + 1, y, PAPER); px(x + 2, y, PAPER); px(x + 3, y + 1, PAPER); }
+  }
+  for (const b of BRIDGES) drawBridge(b);
+  if (P.shadows) for (const o of OBJ) {
+    const s = o.sh; if (!s) continue;
+    const put = (x, y) => { if (inMap(x, y) && !WAT[I(x, y)] && buf[I(x, y)] === PAPER && dith(x, y, 0.5)) buf[I(x, y)] = INK; };
+    if (s.e) { for (let y = s.y - s.ry; y <= s.y + s.ry; y++) for (let x = s.x - s.rx; x <= s.x + s.rx; x++) if (((x - s.x) / s.rx) ** 2 + ((y - s.y) / s.ry) ** 2 <= 1) put(x, y); }
+    else for (let y = s.y0; y <= s.y1; y++) for (let x = s.x0; x <= s.x1; x++) put(x, y);
+  }
+  OBJ.sort((a, b) => a.y - b.y || a.x - b.x);
+  for (const o of OBJ) blit(o.s, o.x, o.y0, o.flip, o.halo);
+  const WISP = [[0, 0], [0, -1], [1, -3], [1, -4], [2, -6], [4, -7], [5, -9]];
+  for (const [x, y] of SMOKE) for (const [dx, dy] of WISP) px(x + dx, y + dy, INK);
+  if (P.frame) {
+    for (let x = 0; x < W; x++) { px(x, 0, INK); px(x, H - 1, INK); px(x, 1, PAPER); px(x, H - 2, PAPER); if (x >= 2 && x < W - 2) { px(x, 2, INK); px(x, H - 3, INK); } }
+    for (let y = 0; y < H; y++) { px(0, y, INK); px(W - 1, y, INK); if (y >= 1 && y < H - 1) { px(1, y, PAPER); px(W - 2, y, PAPER); } if (y >= 2 && y < H - 2) { px(2, y, INK); px(W - 3, y, INK); } }
+  }
+  BUF = buf;
+}
+
+// ---------- вывод ----------
+const cv = $('cv'), ctx = cv.getContext('2d');
+const hex2rgb = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+function paint() {
+  cv.width = W; cv.height = H;
+  const [pa, ink] = PALS[P.pal].map(hex2rgb), img = ctx.createImageData(W, H), D = img.data;
+  for (let i = 0; i < W * H; i++) { const c = BUF[i] === INK ? ink : pa; D[i * 4] = c[0]; D[i * 4 + 1] = c[1]; D[i * 4 + 2] = c[2]; D[i * 4 + 3] = 255; }
+  ctx.putImageData(img, 0, 0);
+  document.body.style.setProperty('--acc', PALS[P.pal][0] === '#f2efe6' ? '#e0c27a' : PALS[P.pal][1]);
+}
+function fit() {
+  if (!W) return;
+  const st = $('stage'), pad = st.clientWidth < 500 ? 12 : 28, dpr = devicePixelRatio || 1;
+  let s = Math.min((st.clientWidth - pad * 2) / W, (st.clientHeight - pad * 2) / H);
+  if (P.pix !== 'авто') s = +P.pix / dpr;
+  else s = Math.max(1, Math.floor(s * dpr)) / dpr;
+  cv.style.width = W * s + 'px'; cv.style.height = H * s + 'px';
+}
+function draw(full = true) {
+  const t0 = performance.now();
+  if (full) { generate(); render(); }
+  paint(); fit();
+  $('status').textContent = `${W}×${H} px · домов ${STATS.houses} · деревьев ${STATS.trees} · жителей ${STATS.people}\n${Math.round(performance.now() - t0)} ms`;
+  writeHash();
+}
+function writeHash() {
+  const q = new URLSearchParams();
+  q.set('seed', SEED);
+  for (const it of SCHEMA) if (it.length > 1 && P[it[0]] !== it[it.length - 1]) q.set(it[0], P[it[0]]);
+  history.replaceState(null, '', '#' + q.toString());
+}
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (!q.has('seed')) return false;
+  SEED = q.get('seed'); $('seed').value = SEED;
+  for (const it of SCHEMA) {
+    if (it.length === 1 || !q.has(it[0])) continue;
+    const v = q.get(it[0]), def = it[it.length - 1];
+    setP(it[0], typeof def === 'boolean' ? v === 'true' : typeof def === 'number' ? +v : v);
+  }
+  return true;
+}
+let raf = 0, wantFull = false;
+function schedule(full = true) {
+  wantFull = wantFull || full;
+  if (!raf) raf = requestAnimationFrame(() => { raf = 0; const f = wantFull; wantFull = false; draw(f); });
+}
+
+// ---------- ui ----------
+const inputs = {};
+function fmt(v, step) { return step >= 1 ? String(Math.round(v)) : (+v).toFixed(2); }
+function buildUI() {
+  const root = $('controls');
+  for (const it of SCHEMA) {
+    if (it.length === 1) { const h = document.createElement('h2'); h.textContent = it[0]; root.appendChild(h); continue; }
+    const [key, label, a, b, step] = it, full = !VIEW_ONLY.has(key);
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = label; row.appendChild(lab);
+    if (a === 'sel') {
+      const sel = document.createElement('select');
+      for (const o of b) sel.add(new Option(o, o));
+      sel.value = P[key];
+      sel.onchange = () => { P[key] = sel.value; $('scene').value = ''; schedule(full); };
+      row.append(sel, document.createElement('span'));
+      inputs[key] = { set: v => { sel.value = v; } };
+    } else if (a === 'chk') {
+      const ch = document.createElement('input'); ch.type = 'checkbox'; ch.checked = P[key];
+      ch.onchange = () => { P[key] = ch.checked; $('scene').value = ''; schedule(full); };
+      row.append(ch, document.createElement('span'));
+      inputs[key] = { set: v => { ch.checked = v; } };
+    } else {
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = a; inp.max = b; inp.step = step; inp.value = P[key];
+      const out = document.createElement('output'); out.textContent = fmt(P[key], step);
+      inp.oninput = () => { P[key] = +inp.value; out.textContent = fmt(P[key], step); $('scene').value = ''; schedule(full); };
+      row.append(inp, out);
+      inputs[key] = { set: v => { inp.value = v; out.textContent = fmt(v, step); } };
+    }
+    root.appendChild(row);
+  }
+  $('seed').value = SEED;
+  $('seed').onchange = () => { SEED = $('seed').value.trim() || '0'; schedule(); };
+  const sc = $('scene');
+  sc.add(new Option('—', ''));
+  for (const k of Object.keys(SCENES)) sc.add(new Option(k, k));
+  sc.onchange = () => { if (sc.value) applyScene(sc.value); };
+}
+function setP(key, v) { P[key] = v; inputs[key]?.set(v); }
+function applyScene(name) {
+  const keep = { aspect: P.aspect, size: P.size, pal: P.pal, pix: P.pix, grain: P.grain, frame: P.frame, shadows: P.shadows };
+  for (const k in DEF) setP(k, k in keep ? keep[k] : DEF[k]);
+  for (const [k, v] of Object.entries(SCENES[name])) setP(k, v);
+  schedule();
+}
+function newTown() { SEED = Math.random().toString(36).slice(2, 8); $('seed').value = SEED; schedule(); }
+function randomStyle() {
+  const r = Rng(String(Math.random())), f = (a, b) => +r.range(a, b).toFixed(2);
+  setP('layout', r.pick(['осевая', 'сетка', 'радиальная', 'органическая', 'органическая', 'вдоль реки']));
+  setP('townR', f(0.22, 0.5)); setP('density', f(0.3, 0.95)); setP('falloff', f(0.2, 0.8));
+  setP('block', r.int(26, 50)); setP('wobble', f(0, 0.7)); setP('tall', f(0, 0.7)); setP('plaza', f(0.15, 0.8));
+  setP('market', r.int(0, 8)); setP('church', r.int(0, 2));
+  setP('walls', r.pick(['нет', 'нет', 'частокол', 'каменные'])); setP('gardens', f(0, 0.6));
+  setP('castle', r.pick(['нет', 'сверху', 'сверху', 'в центре', 'сбоку'])); setP('castleSize', f(0.7, 1.3));
+  setP('moat', r.chance(0.6)); setP('avenue', r.chance(0.5));
+  setP('river', r.pick(['нет', 'слева', 'справа', 'через центр', 'поперёк', 'две']));
+  setP('riverW', r.int(8, 28)); setP('meander', f(0.1, 0.8));
+  setP('sea', r.pick(['нет', 'нет', 'снизу', 'слева', 'справа', 'угол', 'остров'])); setP('seaAmt', f(0.15, 0.55));
+  setP('lakes', r.int(0, 3)); setP('docks', f(0.2, 1)); setP('boats', r.int(0, 10));
+  setP('forest', f(0.2, 0.9)); setP('clump', f(0.1, 0.9)); setP('treeKind', r.pick(['смесь', 'смесь', 'хвойные', 'лиственные']));
+  setP('cityTrees', f(0, 0.6)); setP('rocks', f(0, 0.6));
+  setP('fields', f(0.1, 0.7)); setP('farms', r.int(0, 5)); setP('mills', r.int(0, 3)); setP('animals', f(0, 0.7));
+  setP('roadsOut', r.int(0, 4)); setP('people', f(0.1, 0.7)); setP('clutter', f(0.1, 0.8));
+  $('scene').value = '';
+  newTown();
+}
+function savePng() {
+  const k = Math.max(2, Math.round(2400 / Math.max(W, H)));
+  const off = document.createElement('canvas'); off.width = W * k; off.height = H * k;
+  const g = off.getContext('2d'); g.imageSmoothingEnabled = false; g.drawImage(cv, 0, 0, W * k, H * k);
+  off.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = `town-${SEED}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+$('bNew').onclick = newTown;
+$('bStyle').onclick = randomStyle;
+$('bSave').onclick = savePng;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n' || k === 'т') newTown();
+  else if (k === 'm' || k === 'ь') randomStyle();
+  else if (k === 's' || k === 'ы') savePng();
+});
+let rsT = 0;
+new ResizeObserver(() => { clearTimeout(rsT); rsT = setTimeout(fit, 100); }).observe($('stage'));
+
+buildUI();
+if (!readHash()) { $('scene').value = 'королевский град'; }
+schedule();
+</script>
+</body>
+</html>
