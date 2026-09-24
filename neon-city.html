@@ -1,0 +1,1020 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Neon City</title>
+<style>
+  :root { --bg:#07060d; --panel:#100f17; --fg:#ddd; --dim:#777; --acc:#2af5c6; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center; overflow:hidden; background:#040308; }
+  #cv { display:block; cursor:grab; touch-action:none; }
+  #cv.drag { cursor:grabbing; }
+  #panel { width:290px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #1e1d28; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #22212c; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 104px 1fr 40px; align-items:center; gap:6px; margin:4px 0; }
+  .row label { color:var(--dim); }
+  .row output { text-align:right; }
+  .row input[type=checkbox] { justify-self:start; accent-color:var(--acc); margin:0; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#08070d; color:var(--fg); border:1px solid #2c2b36; padding:4px 6px; font:inherit; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1 1 40%; background:#1a1924; color:var(--fg); border:1px solid #2c2b36; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; white-space:pre; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) { body { flex-direction:column; } #stage { height:62vh; flex:none; } #panel { width:100%; } }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Neon City</h1>
+  <div class="btns">
+    <button id="bNew" title="N">новый город</button>
+    <button id="bStyle" title="M">случайные параметры</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>seed</label><input type="text" id="seed"><span></span></div>
+  <div class="row"><label>пресет</label><select id="scene"></select><span></span></div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Неоновый каркасный город в ортографической проекции. Порядок постройки: сетка кварталов с улицами и авеню →
+    вода (кварталы уходят под воду целиком, набережные по краю) → парки → нарезка кварталов на участки →
+    поле высот от центров-даунтаунов + шум → на каждом участке здание: подиум, башня из уступов
+    (прямоугольная, со срезанными углами или круглая), верх — плоская крыша с мелочами и антеннами,
+    пирамида, косой срез или шпиль.<br><br>
+    Каждое тело — выпуклая призма; тёмные грани закрывают то, что позади, порядок рисования — топологическая
+    сортировка по разделяющим плоскостям. Потом свечение, хроматика, зерно, сканлайны.<br><br>
+    Тянуть мышью — поворот и наклон камеры, колесо — масштаб, shift+тянуть — сдвиг.<br>
+    Состояние хранится в адресе — ссылку можно сохранить.<br><br>
+    N — новый · M — случайные параметры · S — PNG ×2
+  </div>
+</div>
+
+<script>
+// ---------- utils ----------
+const $ = id => document.getElementById(id);
+const clamp = (x, a, b) => x < a ? a : x > b ? b : x;
+const mix = (a, b, t) => a + (b - a) * t;
+const smooth = (a, b, x) => { x = clamp((x - a) / (b - a), 0, 1); return x * x * (3 - 2 * x); };
+const TAU = Math.PI * 2;
+
+function hashStr(s) { let h = 2166136261; for (let i = 0; i < s.length; i++) h = Math.imul(h ^ s.charCodeAt(i), 16777619); return h >>> 0; }
+const mulberry = a => () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+  t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+function Rng(key) {
+  const r = mulberry(hashStr(key));
+  r.range = (a, b) => a + (b - a) * r();
+  r.int = (a, b) => a + Math.floor(r() * (b - a + 1));
+  r.pick = a => a[Math.floor(r() * a.length)];
+  r.chance = p => r() < p;
+  r.sgn = () => r() < 0.5 ? -1 : 1;
+  return r;
+}
+let SEED = Math.random().toString(36).slice(2, 8);
+// у каждой подсистемы свой поток случайности
+const rng = (...k) => Rng(SEED + '/' + k.join('/'));
+const sd = k => hashStr(SEED + '#' + k) & 0xffffff;
+
+// ---------- noise ----------
+function h2(x, y, s) {
+  let h = Math.imul(x | 0, 0x27d4eb2d) ^ Math.imul(y | 0, 0x165667b1) ^ Math.imul(s | 0, 0x9e3779b1);
+  h = Math.imul(h ^ (h >>> 15), 0x85ebca6b); h = Math.imul(h ^ (h >>> 13), 0xc2b2ae35);
+  return ((h ^ (h >>> 16)) >>> 0) / 4294967296;
+}
+function n2(x, y, s) {
+  const xi = Math.floor(x), yi = Math.floor(y), xf = x - xi, yf = y - yi;
+  const u = xf * xf * (3 - 2 * xf), v = yf * yf * (3 - 2 * yf);
+  return mix(mix(h2(xi, yi, s), h2(xi + 1, yi, s), u), mix(h2(xi, yi + 1, s), h2(xi + 1, yi + 1, s), u), v);
+}
+function fbm2(x, y, s, oct = 4) {
+  let v = 0, a = 0.5, n = 0;
+  for (let k = 0; k < oct; k++) { v += a * n2(x, y, s + k * 131); n += a; x *= 2.03; y *= 2.03; a *= 0.5; }
+  return v / n;
+}
+
+// ---------- цвет ----------
+const rgb = h => { const n = parseInt(h.slice(1), 16); return [n >> 16 & 255, n >> 8 & 255, n & 255]; };
+const rgba = (c, a = 1) => `rgba(${c[0] | 0},${c[1] | 0},${c[2] | 0},${a})`;
+const mixc = (a, b, t) => [mix(a[0], b[0], t), mix(a[1], b[1], t), mix(a[2], b[2], t)];
+
+// повтор цвета в списке = его вес
+const PALS = {
+  'неон':      { bg: '#0b0a1c', c: ['#2af5c6', '#2af5c6', '#1ed6ff', '#1ed6ff', '#ff2d6a', '#ff2d6a', '#ff3ce6', '#f2ff3c', '#5a6cff', '#a64dff', '#44ff7a'], hi: '#fff3f7', car: ['#ff2a45', '#fff0d0'] },
+  'синтвейв':  { bg: '#140a26', c: ['#ff2fa8', '#ff2fa8', '#ff6b3d', '#ffc83d', '#b43dff', '#b43dff', '#3dd9ff'], hi: '#fff0e0', car: ['#ff2a55', '#ffe0a0'] },
+  'вапорвейв': { bg: '#150d2b', c: ['#ff71ce', '#01cdfe', '#05ffa1', '#b967ff', '#fffb96'], hi: '#ffffff', car: ['#ff71ce', '#fffb96'] },
+  'матрица':   { bg: '#020c06', c: ['#00ff66', '#00ff66', '#2dffa0', '#a6ff3a', '#10c060', '#d6ffe4'], hi: '#eafff0', car: ['#00ff66', '#d6ffe4'] },
+  'лёд':       { bg: '#050e1b', c: ['#7ae8ff', '#7ae8ff', '#3aa2ff', '#dff9ff', '#5c7cff', '#9ff5e6'], hi: '#ffffff', car: ['#ff4060', '#e8f6ff'] },
+  'янтарь':    { bg: '#110803', c: ['#ffb23d', '#ffb23d', '#ff7a1a', '#ffd98a', '#ff4d1a', '#fff0c8'], hi: '#fff6e0', car: ['#ff3a1a', '#fff0c0'] },
+  'кровь':     { bg: '#0e0307', c: ['#ff2342', '#ff2342', '#ff5a70', '#ff9eaa', '#c0002c', '#ffe0e4'], hi: '#ffffff', car: ['#ff2342', '#ffe0e4'] },
+  'токсик':    { bg: '#0a0b10', c: ['#c6ff00', '#c6ff00', '#ff00a8', '#00e5ff', '#7a5cff'], hi: '#f7ffd6', car: ['#ff00a8', '#f7ffd6'] },
+  'чертёж':    { bg: '#0b2350', c: ['#d6e8ff', '#8fbaff', '#ffffff', '#a8d0ff'], hi: '#ffffff', car: ['#ffffff', '#d6e8ff'] },
+  'моно':      { bg: '#07070a', c: ['#f2f2f2', '#c2c2c2', '#8e8e8e'], hi: '#ffffff', car: ['#ffffff', '#bdbdbd'] },
+};
+
+// ---------- параметры ----------
+const SCHEMA = [
+  ['Город'],
+  ['bx', 'кварталов по X', 3, 30, 1, 12],
+  ['by', 'кварталов по Y', 3, 30, 1, 12],
+  ['block', 'квартал, м', 20, 120, 1, 52],
+  ['stretch', 'вытянутость', 0.4, 3, 0.01, 1.3],
+  ['blockVar', 'разнобой', 0, 1, 0.01, 0.35],
+  ['street', 'улицы, м', 3, 24, 0.5, 9],
+  ['avenue', 'авеню каждые', 0, 8, 1, 4],
+  ['lot', 'участок, м', 8, 60, 1, 16],
+  ['merge', 'цельные кварталы', 0, 1, 0.01, 0.15],
+  ['parks', 'парки', 0, 0.6, 0.01, 0.05],
+  ['water', 'вода', 'sel', ['нет', 'река', 'залив', 'канал', 'остров'], 'нет'],
+  ['waterAmt', 'сколько воды', 0, 1, 0.01, 0.4],
+  ['Высоты'],
+  ['hMax', 'макс. высота', 20, 600, 5, 240],
+  ['hMin', 'мин. высота', 2, 60, 1, 8],
+  ['centers', 'центры', 0, 5, 1, 2],
+  ['focus', 'концентрация', 0, 1, 0.01, 0.55],
+  ['hNoise', 'хаос высот', 0, 1, 0.01, 0.35],
+  ['spikes', 'рекордсмены', 0, 1, 0.01, 0.15],
+  ['Здания'],
+  ['setback', 'уступы', 0, 1, 0.01, 0.55],
+  ['podium', 'подиумы', 0, 1, 0.01, 0.35],
+  ['round', 'круглые', 0, 1, 0.01, 0.07],
+  ['chamfer', 'срезанные углы', 0, 1, 0.01, 0.15],
+  ['roofs', 'пирамидки', 0, 1, 0.01, 0.15],
+  ['wedge', 'косые крыши', 0, 1, 0.01, 0.1],
+  ['spires', 'шпили', 0, 1, 0.01, 0.25],
+  ['clutter', 'крышные мелочи', 0, 1, 0.01, 0.5],
+  ['signs', 'вывески', 0, 1, 0.01, 0.2],
+  ['colorMix', 'пестрота', 0, 1, 0.01, 0.45],
+  ['Свет'],
+  ['pal', 'палитра', 'sel', Object.keys(PALS), 'неон'],
+  ['windows', 'окна', 0, 1, 0.01, 0.6],
+  ['winStep', 'шаг окон, м', 1, 6, 0.1, 2],
+  ['bands', 'пояса', 0, 1, 0.01, 0.35],
+  ['trim', 'кромки', 0, 1, 0.01, 0.4],
+  ['roofDots', 'точки на крышах', 0, 1, 0.01, 0.5],
+  ['groundDots', 'огни улиц', 0, 1, 0.01, 0.5],
+  ['traffic', 'трафик', 0, 1, 0.01, 0.35],
+  ['lineW', 'толщина линий', 0.3, 3, 0.05, 1],
+  ['faces', 'заливка граней', 0, 1, 0.01, 0.92],
+  ['Камера'],
+  ['az', 'азимут', 0, 360, 1, 36],
+  ['el', 'наклон', 12, 90, 1, 44],
+  ['zoom', 'масштаб', 0.4, 5, 0.01, 1.7],
+  ['panX', 'сдвиг X', -1, 1, 0.01, 0],
+  ['panY', 'сдвиг Y', -1, 1, 0.01, 0],
+  ['Пост'],
+  ['bloom', 'свечение', 0, 2, 0.01, 0.8],
+  ['bloomR', 'радиус свечения', 0, 1, 0.01, 0.45],
+  ['ca', 'хроматика', 0, 8, 0.1, 1.4],
+  ['grain', 'зерно', 0, 1, 0.01, 0.3],
+  ['scan', 'сканлайны', 0, 1, 0.01, 0.1],
+  ['vignette', 'виньетка', 0, 1, 0.01, 0.45],
+  ['glitch', 'глитч', 0, 1, 0.01, 0],
+  ['aspect', 'формат', 'sel', ['экран', '16:9', '3:2', '1:1', '4:5', '9:16'], 'экран'],
+];
+const DEF = {};
+for (const it of SCHEMA) if (it.length > 1) DEF[it[0]] = it[it.length - 1];
+const P = { ...DEF };
+// что пересчитывать: 3 — город, 2 — картинку, 1 — только пост
+const LV_DRAW = new Set(['pal', 'windows', 'winStep', 'bands', 'trim', 'roofDots', 'groundDots', 'traffic', 'lineW', 'faces', 'az', 'el', 'zoom', 'panX', 'panY', 'aspect']);
+const LV_POST = new Set(['bloom', 'bloomR', 'ca', 'grain', 'scan', 'vignette', 'glitch']);
+const level = k => LV_POST.has(k) ? 1 : LV_DRAW.has(k) ? 2 : 3;
+const SCENES = {
+  'полночь': {},
+  'даунтаун': { centers: 1, focus: 0.85, hMax: 420, spikes: 0.35, setback: 0.7, spires: 0.4, podium: 0.5, bx: 10, by: 10, stretch: 1, zoom: 1.9, el: 38 },
+  'манхэттен': { bx: 7, by: 20, stretch: 2.6, block: 60, avenue: 0, street: 8, water: 'остров', waterAmt: 0.35, centers: 2, focus: 0.6, hMax: 380, spikes: 0.25, spires: 0.35, az: 30, zoom: 1.5 },
+  'спальный район': { hMax: 70, hMin: 6, centers: 0, hNoise: 0.7, lot: 11, setback: 0.1, podium: 0.05, spires: 0.02, roofs: 0.35, clutter: 0.7, parks: 0.18, round: 0.02, signs: 0.05, traffic: 0.15, zoom: 2.3, el: 50 },
+  'порт': { water: 'залив', waterAmt: 0.55, centers: 1, focus: 0.5, traffic: 0.6, signs: 0.35, hMax: 300, zoom: 1.5 },
+  'река': { water: 'река', waterAmt: 0.45, bx: 14, by: 14, hMax: 260, centers: 3, focus: 0.7, zoom: 1.4 },
+  'синтвейв': { pal: 'синтвейв', bloom: 1.2, bloomR: 0.6, scan: 0.35, ca: 2.5, glitch: 0.2, el: 30, zoom: 2.2, windows: 0.45 },
+  'матрица': { pal: 'матрица', colorMix: 0.2, windows: 0.8, winStep: 1.6, bloom: 1, grain: 0.45, scan: 0.25, ca: 0.6 },
+  'чертёж': { pal: 'чертёж', bloom: 0.15, ca: 0, grain: 0.15, scan: 0, vignette: 0.2, faces: 1, windows: 0.25, traffic: 0, colorMix: 0.3 },
+  'сверху': { el: 90, az: 0, zoom: 1.15, hMax: 200, roofDots: 0.9, groundDots: 0.8, traffic: 0.6 },
+};
+
+// ---------- мир ----------
+let CITY = null;
+const rectPoly = (x0, y0, x1, y1) => [[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+const chamPoly = (x0, y0, x1, y1, c) => [[x0 + c, y0], [x1 - c, y0], [x1, y0 + c], [x1, y1 - c], [x1 - c, y1], [x0 + c, y1], [x0, y1 - c], [x0, y0 + c]];
+function ellPoly(x0, y0, x1, y1, n, a0 = 0) {
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, rx = (x1 - x0) / 2, ry = (y1 - y0) / 2, p = [];
+  for (let k = 0; k < n; k++) { const a = a0 + TAU * k / n; p.push([cx + rx * Math.cos(a), cy + ry * Math.sin(a)]); }
+  return p;
+}
+function winPat(r) {
+  const k = r.int(2, 4);
+  return { t: r.pick(['grid', 'grid', 'grid', 'cols', 'rows', 'sparse', 'checker', 'cluster', 'ribs', 'lines']),
+    k, m: r.int(1, k - 1), lit: r.range(0.45, 1), hi: r.range(0.02, 0.18),
+    sm: r.chance(0.18) ? 0.6 : r.chance(0.15) ? 1.5 : 1, seed: (r() * 1e9) | 0 };
+}
+function solid(r, poly, z0, z1, c, o = {}) {
+  return Object.assign({ poly, z0, zt: poly.map(() => z1), apex: null, kind: 'tier', ribs: 0, win: null, sign: null, glow: 0,
+    ci: c.ci, ai: c.ai, wi: c.wi, rT: r(), rB: r(), rD: r(), bandK: r.int(3, 10), seed: (r() * 1e9) | 0 }, o);
+}
+
+function makeBuilding(L, H, zb, r, out) {
+  const gap = r.range(0.3, 1.4);
+  let x0 = L[0] + gap, y0 = L[1] + gap, x1 = L[2] - gap, y1 = L[3] - gap;
+  if (x1 - x0 < 3 || y1 - y0 < 3) return false;
+  const ci = r(), col = { ci, ai: r.chance(P.colorMix) ? r() : ci, wi: r.chance(P.colorMix) ? r() : ci };
+  const tierCol = () => r.chance(P.colorMix * 0.6) ? { ci: r(), ai: r(), wi: r.chance(0.5) ? col.wi : r() } : col;
+  const pat = winPat(r), top = zb + H;
+  const mk = (poly, z0, z1, c, o) => { const s = solid(r, poly, z0, z1, c, o); out.push(s); return s; };
+  let z = zb;
+  // подиум
+  if (H > 40 && Math.min(x1 - x0, y1 - y0) > 16 && r.chance(P.podium)) {
+    const ph = Math.min(r.range(5, 18), H * 0.3);
+    mk(rectPoly(x0, y0, x1, y1), z, z + ph, tierCol(), { win: winPat(r) });
+    z += ph;
+    const w = x1 - x0, d = y1 - y0, nw = w * r.range(0.4, 0.75), nd = d * r.range(0.4, 0.75);
+    x0 += (w - nw) * r.range(0.15, 0.85); y0 += (d - nd) * r.range(0.15, 0.85); x1 = x0 + nw; y1 = y0 + nd;
+  }
+  // форма башни
+  const w0 = x1 - x0, d0 = y1 - y0, m0 = Math.min(w0, d0);
+  let shape = 'rect';
+  if (m0 > 8 && Math.max(w0, d0) / m0 < 1.6 && r.chance(P.round)) shape = 'round';
+  else if (m0 > 9 && r.chance(P.chamfer)) shape = 'chamfer';
+  const cham = r.range(0.14, 0.3), nSeg = r.pick([16, 20, 24]);
+  const polyOf = (a, b, c, e) => shape === 'round' ? ellPoly(a, b, c, e, nSeg) : shape === 'chamfer' ? chamPoly(a, b, c, e, Math.min(c - a, e - b) * cham) : rectPoly(a, b, c, e);
+  // уступы
+  const rem = top - z;
+  let nT = 1;
+  if (rem > 30 && r.chance(P.setback)) nT = r.int(2, rem > 150 ? 4 : 3);
+  const fr = []; let sum = 0;
+  for (let k = 0; k < nT; k++) { const f = r.range(0.6, 1.2) * Math.pow(0.62, k); fr.push(f); sum += f; }
+  let last = null;
+  for (let k = 0; k < nT; k++) {
+    const z1 = z + rem * fr[k] / sum;
+    last = mk(polyOf(x0, y0, x1, y1), z, z1, k ? tierCol() : col, { win: k && r.chance(0.3) ? winPat(r) : pat, ribs: shape === 'round' ? 4 : 0 });
+    z = z1;
+    if (k < nT - 1) {
+      const m = Math.min(x1 - x0, y1 - y0);
+      if (shape === 'rect') { const s = m * r.range(0.06, 0.16); x0 += s * r.range(0, 2); x1 -= s * r.range(0, 2); y0 += s * r.range(0, 2); y1 -= s * r.range(0, 2); }
+      else { const s = m * r.range(0.07, 0.15); x0 += s; x1 -= s; y0 += s; y1 -= s; }
+      if (x1 - x0 < 4 || y1 - y0 < 4) break;
+    }
+  }
+  // знаки и подсветка
+  for (const s of out) if (s.kind === 'tier' && !s.sign && s.zt[0] - s.z0 > 10 && r.chance(P.signs * 0.5)) {
+    const vert = r.chance(0.4), u0 = r.range(0.05, vert ? 0.8 : 0.3);
+    s.sign = { fi: r.int(0, s.poly.length - 1), u0, u1: vert ? u0 + r.range(0.06, 0.15) : r.range(0.6, 0.95),
+      z0: vert ? r.range(0.2, 0.5) : r.range(0.65, 0.85), z1: vert ? r.range(0.7, 0.95) : r.range(0.88, 0.97), ci: r() };
+  }
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2, m = Math.min(x1 - x0, y1 - y0), tall = H > 60;
+  // верх
+  if (tall && r.chance(P.spires * 0.8)) {
+    let w = x1 - x0, d = y1 - y0;
+    const steps = r.int(1, 3);
+    for (let k = 0; k < steps; k++) {
+      const f = r.range(0.5, 0.75); w *= f; d *= f;
+      if (Math.min(w, d) < 1.5) break;
+      const h = H * r.range(0.025, 0.06);
+      last = mk(polyOf(cx - w / 2, cy - d / 2, cx + w / 2, cy + d / 2), z, z + h, r.chance(0.5) ? col : tierCol(), { win: w > 5 ? pat : null, ribs: shape === 'round' ? 4 : 0 });
+      z += h;
+    }
+    let tip = z;
+    if (r.chance(0.55)) { tip = z + H * r.range(0.04, 0.12); last.apex = { x: cx, y: cy, z: tip }; }
+    out.push(solid(r, rectPoly(cx - 0.2, cy - 0.2, cx + 0.2, cy + 0.2), tip, tip + H * r.range(0.05, 0.16), col, { kind: 'needle' }));
+  } else if (r.chance(P.roofs)) {
+    last.apex = { x: cx, y: cy, z: z + m * r.range(0.2, tall ? 1.3 : 0.6) };
+  } else if (shape !== 'round' && r.chance(P.wedge)) {
+    const ax = r.chance(0.5), sg = r.sgn(), rise = m * r.range(0.25, 0.6);
+    last.zt = last.poly.map(([x, y]) => { const t = ax ? (x - x0) / (x1 - x0) : (y - y0) / (y1 - y0); return z + rise * (sg > 0 ? t : 1 - t); });
+    last.wedge = true;
+  } else {
+    // плоская крыша: мелочи и антенны
+    if (r.chance(P.signs * 0.35)) last.glow = r.range(0.12, 0.35);
+    const ins = shape === 'round' ? m * 0.17 : shape === 'chamfer' ? m * cham * 0.7 : 0.8;
+    const ix0 = x0 + ins, iy0 = y0 + ins, ix1 = x1 - ins, iy1 = y1 - ins;
+    const nC = Math.round(P.clutter * r.range(0.3, 1.3) * Math.min(7, (ix1 - ix0) * (iy1 - iy0) / 80));
+    const placed = [];
+    for (let t = 0; t < nC * 5 && placed.length < nC; t++) {
+      const kind = r.pick(['box', 'box', 'tank', 'house']);
+      const sw = kind === 'house' ? (ix1 - ix0) * r.range(0.25, 0.45) : r.range(1.5, 4.5);
+      const sh = kind === 'house' ? (iy1 - iy0) * r.range(0.25, 0.45) : kind === 'tank' ? sw : r.range(1.5, 4.5);
+      if (sw > ix1 - ix0 || sh > iy1 - iy0) continue;
+      const px = r.range(ix0, ix1 - sw), py = r.range(iy0, iy1 - sh);
+      if (placed.some(q => px < q[2] + 0.6 && px + sw > q[0] - 0.6 && py < q[3] + 0.6 && py + sh > q[1] - 0.6)) continue;
+      placed.push([px, py, px + sw, py + sh]);
+      if (kind === 'box') out.push(solid(r, rectPoly(px, py, px + sw, py + sh), z, z + r.range(1.2, 3.5), col, { kind: 'clutter' }));
+      else if (kind === 'tank') {
+        const h = r.range(2, 4.5);
+        out.push(solid(r, ellPoly(px, py, px + sw, py + sh, 8), z, z + h, col, { kind: 'clutter', ribs: 4, apex: { x: px + sw / 2, y: py + sh / 2, z: z + h + sw * 0.35 } }));
+      } else out.push(solid(r, rectPoly(px, py, px + sw, py + sh), z, z + r.range(3, 6), tierCol(), { win: pat }));
+    }
+    if (H > 45 && r.chance(0.45)) {
+      const n = r.int(1, 3);
+      for (let k = 0; k < n; k++) {
+        const ax = r.range(ix0 + 0.5, ix1 - 0.5), ay = r.range(iy0 + 0.5, iy1 - 0.5);
+        if (placed.some(q => ax > q[0] - 0.4 && ax < q[2] + 0.4 && ay > q[1] - 0.4 && ay < q[3] + 0.4)) continue;
+        out.push(solid(r, rectPoly(ax - 0.15, ay - 0.15, ax + 0.15, ay + 0.15), z, z + H * r.range(0.04, 0.14) + 3, col, { kind: 'needle' }));
+      }
+    }
+  }
+  return true;
+}
+
+function generate() {
+  const axis = (n, size, key) => {
+    const r = rng(key), cells = [], gaps = [];
+    let p = 0;
+    const gap = i => { const av = P.avenue > 0 && i > 0 && i < n && i % P.avenue === 0; const g = P.street * (av ? 1.9 : 1); gaps.push({ a: p, b: p + g, av }); p += g; };
+    for (let i = 0; i < n; i++) { gap(i); const s = size * (1 + P.blockVar * r.range(-0.6, 0.6)); cells.push([p, p + s]); p += s; }
+    gap(n);
+    return { cells, gaps, len: p };
+  };
+  const AX = axis(P.bx, P.block * Math.sqrt(P.stretch), 'ax'), AY = axis(P.by, P.block / Math.sqrt(P.stretch), 'ay');
+  const Wc = AX.len, Hc = AY.len, nx = P.bx, ny = P.by;
+
+  // вода: целые кварталы
+  const WM = new Uint8Array(nx * ny), rw = rng('water'), sW = sd('water'), a = P.waterAmt;
+  const dirX = rw.chance(0.5), ph = rw.range(0, TAU), fq = rw.range(0.4, 1.3), amp = rw.range(0.08, 0.25), c0 = rw.range(0.35, 0.65);
+  const flx = rw.chance(0.5), fly = rw.chance(0.5), mA = rw.range(0.3, 0.7);
+  const cAx = rw.chance(0.5), cN = cAx ? nx : ny, cAt = rw.int(1, Math.max(1, cN - 3)), cW = 1 + Math.floor(a * 2.4);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const u = (i + 0.5) / nx, v = (j + 0.5) / ny, nz = fbm2(u * 3, v * 3, sW) - 0.5;
+    let w = false;
+    if (P.water === 'река') { const t = dirX ? u : v, s = dirX ? v : u; w = Math.abs(s - (c0 + amp * Math.sin(t * TAU * fq + ph) + nz * 0.1)) < 0.03 + a * 0.16; }
+    else if (P.water === 'залив') w = (flx ? 1 - u : u) * mA + (fly ? 1 - v : v) * (1 - mA) + nz * 0.3 < a * 0.6;
+    else if (P.water === 'канал') { const k = cAx ? i : j; w = k >= cAt && k < cAt + cW; }
+    else if (P.water === 'остров') w = Math.hypot((u - 0.5) * 2, (v - 0.5) * 2) + nz * 0.5 > 1.3 - a * 0.9;
+    WM[j * nx + i] = w ? 1 : 0;
+  }
+  const isW = (i, j) => i < 0 || j < 0 || i >= nx || j >= ny ? -1 : WM[j * nx + i];
+  const water = [], FAR = Math.max(Wc, Hc);
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    if (!WM[j * nx + i]) continue;
+    const ext = (w, g) => w < 0 ? FAR : w ? g / 2 + 0.3 : Math.max(0, g / 2 - 2);
+    const gl = AX.gaps[i], gr = AX.gaps[i + 1], gt = AY.gaps[j], gb = AY.gaps[j + 1];
+    const L = isW(i - 1, j), R = isW(i + 1, j), T = isW(i, j - 1), B = isW(i, j + 1);
+    const rc = [AX.cells[i][0] - ext(L, gl.b - gl.a), AY.cells[j][0] - ext(T, gt.b - gt.a), AX.cells[i][1] + ext(R, gr.b - gr.a), AY.cells[j][1] + ext(B, gb.b - gb.a)];
+    rc.shore = [L === 0, T === 0, R === 0, B === 0];
+    water.push(rc);
+  }
+
+  // поле высот
+  const rh = rng('height'), centers = [];
+  for (let k = 0; k < P.centers; k++) centers.push({ x: rh.range(0.2, 0.8) * Wc, y: rh.range(0.2, 0.8) * Hc, w: k ? rh.range(0.5, 0.9) : 1 });
+  const RR = mix(0.9, 0.16, P.focus) * Math.max(Wc, Hc), sN = sd('hn');
+  const hField = (x, y) => {
+    let f = centers.length ? 0 : 0.55;
+    for (const c of centers) f = Math.max(f, c.w * Math.exp(-((x - c.x) ** 2 + (y - c.y) ** 2) / (RR * RR)));
+    return clamp(mix(f, fbm2(x / 220, y / 220, sN) * 1.3 - 0.15, P.hNoise), 0, 1);
+  };
+
+  const solids = [], CURB = 1.1;
+  let nb = 0;
+  const split = (rc, r, out, depth) => {
+    const w = rc[2] - rc[0], d = rc[3] - rc[1], m = P.lot, canX = w >= m * 2, canY = d >= m * 2;
+    if ((!canX && !canY) || (depth > 1 && r.chance(0.15))) { out.push(rc); return; }
+    const alongX = canX && (!canY || w / d > r.range(0.7, 1.4)), t = r.range(0.35, 0.65);
+    if (alongX) { const x = rc[0] + w * t; split([rc[0], rc[1], x, rc[3]], r, out, depth + 1); split([x, rc[1], rc[2], rc[3]], r, out, depth + 1); }
+    else { const y = rc[1] + d * t; split([rc[0], rc[1], rc[2], y], r, out, depth + 1); split([rc[0], y, rc[2], rc[3]], r, out, depth + 1); }
+  };
+  const rb = rng('blocks');
+  for (let j = 0; j < ny; j++) for (let i = 0; i < nx; i++) {
+    const park = rb.chance(P.parks), pc = { ci: rb(), ai: rb(), wi: rb() }, sw = rb.range(1.5, 3.5), merge = rb.chance(P.merge);
+    if (WM[j * nx + i]) continue;
+    const [x0, x1] = AX.cells[i], [y0, y1] = AY.cells[j], r = rng('blk', i, j);
+    solids.push(solid(r, rectPoly(x0, y0, x1, y1), 0, CURB, pc, { kind: park ? 'park' : 'plinth' }));
+    if (park) {
+      const n = Math.round((x1 - x0) * (y1 - y0) / 70 * r.range(0.5, 1.2)), pl = [];
+      for (let t = 0; t < n * 3 && pl.length < n; t++) {
+        const rad = r.range(1.2, 2.8), x = r.range(x0 + 2 + rad, x1 - 2 - rad), y = r.range(y0 + 2 + rad, y1 - 2 - rad);
+        if (pl.some(q => Math.abs(q[0] - x) < q[2] + rad + 0.3 && Math.abs(q[1] - y) < q[2] + rad + 0.3)) continue;
+        pl.push([x, y, rad]);
+        solids.push(solid(r, ellPoly(x - rad, y - rad, x + rad, y + rad, 6, r.range(0, 1)), CURB, CURB + 0.4, pc, { kind: 'tree', ribs: 2, apex: { x, y, z: CURB + r.range(3, 8) } }));
+      }
+      continue;
+    }
+    const lots = [], inner = [x0 + sw, y0 + sw, x1 - sw, y1 - sw];
+    if (merge) lots.push(inner); else split(inner, r, lots, 0);
+    lots.forEach((L, k) => {
+      const rl = rng('bld', i, j, k);
+      if (lots.length > 2 && rl.chance(0.04)) return;
+      const cx = (L[0] + L[2]) / 2, cy = (L[1] + L[3]) / 2, t = hField(cx, cy), ms = Math.min(L[2] - L[0], L[3] - L[1]);
+      let h = P.hMin + (P.hMax - P.hMin) * t * t * mix(1, rl(), 0.6);
+      if (rl.chance(P.spikes * t * t * 0.25)) h = Math.max(h, P.hMax * rl.range(0.75, 1.25));
+      h = Math.max(P.hMin, Math.min(h, ms * rl.range(9, 17)));
+      if (makeBuilding(L, h, CURB, rl, solids)) nb++;
+    });
+  }
+  for (const s of solids) {
+    let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
+    for (const [x, y] of s.poly) { a = Math.min(a, x); b = Math.max(b, x); c = Math.min(c, y); d = Math.max(d, y); }
+    s.x0 = a; s.x1 = b; s.y0 = c; s.y1 = d;
+    s.z1 = Math.max(...s.zt, s.apex ? s.apex.z : -Infinity);
+    s.cx = (a + b) / 2; s.cy = (c + d) / 2; s.cz = (s.z0 + s.z1) / 2;
+  }
+  CITY = { AX, AY, Wc, Hc, water, solids, nb };
+}
+
+// ---------- рендер ----------
+let R = null;
+function prepPal() {
+  const p = PALS[P.pal], c = p.c.map(rgb);
+  let gi = 0, gb = -1e9;
+  c.forEach((v, i) => { const s = v[1] - (v[0] + v[2]) / 2; if (s > gb) { gb = s; gi = i; } });
+  return { bg: rgb(p.bg), bgCss: p.bg, c, hi: rgb(p.hi), car: p.car.map(rgb), green: c[gi] };
+}
+const pick = (arr, f) => arr[Math.min(arr.length - 1, Math.floor(f * arr.length))];
+const LX = -0.55, LY = -0.83;  // откуда «свет» для подкраски граней
+
+function drawScene(cvs) {
+  const W = cvs.width, H = cvs.height, g = cvs.getContext('2d');
+  const pal = prepPal(), U = Math.max(W, H) / 1600;
+  const az = P.az * Math.PI / 180, el = P.el * Math.PI / 180;
+  const cA = Math.cos(az), sA = Math.sin(az), cE = Math.cos(el), sE = Math.sin(el);
+  const { Wc, Hc } = CITY;
+  let x0 = Infinity, x1 = -Infinity, y0 = Infinity, y1 = -Infinity;
+  for (const [x, y] of [[0, 0], [Wc, 0], [0, Hc], [Wc, Hc]]) for (const z of [0, P.hMax * 0.3]) {
+    const a = x * cA - y * sA, b = (x * sA + y * cA) * sE - z * cE;
+    x0 = Math.min(x0, a); x1 = Math.max(x1, a); y0 = Math.min(y0, b); y1 = Math.max(y1, b);
+  }
+  const S = Math.min(W / (x1 - x0), H / (y1 - y0)) * P.zoom;
+  const ox = W / 2 - (x0 + x1) / 2 * S - P.panX * W * 0.5, oy = H / 2 - (y0 + y1) / 2 * S - P.panY * H * 0.5;
+  const pr = (x, y, z) => [ox + (x * cA - y * sA) * S, oy + ((x * sA + y * cA) * sE - z * cE) * S];
+  R = { W, H, pal, U, S, cE, tx: sA * cE, ty: cA * cE, tz: sE, pr };
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+  g.fillStyle = pal.bgCss; g.fillRect(0, 0, W, H);
+  const gr = g.createRadialGradient(W * 0.5, H * 0.4, 0, W * 0.5, H * 0.4, Math.hypot(W, H) * 0.6);
+  gr.addColorStop(0, rgba(mixc(pal.bg, pal.c[0], 0.07))); gr.addColorStop(1, rgba(pal.bg, 0));
+  g.fillStyle = gr; g.fillRect(0, 0, W, H);
+  g.lineJoin = 'round'; g.lineCap = 'round';
+  drawGround(g);
+  const n = drawSolids(g);
+  return n;
+}
+
+function drawGround(g) {
+  const { pal, U, pr } = R, C = CITY;
+  const seg = (p, a, b, c, d, z = 0) => { const q = pr(a, b, z), w = pr(c, d, z); p.moveTo(q[0], q[1]); p.lineTo(w[0], w[1]); };
+  if (C.water.length) {
+    const lim = [-C.Wc * 0.4, -C.Hc * 0.4, C.Wc * 1.4, C.Hc * 1.4];
+    g.fillStyle = rgba(mixc(mixc(pal.bg, [0, 0, 0], 0.5), pal.c[2 % pal.c.length], 0.05));
+    g.beginPath();
+    for (const w of C.water) {
+      const q = [pr(w[0], w[1], 0), pr(w[2], w[1], 0), pr(w[2], w[3], 0), pr(w[0], w[3], 0)];
+      g.moveTo(q[0][0], q[0][1]); for (let k = 1; k < 4; k++) g.lineTo(q[k][0], q[k][1]); g.closePath();
+    }
+    g.fill();
+    const sh = new Path2D();
+    for (const w of C.water) {
+      const [a, b, c, d] = w, s = w.shore;
+      if (s[0]) seg(sh, a, b, a, d); if (s[1]) seg(sh, a, b, c, b); if (s[2]) seg(sh, c, b, c, d); if (s[3]) seg(sh, a, d, c, d);
+    }
+    g.strokeStyle = rgba(pal.c[0], 0.4); g.lineWidth = P.lineW * U * 0.8; g.stroke(sh);
+    // отражения — короткие горизонтальные штрихи
+    const rr = rng('refl'), paths = pal.c.map(() => new Path2D());
+    for (const w of C.water) {
+      const a = Math.max(w[0], lim[0]), b = Math.max(w[1], lim[1]), c = Math.min(w[2], lim[2]), d = Math.min(w[3], lim[3]);
+      if (c <= a || d <= b) continue;
+      const n = Math.round((c - a) * (d - b) / 55);
+      for (let k = 0; k < n; k++) {
+        const [sx, sy] = pr(rr.range(a, c), rr.range(b, d), 0), L = rr.range(2, 16) * U;
+        const p = paths[Math.floor(rr() * paths.length)];
+        p.moveTo(sx - L / 2, sy); p.lineTo(sx + L / 2, sy);
+      }
+    }
+    g.lineWidth = U; g.lineCap = 'butt';
+    paths.forEach((p, k) => { g.strokeStyle = rgba(pal.c[k], 0.3); g.stroke(p); });
+    g.lineCap = 'round';
+  }
+  const wet = (x, y) => { for (const w of C.water) if (x > w[0] && x < w[2] && y > w[1] && y < w[3]) return true; return false; };
+  const streets = [...C.AX.gaps.map(gp => [true, gp]), ...C.AY.gaps.map(gp => [false, gp])];
+  if (P.groundDots > 0) {
+    const dash = new Path2D(), lamps = new Path2D(), ds = 1.5 * U;
+    for (const [vert, gp] of streets) {
+      const L = vert ? C.Hc : C.Wc, m = (gp.a + gp.b) / 2, at = (c, t) => vert ? [c, t] : [t, c];
+      for (let t = 0; t < L; t += 7) {
+        const [x, y] = at(m, t);
+        if (wet(x, y)) continue;
+        if (gp.av) { const o = 0.35; seg(dash, ...at(m - o, t), ...at(m - o, t + 3.2)); seg(dash, ...at(m + o, t), ...at(m + o, t + 3.2)); }
+        else seg(dash, x, y, ...at(m, t + 3.2));
+      }
+      for (let t = 4; t < L; t += 15) for (const c of [gp.a + 0.8, gp.b - 0.8]) {
+        const [x, y] = at(c, t);
+        if (wet(x, y)) continue;
+        const [sx, sy] = pr(x, y, 0); lamps.rect(sx - ds / 2, sy - ds / 2, ds, ds);
+      }
+    }
+    g.strokeStyle = rgba(pal.c[0], 0.3 * P.groundDots); g.lineWidth = 0.8 * U; g.stroke(dash);
+    g.fillStyle = rgba(pal.car[1], Math.min(1, 1.2 * P.groundDots)); g.fill(lamps);
+  }
+  if (P.traffic > 0) {
+    const rc = rng('cars'), red = new Path2D(), wht = new Path2D(), mean = mix(160, 5, Math.pow(P.traffic, 0.7));
+    const lane = (vert, c, L, path) => {
+      for (let t = rc.range(0, mean); t < L;) {
+        const len = rc.range(2.4, 4.8), [x, y] = vert ? [c, t] : [t, c];
+        if (!wet(x, y)) vert ? seg(path, c, t, c, t + len) : seg(path, t, c, t + len, c);
+        t += len + rc.range(0.2, 2) * mean;
+      }
+    };
+    for (const [vert, gp] of streets) {
+      const w = gp.b - gp.a, L = vert ? C.Hc : C.Wc;
+      lane(vert, gp.a + w * 0.3, L, red); lane(vert, gp.b - w * 0.3, L, wht);
+      if (gp.av) { lane(vert, gp.a + w * 0.14, L, red); lane(vert, gp.b - w * 0.14, L, wht); }
+    }
+    g.lineWidth = 1.5 * U;
+    g.strokeStyle = rgba(pal.car[0], 0.95); g.stroke(red);
+    g.strokeStyle = rgba(pal.car[1], 0.9); g.stroke(wht);
+  }
+}
+
+// A рисуется раньше B? Тела не пересекаются, значит их разделяет плоскость x, y или z.
+function before(A, B, tx, ty) {
+  const e = 1e-6;
+  if (A.x1 <= B.x0 + e) return tx >= 0 ? 1 : -1;
+  if (B.x1 <= A.x0 + e) return tx >= 0 ? -1 : 1;
+  if (A.y1 <= B.y0 + e) return ty >= 0 ? 1 : -1;
+  if (B.y1 <= A.y0 + e) return ty >= 0 ? -1 : 1;
+  if (A.z1 <= B.z0 + e) return 1;
+  if (B.z1 <= A.z0 + e) return -1;
+  return 0;
+}
+
+function drawSolids(g) {
+  const { W, H, pr, tx, ty, tz, U } = R, act = [], m = 4 * U;
+  for (const s of CITY.solids) {
+    const n = s.poly.length, B = new Array(n), T = new Array(n);
+    let a = Infinity, b = -Infinity, c = Infinity, d = -Infinity;
+    for (let i = 0; i < n; i++) {
+      const [x, y] = s.poly[i], p = pr(x, y, s.z0), q = pr(x, y, s.zt[i]);
+      B[i] = p; T[i] = q;
+      a = Math.min(a, p[0], q[0]); b = Math.max(b, p[0], q[0]); c = Math.min(c, p[1], q[1]); d = Math.max(d, p[1], q[1]);
+    }
+    s._A = null;
+    if (s.apex) { const p = s._A = pr(s.apex.x, s.apex.y, s.apex.z); a = Math.min(a, p[0]); b = Math.max(b, p[0]); c = Math.min(c, p[1]); d = Math.max(d, p[1]); }
+    if (s.kind === 'needle') { const p = pr(s.cx, s.cy, s.z1); c = Math.min(c, p[1]); }
+    s._B = B; s._T = T; s.sx0 = a - m; s.sx1 = b + m; s.sy0 = c - m; s.sy1 = d + m;
+    if (s.sx1 < 0 || s.sx0 > W || s.sy1 < 0 || s.sy0 > H) continue;
+    s._d = s.cx * tx + s.cy * ty + s.cz * tz;
+    act.push(s);
+  }
+  act.sort((p, q) => p._d - q._d);
+  // рёбра «раньше/позже» только для пар, чьи рамки на экране пересекаются
+  const N = act.length, CS = Math.max(W, H) / 48, GX = Math.ceil(W / CS) + 1, GY = Math.ceil(H / CS) + 1;
+  const cells = new Array(GX * GY), stamp = new Int32Array(N).fill(-1), out = Array.from({ length: N }, () => []), indeg = new Int32Array(N);
+  for (let i = 0; i < N; i++) {
+    const s = act[i];
+    const cx0 = clamp(Math.floor(s.sx0 / CS), 0, GX - 1), cx1 = clamp(Math.floor(s.sx1 / CS), 0, GX - 1);
+    const cy0 = clamp(Math.floor(s.sy0 / CS), 0, GY - 1), cy1 = clamp(Math.floor(s.sy1 / CS), 0, GY - 1);
+    for (let cy = cy0; cy <= cy1; cy++) for (let cx = cx0; cx <= cx1; cx++) {
+      const k = cy * GX + cx, cell = cells[k] || (cells[k] = []);
+      for (const j of cell) {
+        if (stamp[j] === i) continue;
+        stamp[j] = i;
+        const o = act[j];
+        if (o.sx1 <= s.sx0 || o.sx0 >= s.sx1 || o.sy1 <= s.sy0 || o.sy0 >= s.sy1) continue;
+        const rel = before(o, s, tx, ty);
+        if (rel === 1) { out[j].push(i); indeg[i]++; } else if (rel === -1) { out[i].push(j); indeg[j]++; }
+      }
+      cell.push(i);
+    }
+  }
+  // Кана с кучей по глубине; при цикле берём самое дальнее
+  const heap = [], done = new Uint8Array(N);
+  const push = v => { let i = heap.length; heap.push(v); while (i > 0) { const p = (i - 1) >> 1; if (heap[p] <= v) break; heap[i] = heap[p]; i = p; } heap[i] = v; };
+  const pop = () => {
+    const top = heap[0], last = heap.pop(), n = heap.length;
+    if (n) { let i = 0; for (;;) { const l = 2 * i + 1; if (l >= n) break; const c = l + 1 < n && heap[l + 1] < heap[l] ? l + 1 : l; if (heap[c] >= last) break; heap[i] = heap[c]; i = c; } heap[i] = last; }
+    return top;
+  };
+  for (let i = 0; i < N; i++) if (!indeg[i]) push(i);
+  let cnt = 0, ptr = 0;
+  while (cnt < N) {
+    if (!heap.length) { while (done[ptr]) ptr++; push(ptr); }
+    const v = pop();
+    if (done[v]) continue;
+    done[v] = 1; cnt++;
+    drawSolid(g, act[v]);
+    for (const w of out[v]) if (--indeg[w] === 0 && !done[w]) push(w);
+  }
+  return N;
+}
+
+function lit(pat, c, r, f, seed) {
+  const h = h2(c + f * 977, r, pat.seed ^ seed);
+  let p = pat.lit * P.windows * 1.3;
+  switch (pat.t) {
+    case 'cols': if (c % pat.k >= pat.m) return 0; break;
+    case 'rows': if (r % pat.k >= pat.m) return 0; break;
+    case 'sparse': p *= 0.35; break;
+    case 'checker': if ((c + r) & 1) return 0; break;
+    case 'cluster': p *= n2(c / 3, r / 4, pat.seed) > 0.5 ? 1.4 : 0.12; break;
+  }
+  return h < p ? (h < p * pat.hi ? 3 : h < p * 0.6 ? 2 : 1) : 0;
+}
+
+function drawSolid(g, s) {
+  const { pal, U, S, cE, tx, ty, tz, pr } = R;
+  const poly = s.poly, n = poly.length, B = s._B, T = s._T, A = s._A;
+  const green = s.kind === 'park' || s.kind === 'tree';
+  const col = green ? pal.green : pick(pal.c, s.ci), alt = pick(pal.c, s.ai), wc = pick(pal.c, s.wi);
+  const lw = P.lineW * U;
+  if (s.kind === 'needle') {
+    const a = pr(s.cx, s.cy, s.z0), b = pr(s.cx, s.cy, s.z1), ds = 2.2 * U;
+    g.strokeStyle = rgba(col, 0.9); g.lineWidth = lw; g.beginPath(); g.moveTo(a[0], a[1]); g.lineTo(b[0], b[1]); g.stroke();
+    g.fillStyle = rgba(pal.car[0]); g.fillRect(b[0] - ds / 2, b[1] - ds / 2, ds, ds);
+    return;
+  }
+  const vis = new Uint8Array(n), shade = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, ex = poly[j][0] - poly[i][0], ey = poly[j][1] - poly[i][1], l = Math.hypot(ex, ey) || 1;
+    vis[i] = ey * tx - ex * ty > 1e-9 ? 1 : 0;
+    shade[i] = 0.5 + 0.5 * (ey * LX - ex * LY) / l;
+  }
+  let topVis = 1, tvis = null;
+  if (A) {
+    tvis = new Uint8Array(n);
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n, [xi, yi] = poly[i], [xj, yj] = poly[j], zi = s.zt[i], zj = s.zt[j];
+      const ax = xj - xi, ay = yj - yi, az = zj - zi, bx = s.apex.x - xi, by = s.apex.y - yi, bz = s.apex.z - zi;
+      tvis[i] = (ay * bz - az * by) * tx + (az * bx - ax * bz) * ty + (ax * by - ay * bx) * tz > 0 ? 1 : 0;
+    }
+  } else if (s.wedge) {
+    let nx = 0, ny = 0, nz = 0;
+    for (let i = 0; i < n; i++) {
+      const j = (i + 1) % n, [xi, yi] = poly[i], [xj, yj] = poly[j], zi = s.zt[i], zj = s.zt[j];
+      nx += (yi - yj) * (zi + zj); ny += (zi - zj) * (xi + xj); nz += (xi - xj) * (yi + yj);
+    }
+    topVis = nx * tx + ny * ty + nz * tz > 0 ? 1 : 0;
+  }
+  const kSide = s.kind === 'plinth' || green ? 0.03 : 0.045, base = mixc(pal.bg, [0, 0, 0], 0.25);
+  const faceCss = (k) => rgba(mixc(base, col, k));
+  // грани
+  if (P.faces > 0) {
+    g.globalAlpha = P.faces;
+    if (n > 8) {  // круглое — одним путём, иначе видны швы
+      g.fillStyle = faceCss(kSide * 1.5); g.beginPath();
+      for (let i = 0; i < n; i++) if (vis[i]) { const j = (i + 1) % n; g.moveTo(B[i][0], B[i][1]); g.lineTo(B[j][0], B[j][1]); g.lineTo(T[j][0], T[j][1]); g.lineTo(T[i][0], T[i][1]); g.closePath(); }
+      g.fill();
+    } else for (let i = 0; i < n; i++) if (vis[i]) {
+      const j = (i + 1) % n;
+      g.fillStyle = faceCss(kSide * (0.6 + shade[i] * 1.4)); g.beginPath();
+      g.moveTo(B[i][0], B[i][1]); g.lineTo(B[j][0], B[j][1]); g.lineTo(T[j][0], T[j][1]); g.lineTo(T[i][0], T[i][1]); g.closePath(); g.fill();
+    }
+    if (A) {
+      g.fillStyle = faceCss(kSide * 2.2); g.beginPath();
+      for (let i = 0; i < n; i++) if (tvis[i]) { const j = (i + 1) % n; g.moveTo(T[i][0], T[i][1]); g.lineTo(T[j][0], T[j][1]); g.lineTo(A[0], A[1]); g.closePath(); }
+      g.fill();
+    } else if (topVis) {
+      g.fillStyle = faceCss(kSide * 2.4); g.beginPath();
+      g.moveTo(T[0][0], T[0][1]); for (let i = 1; i < n; i++) g.lineTo(T[i][0], T[i][1]); g.closePath(); g.fill();
+    }
+    g.globalAlpha = 1;
+  }
+  const up = z => -(z - s.z0) * S * cE;
+  // окна
+  if (s.win && P.windows > 0 && cE > 0.02) {
+    const pat = s.win, step = P.winStep * pat.sm, pxV = step * S * cE;
+    const rowSkip = pxV < 2.2 * U ? Math.ceil(2.2 * U / pxV) : 1;
+    const main = new Path2D(), dim = new Path2D(), hi = new Path2D(), ribs = new Path2D();
+    for (let i = 0; i < n; i++) {
+      if (!vis[i]) continue;
+      const j = (i + 1) % n, L = Math.hypot(poly[j][0] - poly[i][0], poly[j][1] - poly[i][1]);
+      const nC = Math.floor(L / step - 0.4);
+      if (nC < 1) continue;
+      const bx = B[i][0], by = B[i][1], dx = (B[j][0] - bx) / L, dy = (B[j][1] - by) / L;
+      const pxH = step * Math.hypot(dx, dy), colSkip = pxH < 1.8 * U ? Math.ceil(1.8 * U / pxH) : 1;
+      const ds = Math.max(0.8 * U, Math.min(2.4 * U, Math.min(pxH * colSkip, pxV * rowSkip) * 0.4));
+      const off = (L - (nC - 1) * step) / 2, z0 = s.z0 + step * 0.8;
+      for (let c = 0; c < nC; c += colSkip) {
+        const u = off + c * step, zTop = mix(s.zt[i], s.zt[j], u / L) - step * 0.5;
+        if (zTop < z0) continue;
+        const px = bx + dx * u, py = by + dy * u, nR = Math.floor((zTop - z0) / step) + 1;
+        if (pat.t === 'ribs') {
+          if (c % pat.k === 0) { ribs.moveTo(px, py + up(z0)); ribs.lineTo(px, py + up(zTop)); }
+          continue;
+        }
+        if (pat.t === 'lines') continue;
+        for (let r = 0; r < nR; r += rowSkip) {
+          const v = lit(pat, c, r, i, s.seed);
+          if (!v) continue;
+          const y = py + up(z0 + r * step);
+          (v === 3 ? hi : v === 2 ? main : dim).rect(px - ds / 2, y - ds / 2, ds, ds);
+        }
+      }
+      if (pat.t === 'lines') {
+        const zt = Math.min(s.zt[i], s.zt[j]) - step * 0.5;
+        for (let r = 0, z = z0; z < zt; r++, z += step * rowSkip) if (r % pat.k === 0 && h2(r, i, s.seed) < P.windows * 1.3) {
+          const a = pr(poly[i][0], poly[i][1], z), b = pr(poly[j][0], poly[j][1], z);
+          ribs.moveTo(mix(a[0], b[0], 0.03), mix(a[1], b[1], 0.03)); ribs.lineTo(mix(a[0], b[0], 0.97), mix(a[1], b[1], 0.97));
+        }
+      }
+    }
+    g.fillStyle = rgba(wc, 0.55); g.fill(dim);
+    g.fillStyle = rgba(wc); g.fill(main);
+    g.fillStyle = rgba(pal.hi); g.fill(hi);
+    g.strokeStyle = rgba(wc, 0.6); g.lineWidth = lw * 0.8; g.stroke(ribs);
+  }
+  // пояса
+  if (s.kind === 'tier' && s.rB < P.bands) {
+    const step = P.winStep * s.bandK, zt = Math.min(...s.zt) - 0.8, p = new Path2D();
+    for (let z = s.z0 + step; z < zt; z += step) for (let i = 0; i < n; i++) if (vis[i]) {
+      const j = (i + 1) % n; p.moveTo(B[i][0], B[i][1] + up(z)); p.lineTo(B[j][0], B[j][1] + up(z));
+    }
+    g.strokeStyle = rgba(alt, 0.85); g.lineWidth = lw; g.stroke(p);
+  }
+  // вывеска
+  if (s.sign && vis[s.sign.fi]) {
+    const sg = s.sign, i = sg.fi, j = (i + 1) % n, zT = Math.min(s.zt[i], s.zt[j]);
+    const za = mix(s.z0, zT, sg.z0), zb = mix(s.z0, zT, sg.z1);
+    const p0 = [mix(B[i][0], B[j][0], sg.u0), mix(B[i][1], B[j][1], sg.u0)], p1 = [mix(B[i][0], B[j][0], sg.u1), mix(B[i][1], B[j][1], sg.u1)];
+    const sc = pick(pal.c, sg.ci), q = new Path2D();
+    q.moveTo(p0[0], p0[1] + up(za)); q.lineTo(p1[0], p1[1] + up(za)); q.lineTo(p1[0], p1[1] + up(zb)); q.lineTo(p0[0], p0[1] + up(zb)); q.closePath();
+    g.fillStyle = rgba(sc, 0.3); g.fill(q);
+    g.strokeStyle = rgba(sc); g.lineWidth = lw * 1.2; g.stroke(q);
+    const l = new Path2D();
+    for (const t of [0.35, 0.65]) { const z = mix(za, zb, t); l.moveTo(mix(p0[0], p1[0], 0.12), mix(p0[1], p1[1], 0.12) + up(z)); l.lineTo(mix(p0[0], p1[0], 0.88), mix(p0[1], p1[1], 0.88) + up(z)); }
+    g.strokeStyle = rgba(pal.hi, 0.7); g.lineWidth = lw * 0.8; g.stroke(l);
+  }
+  const flatTop = !A && !s.wedge && topVis;
+  // светящаяся крыша
+  if (s.glow && !A && topVis) {
+    g.fillStyle = rgba(col, s.glow); g.beginPath();
+    g.moveTo(T[0][0], T[0][1]); for (let i = 1; i < n; i++) g.lineTo(T[i][0], T[i][1]); g.closePath(); g.fill();
+  }
+  // точки на крышах и тротуарах
+  const dotsOn = s.kind === 'plinth' || s.kind === 'park' ? s.rD < 0.35 + P.groundDots * 0.65 && P.groundDots > 0 : s.kind === 'tier' && s.rD < P.roofDots;
+  if (flatTop && dotsOn) {
+    const ground = s.kind !== 'tier', step = P.winStep * (ground ? 1.6 : 1.4), z = s.zt[0];
+    const pxS = step * S * Math.min(1, R.tz + 0.3), k = pxS < 3 * U ? Math.ceil(3 * U / pxS) : 1, st = step * k;
+    const ds = Math.max(0.6 * U, Math.min(1.2 * U, pxS * k * 0.35)), p = new Path2D();
+    const inside = (x, y) => { for (let i = 0; i < n; i++) { const j = (i + 1) % n; if ((poly[j][0] - poly[i][0]) * (y - poly[i][1]) - (poly[j][1] - poly[i][1]) * (x - poly[i][0]) < 0) return false; } return true; };
+    const ox = s.x0 + (((s.x1 - s.x0) % st) + st) / 2 % st, oy = s.y0 + (((s.y1 - s.y0) % st) + st) / 2 % st;
+    const holes = ground ? 0 : 0.25;
+    for (let y = oy; y < s.y1; y += st) for (let x = ox; x < s.x1; x += st) {
+      if (!inside(x, y)) continue;
+      if (holes && h2(Math.round(x * 7), Math.round(y * 7), s.seed) < holes) continue;
+      const [sx, sy] = pr(x, y, z); p.rect(sx - ds / 2, sy - ds / 2, ds, ds);
+    }
+    g.fillStyle = rgba(ground ? col : wc, ground ? 0.28 + 0.3 * P.groundDots : 0.55); g.fill(p);
+  }
+  // рёбра
+  const e = new Path2D(), mv = (a, b) => { e.moveTo(a[0], a[1]); e.lineTo(b[0], b[1]); };
+  for (let i = 0; i < n; i++) {
+    const j = (i + 1) % n, p = (i - 1 + n) % n;
+    if (vis[i]) mv(B[i], B[j]);
+    if (A ? (tvis[i] || vis[i]) : (topVis || vis[i])) mv(T[i], T[j]);
+    if ((vis[i] || vis[p]) && (!s.ribs || vis[i] !== vis[p] || i % s.ribs === 0)) mv(B[i], T[i]);
+    if (A && (tvis[i] || tvis[p]) && (!s.ribs || tvis[i] !== tvis[p] || i % s.ribs === 0)) mv(T[i], A);
+  }
+  if (A && n <= 8 && s.kind === 'tier') for (let i = 0; i < n; i++) if (tvis[i]) {  // гребни к серединам
+    const j = (i + 1) % n; mv([(T[i][0] + T[j][0]) / 2, (T[i][1] + T[j][1]) / 2], A);
+  }
+  const a = s.kind === 'plinth' ? 0.5 : s.kind === 'park' ? 0.45 : s.kind === 'clutter' ? 0.75 : 1;
+  g.strokeStyle = rgba(col, a); g.lineWidth = lw * (s.kind === 'plinth' || s.kind === 'park' ? 0.8 : 1); g.stroke(e);
+  // кромка по верху
+  if (s.kind === 'tier' && !A && topVis && s.rT < P.trim) {
+    const d = Math.min(1.2, Math.min(s.x1 - s.x0, s.y1 - s.y0) * 0.08), q = new Path2D();
+    for (let i = 0; i < n; i++) {
+      const p = (i - 1 + n) % n, j = (i + 1) % n;
+      let ax = poly[i][0] - poly[p][0], ay = poly[i][1] - poly[p][1], bx = poly[j][0] - poly[i][0], by = poly[j][1] - poly[i][1];
+      const la = Math.hypot(ax, ay) || 1, lb = Math.hypot(bx, by) || 1; ax /= la; ay /= la; bx /= lb; by /= lb;
+      const k = d / (1 + ax * bx + ay * by);
+      const [sx, sy] = pr(poly[i][0] + (-ay - by) * k, poly[i][1] + (ax + bx) * k, s.zt[i]);
+      i ? q.lineTo(sx, sy) : q.moveTo(sx, sy);
+    }
+    q.closePath();
+    g.strokeStyle = rgba(alt); g.lineWidth = lw * 1.1; g.stroke(q);
+  }
+}
+
+// ---------- пост ----------
+const FILTER_OK = (() => { try { const c = document.createElement('canvas').getContext('2d'); c.filter = 'blur(2px)'; return c.filter === 'blur(2px)'; } catch (e) { return false; } })();
+const BB = [];
+function bloomPass(src, g, W, H) {
+  const bg = PALS[P.pal].bg;
+  let prev = src, pw = W, ph = H;
+  const LV = 5;
+  for (let k = 0; k < LV; k++) {
+    const w = Math.max(1, Math.round(pw / 2)), h = Math.max(1, Math.round(ph / 2));
+    const c = BB[k] || (BB[k] = document.createElement('canvas'));
+    if (c.width !== w || c.height !== h) { c.width = w; c.height = h; }
+    const b = c.getContext('2d');
+    b.globalCompositeOperation = 'copy'; b.globalAlpha = 1; b.imageSmoothingEnabled = true; b.imageSmoothingQuality = 'high';
+    if (FILTER_OK) b.filter = k ? 'blur(1.2px)' : 'none';
+    b.drawImage(prev, 0, 0, w, h);
+    if (FILTER_OK) b.filter = 'none';
+    if (!k) {  // вычесть фон и возвести в квадрат — мягкий порог
+      b.globalCompositeOperation = 'difference'; b.fillStyle = bg; b.fillRect(0, 0, w, h);
+      b.globalCompositeOperation = 'multiply'; b.drawImage(c, 0, 0);
+    }
+    prev = c; pw = w; ph = h;
+  }
+  g.globalCompositeOperation = 'lighter'; g.imageSmoothingEnabled = true; g.imageSmoothingQuality = 'high';
+  const near = 1.2 - P.bloomR * 0.7, far = 0.25 + P.bloomR * 1.4;
+  for (let k = 0; k < LV; k++) {
+    g.globalAlpha = clamp(P.bloom * 0.5 * mix(near, far, k / (LV - 1)), 0, 1);
+    g.drawImage(BB[k], 0, 0, W, H);
+  }
+  g.globalAlpha = 1; g.globalCompositeOperation = 'source-over';
+}
+function post(src, dst) {
+  const W = src.width, H = src.height, g = dst.getContext('2d'), U = Math.max(W, H) / 1600;
+  g.setTransform(1, 0, 0, 1, 0, 0); g.globalCompositeOperation = 'copy'; g.globalAlpha = 1;
+  g.drawImage(src, 0, 0);
+  g.globalCompositeOperation = 'source-over';
+  if (P.bloom > 0) bloomPass(src, g, W, H);
+  if (P.glitch > 0) {
+    const r = rng('glitch'), n = Math.round(P.glitch * 18), cs = PALS[P.pal].c;
+    for (let k = 0; k < n; k++) {
+      const y = r.int(0, H - 1), h = r.range(2, 30) * U * (r.chance(0.2) ? 4 : 1), dx = r.range(-60, 60) * U * P.glitch;
+      g.drawImage(dst, 0, y, W, h, dx, y, W, h);
+      if (r.chance(0.4)) { g.globalCompositeOperation = 'lighter'; g.fillStyle = rgba(rgb(r.pick(cs)), 0.08 * P.glitch); g.fillRect(0, y, W, h); g.globalCompositeOperation = 'source-over'; }
+    }
+  }
+  if (P.ca <= 0 && P.grain <= 0 && P.scan <= 0 && P.vignette <= 0) return;
+  const img = g.getImageData(0, 0, W, H), d = img.data, s = P.ca > 0 ? d.slice() : d;
+  const caPx = P.ca * U, gA = P.grain * 46, vg = P.vignette * 0.85, sp = Math.max(2, Math.round(3 * U)), sk = 1 - P.scan * 0.4;
+  let seed = sd('grain') | 1;
+  for (let y = 0; y < H; y++) {
+    const ny = (y / H - 0.5) * 2, row = y * W, scan = (y % sp) < sp / 2 ? 1 : sk;
+    for (let x = 0; x < W; x++) {
+      const nx = (x / W - 0.5) * 2, i = (row + x) * 4;
+      let r = s[i], gg = s[i + 1], b = s[i + 2];
+      if (caPx) {
+        const o = Math.round(caPx * nx);
+        r = s[(row + clamp(x + o, 0, W - 1)) * 4]; b = s[(row + clamp(x - o, 0, W - 1)) * 4 + 2];
+      }
+      let k = scan;
+      if (vg) { const q = Math.min(1, (nx * nx + ny * ny) * 0.5); k *= 1 - vg * q * q; }
+      seed ^= seed << 13; seed ^= seed >>> 17; seed ^= seed << 5;
+      const nz = gA ? ((seed >>> 0) / 4294967296 - 0.5) * gA : 0;
+      d[i] = r * k + nz; d[i + 1] = gg * k + nz; d[i + 2] = b * k + nz;
+    }
+  }
+  g.putImageData(img, 0, 0);
+}
+
+// ---------- вывод ----------
+const cv = $('cv'), SCENE = document.createElement('canvas');
+function sizeCanvas() {
+  const st = $('stage'), dpr = Math.min(devicePixelRatio || 1, 2);
+  let cw = st.clientWidth, ch = st.clientHeight;
+  if (P.aspect !== 'экран') {
+    const [a, b] = P.aspect.split(':').map(Number), pad = cw < 500 ? 12 : 28, k = Math.min((cw - pad * 2) / a, (ch - pad * 2) / b);
+    cw = a * k; ch = b * k;
+  }
+  cw = Math.max(50, Math.floor(cw)); ch = Math.max(50, Math.floor(ch));
+  let W = Math.round(cw * dpr), H = Math.round(ch * dpr);
+  const cap = 7e6;
+  if (W * H > cap) { const k = Math.sqrt(cap / (W * H)); W = Math.round(W * k); H = Math.round(H * k); }
+  cv.style.width = cw + 'px'; cv.style.height = ch + 'px';
+  if (cv.width === W && cv.height === H) return false;
+  cv.width = SCENE.width = W; cv.height = SCENE.height = H;
+  return true;
+}
+let TM = { gen: 0, draw: 0, post: 0 }, NDRAWN = 0;
+function draw(lv) {
+  let t = performance.now();
+  if (lv >= 3 || !CITY) { generate(); TM.gen = performance.now() - t; t = performance.now(); }
+  if (sizeCanvas()) lv = Math.max(lv, 2);
+  if (lv >= 2) { NDRAWN = drawScene(SCENE); TM.draw = performance.now() - t; t = performance.now(); }
+  post(SCENE, cv); TM.post = performance.now() - t;
+  document.body.style.setProperty('--acc', PALS[P.pal].c[0]);
+  $('status').textContent = `${cv.width}×${cv.height} · зданий ${CITY.nb} · тел ${CITY.solids.length} (в кадре ${NDRAWN})\n` +
+    `город ${Math.round(TM.gen)} ms · рисунок ${Math.round(TM.draw)} ms · пост ${Math.round(TM.post)} ms`;
+  writeHash();
+}
+function writeHash() {
+  const q = new URLSearchParams();
+  q.set('seed', SEED);
+  for (const it of SCHEMA) if (it.length > 1 && P[it[0]] !== it[it.length - 1]) q.set(it[0], P[it[0]]);
+  history.replaceState(null, '', '#' + q.toString());
+}
+function readHash() {
+  const q = new URLSearchParams(location.hash.slice(1));
+  if (!q.has('seed')) return false;
+  SEED = q.get('seed'); $('seed').value = SEED;
+  for (const it of SCHEMA) {
+    if (it.length === 1 || !q.has(it[0])) continue;
+    const v = q.get(it[0]), def = it[it.length - 1];
+    setP(it[0], typeof def === 'boolean' ? v === 'true' : typeof def === 'number' ? +v : v);
+  }
+  return true;
+}
+let raf = 0, want = 0;
+function schedule(lv = 3) {
+  want = Math.max(want, lv);
+  if (!raf) raf = requestAnimationFrame(() => { raf = 0; const l = want; want = 0; draw(l); });
+}
+
+// ---------- ui ----------
+const inputs = {};
+function fmt(v, step) { return step >= 1 ? String(Math.round(v)) : (+v).toFixed(step < 0.1 ? 2 : 1); }
+function buildUI() {
+  const root = $('controls');
+  for (const it of SCHEMA) {
+    if (it.length === 1) { const h = document.createElement('h2'); h.textContent = it[0]; root.appendChild(h); continue; }
+    const [key, label, a, b, step] = it, lv = level(key);
+    const row = document.createElement('div'); row.className = 'row';
+    const lab = document.createElement('label'); lab.textContent = label; row.appendChild(lab);
+    if (a === 'sel') {
+      const sel = document.createElement('select');
+      for (const o of b) sel.add(new Option(o, o));
+      sel.value = P[key];
+      sel.onchange = () => { P[key] = sel.value; $('scene').value = ''; schedule(lv); };
+      row.append(sel, document.createElement('span'));
+      inputs[key] = { set: v => { sel.value = v; } };
+    } else if (a === 'chk') {
+      const ch = document.createElement('input'); ch.type = 'checkbox'; ch.checked = P[key];
+      ch.onchange = () => { P[key] = ch.checked; $('scene').value = ''; schedule(lv); };
+      row.append(ch, document.createElement('span'));
+      inputs[key] = { set: v => { ch.checked = v; } };
+    } else {
+      const inp = document.createElement('input'); inp.type = 'range'; inp.min = a; inp.max = b; inp.step = step; inp.value = P[key];
+      const out = document.createElement('output'); out.textContent = fmt(P[key], step);
+      inp.oninput = () => { P[key] = +inp.value; out.textContent = fmt(P[key], step); $('scene').value = ''; schedule(lv); };
+      row.append(inp, out);
+      inputs[key] = { set: v => { inp.value = v; out.textContent = fmt(v, step); } };
+    }
+    root.appendChild(row);
+  }
+  $('seed').value = SEED;
+  $('seed').onchange = () => { SEED = $('seed').value.trim() || '0'; schedule(); };
+  const sc = $('scene');
+  sc.add(new Option('—', ''));
+  for (const k of Object.keys(SCENES)) sc.add(new Option(k, k));
+  sc.onchange = () => { if (sc.value) applyScene(sc.value); };
+}
+function setP(key, v) { P[key] = v; inputs[key]?.set(v); }
+function applyScene(name) {
+  const keep = { aspect: P.aspect, pal: P.pal };
+  for (const k in DEF) setP(k, k in keep ? keep[k] : DEF[k]);
+  for (const [k, v] of Object.entries(SCENES[name])) setP(k, v);
+  schedule();
+}
+function newCity() { SEED = Math.random().toString(36).slice(2, 8); $('seed').value = SEED; schedule(); }
+function randomStyle() {
+  const r = Rng(String(Math.random())), f = (a, b) => +r.range(a, b).toFixed(2);
+  setP('bx', r.int(6, 18)); setP('by', r.int(6, 18)); setP('block', r.int(30, 80)); setP('stretch', f(0.6, 2.6));
+  setP('blockVar', f(0, 0.7)); setP('street', r.int(5, 14)); setP('avenue', r.int(0, 5)); setP('lot', r.int(10, 30));
+  setP('merge', f(0, 0.4)); setP('parks', f(0, 0.15));
+  setP('water', r.pick(['нет', 'нет', 'нет', 'река', 'залив', 'канал', 'остров'])); setP('waterAmt', f(0.2, 0.7));
+  setP('hMax', r.int(12, 90) * 5); setP('hMin', r.int(3, 15)); setP('centers', r.int(0, 3)); setP('focus', f(0.2, 0.9));
+  setP('hNoise', f(0.1, 0.7)); setP('spikes', f(0, 0.4));
+  setP('setback', f(0.1, 0.9)); setP('podium', f(0, 0.7)); setP('round', f(0, 0.2)); setP('chamfer', f(0, 0.4));
+  setP('roofs', f(0, 0.4)); setP('wedge', f(0, 0.3)); setP('spires', f(0, 0.5)); setP('clutter', f(0.1, 0.9));
+  setP('signs', f(0, 0.5)); setP('colorMix', f(0.1, 0.9));
+  setP('pal', r.pick(Object.keys(PALS))); setP('windows', f(0.3, 0.9)); setP('winStep', f(1.5, 3));
+  setP('bands', f(0, 0.7)); setP('trim', f(0, 0.8)); setP('roofDots', f(0, 0.9)); setP('groundDots', f(0.1, 0.9)); setP('traffic', f(0, 0.8));
+  setP('az', r.int(0, 359)); setP('el', r.int(28, 62)); setP('zoom', f(1.2, 2.6));
+  $('scene').value = '';
+  newCity();
+}
+function savePng() {
+  const k = Math.min(2, 5200 / Math.max(cv.width, cv.height)), W = Math.round(cv.width * k), H = Math.round(cv.height * k);
+  const sc = document.createElement('canvas'); sc.width = W; sc.height = H;
+  drawScene(sc);
+  const out = document.createElement('canvas'); out.width = W; out.height = H;
+  post(sc, out);
+  out.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = `neon-city-${SEED}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+$('bNew').onclick = newCity;
+$('bStyle').onclick = randomStyle;
+$('bSave').onclick = savePng;
+addEventListener('keydown', e => {
+  if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+  if (e.target.tagName === 'SELECT') return;
+  if (e.metaKey || e.ctrlKey || e.altKey) return;
+  const k = e.key.toLowerCase();
+  if (k === 'n' || k === 'т') newCity();
+  else if (k === 'm' || k === 'ь') randomStyle();
+  else if (k === 's' || k === 'ы') savePng();
+});
+// камера мышью
+let drag = null;
+cv.addEventListener('pointerdown', e => { drag = { x: e.clientX, y: e.clientY, az: P.az, el: P.el, px: P.panX, py: P.panY, sh: e.shiftKey }; cv.setPointerCapture(e.pointerId); cv.classList.add('drag'); });
+cv.addEventListener('pointermove', e => {
+  if (!drag) return;
+  const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+  if (drag.sh) { setP('panX', clamp(+(drag.px - dx / cv.clientWidth * 2).toFixed(2), -1, 1)); setP('panY', clamp(+(drag.py - dy / cv.clientHeight * 2).toFixed(2), -1, 1)); }
+  else { setP('az', Math.round(((drag.az - dx * 0.35) % 360 + 360) % 360)); setP('el', clamp(Math.round(drag.el + dy * 0.25), 12, 90)); }
+  $('scene').value = '';
+  schedule(2);
+});
+const endDrag = () => { drag = null; cv.classList.remove('drag'); };
+cv.addEventListener('pointerup', endDrag); cv.addEventListener('pointercancel', endDrag);
+cv.addEventListener('wheel', e => { e.preventDefault(); setP('zoom', clamp(+(P.zoom * Math.exp(-e.deltaY * 0.0015)).toFixed(2), 0.4, 5)); schedule(2); }, { passive: false });
+let rsT = 0;
+new ResizeObserver(() => { clearTimeout(rsT); rsT = setTimeout(() => schedule(2), 100); }).observe($('stage'));
+
+buildUI();
+if (!readHash()) { $('scene').value = 'полночь'; }
+schedule();
+</script>
+</body>
+</html>
