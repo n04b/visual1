@@ -1,0 +1,843 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Spectral Forms</title>
+<style>
+  :root { --bg:#111; --panel:#161616; --fg:#ddd; --dim:#777; --acc:#8a7dff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262626, #121212 72%); }
+  #cv { display:block; cursor:pointer; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #panel { width:300px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 92px 1fr 44px; align-items:center; gap:6px; margin:3px 0; }
+  .row label { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row output { text-align:right; font-size:11px; }
+  .row.hide, .grp.hide { display:none; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  input[type=color] { width:100%; height:22px; padding:0; border:1px solid #333; background:#0c0c0c; cursor:pointer; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #presets button { flex:1 1 30%; padding:6px 4px; }
+  #palRow { display:flex; gap:4px; margin:6px 0; }
+  #palRow input { flex:1; min-width:0; }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Spectral Forms</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bMut" title="M">mutate</button>
+    <button id="bAnim" title="A">animate</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <div class="row"><label>экспорт</label><select id="exp"></select><span></span></div>
+  <div class="row"><label>качество</label><select id="quality"></select><span></span></div>
+  <h2>Пресеты</h2>
+  <div class="btns" id="presets"></div>
+  <h2>Палитра</h2>
+  <div class="row"><label>набор</label><select id="palSel"></select><span></span></div>
+  <div id="palRow"></div>
+  <div class="btns">
+    <button id="pAdd">+</button><button id="pDel">−</button>
+    <button id="pRev">реверс</button><button id="pShuf">микс</button><button id="pRnd">новая</button>
+  </div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Источник — круги с градиентом и текстурой, лежащие под рифлёным стеклом. Каждое ребро
+    стекла — цилиндрическая линза: показывает свой кусок источника, сжатый, увеличенный или
+    перевёрнутый. «Фокус» сводит все рёбра к центру формы, «зум» меняет увеличение от ребра
+    к ребру. Цвет — сумма полей: общий радиус, радиус круга, линейный градиент, номер слоя.<br><br>
+    Space / клик — новая форма<br>
+    M — мутация, A — анимация<br>
+    1–6 — пресеты, S — сохранить PNG<br>
+    Ссылка в адресной строке хранит текущее состояние.
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function rngFrom(a) {
+  const n = mulberry32(a);
+  const r = () => n();
+  r.range = (x, y) => x + (y - x) * n();
+  r.int = (x, y) => x + Math.floor(n() * (y - x + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => { let s = 0; for (const w of ws) s += w; let v = n() * s;
+    for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i]; return items[items.length - 1]; };
+  return r;
+}
+const makeRng = s => rngFrom(hashStr(s));
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+
+// ---------- color ----------
+const hex2rgb = h => { h = h.replace('#', ''); return [0, 2, 4].map(i => parseInt(h.substr(i, 2), 16) / 255); };
+const toLin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const toGam = c => c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+function hex2oklab(h) {
+  const [r, g, b] = hex2rgb(h).map(toLin);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+function oklch2hex(L, C, H) {
+  const a = C * Math.cos(H * Math.PI / 180), b = C * Math.sin(H * Math.PI / 180);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  return '#' + rgb.map(c => Math.round(clamp(toGam(clamp(c))) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+const PALETTES = {
+  'призма':   ['#3cf08c', '#2fa6d2', '#8a4cf5', '#ff3f5a', '#e45fd8', '#2f8cff'],
+  'апельсин': ['#f6e6c8', '#b4f2e0', '#6a6cf4', '#ff3d14', '#ff7a1c'],
+  'жар':      ['#3d46bd', '#2a2b7a', '#1e1838', '#e2391b', '#ff8a2c', '#fbdc9a'],
+  'туман':    ['#4b7dff', '#9a86f2', '#ff9fd6', '#ffe6f3', '#ffffff'],
+  'лимон':    ['#ecf23c', '#cbb8f4', '#f2955c', '#cbb8f4'],
+  'неон':     ['#00f0ff', '#7a5cff', '#ff2bd6', '#ffe14a'],
+  'пастель':  ['#ffd6e0', '#c9e4ff', '#d8ffd1', '#fff3b0', '#e2d0ff'],
+  'закат':    ['#2b1055', '#7a2a8c', '#d53f6a', '#ff8a4c', '#ffd27a'],
+  'океан':    ['#0b1d51', '#1f5fae', '#35b8c9', '#bdf3e8', '#ffffff'],
+  'кислота':  ['#c6ff00', '#00e5a0', '#0077ff', '#ff00a8'],
+};
+
+// ---------- params ----------
+// [key, label, min, max, step, group, extra]; extra: {a:1} angle in degrees, {sel:[...]}, {show:fn}, {color:1}
+const LENS = s => s.lens > 0;
+const SPEC = [
+  ['N', 'кругов', 1, 24, 1, 'Источник'],
+  ['R', 'размер', 0.02, 1.4, 0.005, 'Источник'],
+  ['cx', 'центр x', -1.2, 1.2, 0.01, 'Источник'],
+  ['cy', 'центр y', -1.2, 1.2, 0.01, 'Источник'],
+  ['rot', 'поворот', -180, 180, 1, 'Источник', { a: 1 }],
+  ['aspect', 'вытянутость', 0.3, 3, 0.01, 'Источник'],
+  ['super', 'скругление', 0.6, 8, 0.05, 'Источник'],
+  ['shrink', 'мин. радиус', 0.02, 1, 0.01, 'Источник', { show: s => s.N > 1 }],
+  ['nestAng', 'точка касания', -180, 180, 1, 'Источник', { a: 1, show: s => s.N > 1 }],
+  ['spread', 'смещение', -1, 1.5, 0.01, 'Источник', { show: s => s.N > 1 }],
+  ['wobble', 'разброс', 0, 1, 0.01, 'Источник', { show: s => s.N > 1 }],
+  ['order', 'порядок', 0, 1, 1, 'Источник', { sel: ['большие снизу', 'малые снизу'], show: s => s.N > 1 }],
+
+  ['echo', 'копий', 0, 2, 1, 'Эхо'],
+  ['echoOff', 'шаг', 0, 3, 0.01, 'Эхо', { show: s => s.echo > 0 }],
+  ['echoScale', 'масштаб', 0.3, 1.5, 0.01, 'Эхо', { show: s => s.echo > 0 }],
+  ['echoShift', 'сдвиг цвета', -1, 1, 0.01, 'Эхо', { show: s => s.echo > 0 }],
+
+  ['lens', 'стекло', 0, 1, 1, 'Линза', { sel: ['нет', 'рифлёное'] }],
+  ['lN', 'рёбер', 1, 64, 1, 'Линза', { show: LENS }],
+  ['lAng', 'направление', -180, 180, 1, 'Линза', { a: 1, show: LENS }],
+  ['lStart', 'начало', -1.6, 1.6, 0.01, 'Линза', { show: LENS }],
+  ['lEnd', 'конец', -1.6, 1.6, 0.01, 'Линза', { show: LENS }],
+  ['lGap', 'зазор', 0, 0.95, 0.01, 'Линза', { show: LENS }],
+  ['lMag', 'преломление', -4, 4, 0.01, 'Линза', { show: LENS }],
+  ['lCurve', 'бочка', -2, 2, 0.01, 'Линза', { show: LENS }],
+  ['lAnchor', 'опора', 0, 1, 0.01, 'Линза', { show: LENS }],
+  ['lPull', 'фокус', 0, 1, 0.01, 'Линза', { show: LENS }],
+  ['lProfile', 'профиль зума', 0, 5, 1, 'Линза', { sel: ['ровный', 'рампа ↗', 'рампа ↘', 'центр', 'края', 'волна'], show: LENS }],
+  ['lZoom0', 'зум мин', 0.02, 3, 0.01, 'Линза', { show: LENS }],
+  ['lZoom1', 'зум макс', 0.02, 3, 0.01, 'Линза', { show: LENS }],
+  ['lAlong', 'зум вдоль', 0, 1, 0.01, 'Линза', { show: LENS }],
+  ['lCross', 'зум поперёк', 0, 1, 0.01, 'Линза', { show: LENS }],
+  ['lShift', 'сдвиг поперёк', -1.5, 1.5, 0.01, 'Линза', { show: LENS }],
+  ['lJitter', 'неровность', 0, 1, 0.01, 'Линза', { show: LENS }],
+  ['lBend', 'изгиб рёбер', -2, 2, 0.01, 'Линза', { show: LENS }],
+  ['lBg', 'фон', 0, 1, 1, 'Линза', { sel: ['не преломлять', 'преломлять'], show: LENS }],
+  ['lCA', 'аберрация', 0, 0.3, 0.002, 'Линза', { show: LENS }],
+  ['lShade', 'тень рёбер', -1, 1, 0.01, 'Линза', { show: LENS }],
+  ['lShine', 'блик', 0, 1, 0.01, 'Линза', { show: LENS }],
+
+  ['palMode', 'режим', 0, 2, 1, 'Цвет', { sel: ['цикл', 'зеркало', 'край'] }],
+  ['wG', 'радиус общий', -3, 3, 0.01, 'Цвет'],
+  ['wL', 'радиус круга', -3, 3, 0.01, 'Цвет'],
+  ['wLin', 'линейный', -3, 3, 0.01, 'Цвет'],
+  ['gAng', 'угол', -180, 180, 1, 'Цвет', { a: 1 }],
+  ['wLay', 'по слоям', -3, 3, 0.01, 'Цвет'],
+  ['layerPhase', 'шаг фазы', -0.5, 0.5, 0.005, 'Цвет'],
+  ['gPhase', 'фаза', -1, 1, 0.005, 'Цвет'],
+
+  ['tex', 'тип', 0, 4, 1, 'Текстура', { sel: ['нет', 'кольца', 'моаре', 'штрих', 'растр'] }],
+  ['texFreq', 'частота', 5, 600, 1, 'Текстура', { show: s => s.tex > 0 }],
+  ['texAmt', 'сила', 0, 1, 0.01, 'Текстура', { show: s => s.tex > 0 }],
+  ['texShift', 'цвет линий', -1, 1, 0.01, 'Текстура', { show: s => s.tex > 0 }],
+  ['texOff', 'разнос центров', 0, 2, 0.01, 'Текстура', { show: s => s.tex == 2 }],
+  ['texAng', 'направление', -180, 180, 1, 'Текстура', { a: 1, show: s => s.tex >= 2 }],
+  ['texGlobal', 'центр', 0, 1, 1, 'Текстура', { sel: ['у круга', 'у формы'], show: s => s.tex > 0 }],
+
+  ['soft', 'размытие', 0, 1, 0.002, 'Края'],
+  ['opacity', 'непрозрачность', 0, 1, 0.01, 'Края'],
+  ['frost', 'матовость', 0, 1, 0.01, 'Края'],
+  ['shade', 'объём', -1, 1, 0.01, 'Края'],
+
+  ['halo', 'сила', 0, 1, 0.01, 'Свечение'],
+  ['haloRing', 'форма', 0, 1, 1, 'Свечение', { sel: ['диск', 'кольцо'], show: s => s.halo > 0 }],
+  ['haloSize', 'радиус', 0.02, 2.5, 0.01, 'Свечение', { show: s => s.halo > 0 }],
+  ['haloSoft', 'размытие', 0.01, 1.5, 0.01, 'Свечение', { show: s => s.halo > 0 }],
+  ['haloX', 'сдвиг x', -1.5, 1.5, 0.01, 'Свечение', { show: s => s.halo > 0 }],
+  ['haloY', 'сдвиг y', -1.5, 1.5, 0.01, 'Свечение', { show: s => s.halo > 0 }],
+  ['haloShift', 'сдвиг цвета', -1, 1, 0.01, 'Свечение', { show: s => s.halo > 0 }],
+
+  ['bgType', 'тип', 0, 2, 1, 'Фон', { sel: ['сплошной', 'линейный', 'радиальный'] }],
+  ['bg1', 'цвет 1', 0, 0, 0, 'Фон', { color: 1 }],
+  ['bg2', 'цвет 2', 0, 0, 0, 'Фон', { color: 1, show: s => s.bgType > 0 }],
+  ['bgAng', 'угол', -180, 180, 1, 'Фон', { a: 1, show: s => s.bgType == 1 }],
+  ['paper', 'бумага', 0, 0.3, 0.005, 'Фон'],
+  ['grain', 'зерно', 0, 0.3, 0.005, 'Фон'],
+  ['speed', 'скорость', -0.5, 0.5, 0.005, 'Анимация'],
+];
+
+const DEFAULTS = {
+  N: 1, R: 0.6, cx: 0, cy: 0, rot: 0, aspect: 1, super: 2, shrink: 0.2, nestAng: 90, spread: 1, wobble: 0, order: 0,
+  echo: 0, echoOff: 1, echoScale: 1, echoShift: 0.33,
+  lens: 0, lN: 12, lAng: 0, lStart: -1, lEnd: 1, lGap: 0, lMag: 1, lCurve: 0, lAnchor: 0.5, lPull: 0,
+  lProfile: 0, lZoom0: 1, lZoom1: 1, lAlong: 1, lCross: 1, lShift: 0, lJitter: 0, lBend: 0, lBg: 1, lCA: 0, lShade: 0, lShine: 0,
+  palMode: 2, wG: 0, wL: 1, wLin: 0, gAng: 0, wLay: 0, layerPhase: 0, gPhase: 0,
+  tex: 0, texFreq: 60, texAmt: 0.4, texShift: 0.5, texOff: 0.5, texAng: 90, texGlobal: 0,
+  soft: 0, opacity: 1, frost: 0, shade: 0,
+  halo: 0, haloRing: 0, haloSize: 0.7, haloSoft: 0.2, haloX: 0, haloY: 0, haloShift: 0,
+  bgType: 0, bg1: '#e6e4df', bg2: '#cfcac2', bgAng: 90, paper: 0.03, grain: 0.03,
+  speed: 0.05,
+  pal: PALETTES['апельсин'].slice(),
+};
+
+const PRESETS = {
+  'ламели': { N: 1, R: 0.44, rot: 0, aspect: 1.3, echo: 1, echoOff: 1.15, echoScale: 0.9, echoShift: 0.36,
+    lens: 1, lN: 15, lAng: 0, lStart: -0.68, lEnd: 0.68, lGap: 0.28, lMag: 6, lAnchor: 0.5, lPull: 0,
+    lProfile: 3, lZoom0: 1.35, lZoom1: 1, lCross: 1, lBg: 0,
+    palMode: 0, wG: 0, wL: 0.05, wLin: 0.2, gAng: 0, gPhase: 0.12,
+    tex: 1, texFreq: 22, texAmt: 0.4, texShift: 0.12, texGlobal: 0,
+    bgType: 0, bg1: '#b8c3c7', paper: 0.015, grain: 0.03, pal: PALETTES['призма'].slice() },
+  'моаре': { N: 1, R: 0.8, aspect: 1.05, lens: 1, lN: 6, lAng: 90, lStart: -0.86, lEnd: 0.86, lGap: 0, lMag: 1.45,
+    lCurve: 0.35, lAnchor: 0.5, lPull: 0, lProfile: 3, lZoom0: 1.08, lZoom1: 0.92, lCross: 1, lBend: -0.6, lBg: 0, lShade: 0,
+    palMode: 2, wG: 0.95, wL: 0, gPhase: -0.04,
+    tex: 2, texFreq: 95, texAmt: 0.7, texShift: 0.7, texOff: 0.9, texAng: 90, texGlobal: 1,
+    bgType: 0, bg1: '#e5e4e0', paper: 0.05, grain: 0.035, pal: PALETTES['апельсин'].slice() },
+  'волна': { N: 1, R: 0.08, cx: -0.68, cy: 0, soft: 1.6, lens: 1, lN: 9, lAng: 0, lStart: -0.56, lEnd: 1.06,
+    lMag: 0.5, lAnchor: 0, lPull: 1, lProfile: 1, lZoom0: 0.6, lZoom1: 0.12, lAlong: 0.25, lCross: 1, lBg: 0, lShade: 0.07,
+    palMode: 2, wG: 0, wL: 0.75, gPhase: 0, tex: 0,
+    bgType: 1, bg1: '#7f3fd0', bg2: '#7cc4a0', bgAng: 100, paper: 0, grain: 0.02,
+    pal: PALETTES['жар'].slice() },
+  'туман': { N: 1, R: 0.56, cx: 0.06, cy: 0.04, palMode: 2, wG: 0, wL: 0, wLin: 0.55, gAng: -25, gPhase: 0.42,
+    tex: 0, soft: 0.004, opacity: 0.88, frost: 0.4, halo: 1, haloRing: 1, haloSize: 0.56, haloSoft: 0.18,
+    haloX: -0.16, haloY: 0.06, haloShift: -0.12, bgType: 0, bg1: '#ffffff', paper: 0, grain: 0.012,
+    pal: PALETTES['туман'].slice() },
+  'кольца': { N: 7, R: 0.82, shrink: 0.13, nestAng: 90, spread: 1, palMode: 0, wG: 0, wL: 0, wLin: 1.15,
+    gAng: -78, gPhase: 0.1, layerPhase: 0.19, tex: 0, soft: 0, bgType: 0, bg1: '#000000', paper: 0, grain: 0.01,
+    pal: PALETTES['лимон'].slice() },
+  'стекло': { N: 1, R: 0.56, cx: 0.06, cy: 0.04, palMode: 2, wG: 0, wL: 0, wLin: 0.55, gAng: -25, gPhase: 0.42,
+    tex: 0, soft: 0.004, opacity: 0.88, frost: 0.4, halo: 1, haloRing: 1, haloSize: 0.56, haloSoft: 0.18,
+    haloX: -0.16, haloY: 0.06, haloShift: -0.12, bgType: 0, bg1: '#ffffff', paper: 0, grain: 0.012,
+    lens: 1, lN: 22, lAng: 0, lStart: -1.05, lEnd: 1.05, lMag: -0.7, lCurve: 0.25, lAnchor: 0.5, lPull: 0,
+    lProfile: 0, lZoom0: 1, lZoom1: 1, lBg: 1, lCA: 0.06, lShade: 0.12, lShine: 0.25,
+    pal: PALETTES['туман'].slice() },
+};
+let S = { ...DEFAULTS, ...PRESETS['моаре'], pal: PRESETS['моаре'].pal.slice() };
+let seed = randSeed();
+let animating = false, t0 = performance.now(), tAnim = 0;
+
+const FORMATS = { p45: ['4:5', 4 / 5], sq: ['1:1', 1], p23: ['2:3', 2 / 3], p916: ['9:16', 9 / 16], l32: ['3:2', 3 / 2], l169: ['16:9', 16 / 9] };
+let format = 'p45';
+const EXPORTS = { 1080: '1080 px', 2160: '2160 px', 3240: '3240 px', 4320: '4320 px' };
+let expSize = 2160;
+const QUALITY = { 1: '1× (быстро)', 2: '2×2', 3: '3×3' };
+let quality = 2;
+
+// ---------- gl ----------
+const cv = document.getElementById('cv');
+const gl = cv.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
+const VS = `#version 300 es
+in vec2 a; void main(){ gl_Position = vec4(a,0.,1.); }`;
+const FS = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+uniform vec2 uRes; uniform float uTime, uSeed, uSS;
+uniform vec3 uPal[8]; uniform float uPalN, uPalMode;
+uniform vec3 uBg1, uBg2; uniform float uBgType, uBgAng, uPaper, uGrain;
+uniform float uN, uR, uCx, uCy, uRot, uAspect, uSuper, uShrink, uNestAng, uSpread, uWobble, uOrder;
+uniform float uEcho, uEchoOff, uEchoScale, uEchoShift;
+uniform float uLens, uLN, uLAng, uLStart, uLEnd, uLGap, uLMag, uLCurve, uLAnchor, uLPull;
+uniform float uLProfile, uLZoom0, uLZoom1, uLCross, uLAlong, uLShift, uLJitter, uLBend, uLBg, uLCA, uLShade, uLShine;
+uniform float uWG, uWL, uWLin, uGAng, uWLay, uLayerPhase, uGPhase, uSpeed;
+uniform float uTex, uTexFreq, uTexAmt, uTexShift, uTexOff, uTexAng, uTexGlobal;
+uniform float uSoft, uOpacity, uFrost, uShade;
+uniform float uHalo, uHaloRing, uHaloSize, uHaloSoft, uHaloX, uHaloY, uHaloShift;
+
+float px;    // sample footprint on screen
+float pxs;   // footprint in source space (after the lens has scaled it)
+float tm;
+
+float hash1(float n){ return fract(sin(n*12.9898 + uSeed*78.233)*43758.5453); }
+float hash2(vec2 p){ vec3 p3 = fract(vec3(p.xyx)*.1031); p3 += dot(p3, p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }
+float vnoise(vec2 p){ vec2 i=floor(p), f=fract(p); f=f*f*(3.-2.*f);
+  return mix(mix(hash2(i),hash2(i+vec2(1,0)),f.x), mix(hash2(i+vec2(0,1)),hash2(i+vec2(1,1)),f.x), f.y); }
+
+vec3 ok2rgb(vec3 c){
+  float l_ = c.x + 0.3963377774*c.y + 0.2158037573*c.z;
+  float m_ = c.x - 0.1055613458*c.y - 0.0638541728*c.z;
+  float s_ = c.x - 0.0894841775*c.y - 1.2914855480*c.z;
+  float l=l_*l_*l_, m=m_*m_*m_, s=s_*s_*s_;
+  vec3 lin = clamp(vec3( 4.0767416621*l - 3.3077115913*m + 0.2309699292*s,
+                        -1.2684380046*l + 2.6097574011*m - 0.3413193965*s,
+                        -0.0041960863*l - 0.7034186147*m + 1.7076147010*s), 0., 1.);
+  return mix(lin*12.92, 1.055*pow(lin, vec3(1./2.4))-0.055, step(0.0031308, lin));
+}
+vec3 pal(float u){
+  float n = uPalN, x;
+  if (uPalMode < 0.5) x = fract(u)*n;
+  else if (uPalMode < 1.5) x = (1.-abs(fract(u*0.5)*2.-1.))*(n-1.);
+  else x = clamp(u,0.,1.)*(n-1.);
+  int N = int(n);
+  int i = min(int(floor(x)), N-1);
+  int j = i+1;
+  if (j >= N) j = uPalMode < 0.5 ? 0 : N-1;
+  return ok2rgb(mix(uPal[i], uPal[j], x-floor(x)));
+}
+// anti-aliased cosine wave in [0,1]; fades to its mean when it gets finer than a couple of samples
+float ring(float d, float fr){ return 0.5 + 0.5*cos(6.2831853*fr*d)*smoothstep(0.5, 0.2, fr*pxs); }
+
+vec3 background(vec2 p){
+  if (uBgType < 0.5) return uBg1;
+  if (uBgType < 1.5) return mix(uBg1, uBg2, smoothstep(0.,1., clamp(dot(p, vec2(cos(uBgAng),sin(uBgAng)))*0.5+0.5, 0., 1.)));
+  return mix(uBg1, uBg2, clamp(length(p-vec2(uCx,uCy))/1.6, 0., 1.));
+}
+
+// ---------- source: circles + halo, premultiplied rgba over transparent ----------
+vec4 source(vec2 p){
+  vec4 acc = vec4(0.);
+  vec2 c0 = vec2(uCx, uCy);
+  float lin = dot(p-c0, vec2(cos(uGAng), sin(uGAng)))/uR;
+
+  if (uHalo > 0.001){
+    vec2 hc = c0 + vec2(uHaloX, uHaloY);
+    float hr = length(p-hc), hd = hr - uHaloSize, hs = uHaloSoft + pxs;
+    float ha = (uHaloRing > 0.5 || hd > 0.) ? exp(-hd*hd/(hs*hs)) : 1.;
+    ha = clamp(uHalo*ha, 0., 1.);
+    vec3 hcol = pal(uWLin*lin + uWG*hr/uR + uGPhase + uHaloShift + tm);
+    acc = vec4(hcol*ha, ha) + acc*(1.-ha);
+  }
+
+  vec2 d = p-c0;
+  float cr = cos(uRot), sr = sin(uRot);
+  vec2 q = vec2(cr*d.x + sr*d.y, -sr*d.x + cr*d.y);
+  q.y /= uAspect;
+  vec2 tdir = vec2(cos(uTexAng), sin(uTexAng));
+  float fr = uTexFreq/uR;
+  int N = int(uN+0.5), E = int(uEcho+0.5), NE = 2*E+1;
+
+  for (int m = 0; m < 5; m++){
+    if (m >= NE) break;
+    // outermost echoes first, the main copy last
+    float j = (m == NE-1) ? 0. : float(E - m/2) * ((m%2 == 0) ? -1. : 1.);
+    float eOff = j*uEchoOff*uR, eScale = pow(uEchoScale, abs(j)), eShift = j*uEchoShift;
+    for (int i = 0; i < 24; i++){
+      if (i >= N) break;
+      float k = uOrder > 0.5 ? float(N-1-i) : float(i);
+      float kn = N > 1 ? k/float(N-1) : 0.;
+      float hw = hash1(k+1.)-0.5, hw2 = hash1(k+17.)-0.5;
+      float r = uR*mix(1., uShrink, kn)*eScale;
+      vec2 cen = vec2(cos(uNestAng), sin(uNestAng))*(uR*eScale - r)*uSpread + vec2(hw, hw2)*uWobble*uR + vec2(0., eOff);
+      // superellipse: normalized radius + first-order distance
+      vec2 ae = abs((q-cen)/r) + 1e-5;
+      float n = uSuper;
+      float lr = pow(pow(ae.x,n) + pow(ae.y,n), 1./n);
+      vec2 g = pow(ae, vec2(n-1.))/r*pow(lr, 1.-n);
+      float dist = (lr-1.)/max(length(g), 1e-4);
+      float soft = uSoft*uR + pxs*0.7;
+      float a = uOpacity*(1.-smoothstep(-soft, soft, dist));
+      if (a < 0.002) continue;
+
+      float u = uWG*length(q)/uR + uWL*min(lr, 2.) + uWLin*lin + uWLay*kn
+              + uGPhase + k*uLayerPhase + eShift + tm;
+      vec3 lc = pal(u);
+      if (uTex > 0.5){
+        vec2 tq = uTexGlobal > 0.5 ? q : q-cen;
+        float pat;
+        if (uTex < 1.5) pat = ring(length(tq), fr);
+        else if (uTex < 2.5){ vec2 o2 = tdir*uTexOff*uR; pat = ring(length(tq-o2), fr)*ring(length(tq+o2), fr); }
+        else if (uTex < 3.5) pat = ring(dot(tq, tdir), fr);
+        else {
+          vec2 uv = vec2(dot(tq, tdir), dot(tq, vec2(-tdir.y, tdir.x)))*fr;
+          float lum = dot(lc, vec3(.299,.587,.114));
+          float dr = sqrt(clamp(1.-lum, 0., 1.))*0.62, w = fr*pxs;
+          pat = 1.-smoothstep(dr-w, dr+w, length(fract(uv)-0.5));
+          pat = mix(pat, min(dr*dr*3.1416, 1.), smoothstep(0.25, 0.5, w));
+        }
+        lc = mix(lc, pal(u + uTexShift), uTexAmt*pat);
+      }
+      float rim = smoothstep(0.2, 1., clamp(lr, 0., 1.)); rim *= rim;
+      lc = uShade > 0. ? mix(lc, lc*lc*0.8, uShade*rim) : mix(lc, vec3(1.), -uShade*rim);
+      lc = mix(lc, vec3(1.), uFrost);
+      acc = vec4(lc*a, a) + acc*(1.-a);
+    }
+  }
+  return acc;
+}
+
+// ---------- fluted glass ----------
+// Every rib is a cylindrical lens: the point at "anchor" across the rib looks at a target
+// (its own position, or the focus when pulled), the rest of the rib spreads around it
+// with the rib's refraction and zoom. ca scales the refraction for chromatic aberration.
+struct Rib { vec2 src; float gap; float u; float inside; };
+Rib lensMap(vec2 p, float ca){
+  Rib R; R.src = p; R.gap = 1.; R.u = 0.5; R.inside = 0.;
+  pxs = px;
+  if (uLens < 0.5) return R;
+  vec2 ax = vec2(cos(uLAng), sin(uLAng)), cx = vec2(-ax.y, ax.x);
+  vec2 f = vec2(uCx, uCy);
+  float c = dot(p, cx), fa = dot(f, ax), fc = dot(f, cx);
+  // bent ribs: rib boundaries follow a parabola instead of a straight line
+  float a = dot(p, ax) + uLBend*(c-fc)*(c-fc);
+  float lo = min(uLStart, uLEnd), hi = max(uLStart, uLEnd);
+  if (a < lo || a >= hi) return R;
+  float N = max(uLN, 1.), w = (hi-lo)/N;
+  float kf = min(floor((a-lo)/w), N-1.), u = (a-lo)/w - kf;
+  float t = N > 1. ? kf/(N-1.) : 0.5;
+  float pr;
+  if (uLProfile < 0.5) pr = 1.;
+  else if (uLProfile < 1.5) pr = t;
+  else if (uLProfile < 2.5) pr = 1.-t;
+  else if (uLProfile < 3.5) pr = 1.-abs(2.*t-1.);
+  else if (uLProfile < 4.5) pr = abs(2.*t-1.);
+  else pr = 0.5-0.5*cos(t*6.2831853*2.);
+  float zm = mix(uLZoom0, uLZoom1, pr);
+  float zc = mix(1., zm, uLCross), za = mix(1., zm, uLAlong);
+  float jit = (hash1(kf*3.1+5.)-0.5)*uLJitter;
+  float anchorA = lo + (kf + uLAnchor)*w;
+  float targetA = mix(anchorA, fa, uLPull);
+  // offset from the rib's anchor line, measured unbent so bending only reshapes the rib borders
+  float x = dot(p, ax) - anchorA, b = 2.*u-1.;
+  float srcA = targetA + (x*uLMag + uLCurve*w*0.5*b*b*b)*za*ca + jit*w;
+  float srcC = fc + (c - fc)*zc + uLShift*(t-0.5)*2.*uR + jit*uR*0.3;
+  R.src = ax*srcA + cx*srcC;
+  R.u = u; R.inside = 1.;
+  pxs = px*sqrt(abs((uLMag + uLCurve*1.5*b*b)*za)*zc);
+  if (uLGap > 0.){
+    float de = min(u, 1.-u)*w, hg = uLGap*w*0.5;
+    R.gap = smoothstep(hg - px, hg + px, de);
+  }
+  return R;
+}
+
+vec3 look(vec2 p, Rib rb){
+  vec4 sh = source(rb.src);
+  vec3 bg = background(uLBg > 0.5 ? rb.src : p);
+  return bg*(1.-sh.a) + sh.rgb;
+}
+
+vec3 scene(vec2 p){
+  Rib rb = lensMap(p, 1.);
+  vec3 col = look(p, rb);
+  if (rb.inside > 0.5){
+    if (uLCA > 0.0005){
+      col.r = look(p, lensMap(p, 1.+uLCA)).r;
+      col.b = look(p, lensMap(p, 1.-uLCA)).b;
+    }
+    float b = 2.*rb.u-1.;
+    col *= 1. - uLShade*b*b*b*b;
+    col = mix(col, vec3(1.), uLShine*exp(-pow((rb.u-0.22)/0.05, 2.)));
+    col = mix(background(p), col, rb.gap);
+  }
+  return col;
+}
+
+void main(){
+  float sc = 2./min(uRes.x, uRes.y);
+  int ss = int(uSS+0.5);
+  px = sc/float(ss);
+  tm = uTime*uSpeed;
+  vec3 acc = vec3(0.);
+  for (int y = 0; y < 3; y++) for (int x = 0; x < 3; x++){
+    if (x >= ss || y >= ss) continue;
+    vec2 off = (vec2(x, y)+0.5)/float(ss) - 0.5;
+    acc += scene((gl_FragCoord.xy + off - 0.5*uRes)*sc);
+  }
+  vec3 col = acc/float(ss*ss);
+  vec2 pc = (gl_FragCoord.xy - 0.5*uRes)*sc;
+  float pn = vnoise(pc*220.)*0.55 + vnoise(pc*60.+7.)*0.3 + vnoise(pc*12.+3.)*0.15;
+  col *= 1. + (pn-0.5)*uPaper*2.;
+  col += (hash2(gl_FragCoord.xy + fract(uSeed*13.1)*500.) - 0.5)*uGrain;
+  fragColor = vec4(clamp(col, 0., 1.), 1.);
+}`;
+
+function compile(type, src) {
+  const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+let prog, U = {};
+function initGL() {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(prog, i).name.replace('[0]', ''); U[name] = gl.getUniformLocation(prog, name); }
+}
+const uName = k => 'u' + k[0].toUpperCase() + k.slice(1);
+
+function draw(w, h, ss) {
+  gl.viewport(0, 0, w, h);
+  gl.uniform2f(U.uRes, w, h);
+  gl.uniform1f(U.uTime, tAnim);
+  gl.uniform1f(U.uSeed, (hashStr(seed) % 10000) / 1000);
+  gl.uniform1f(U.uSS, ss);
+  for (const [k, , , , , , x = {}] of SPEC) {
+    if (x.color || !U[uName(k)]) continue;
+    gl.uniform1f(U[uName(k)], x.a ? S[k] * Math.PI / 180 : S[k]);
+  }
+  gl.uniform3fv(U.uBg1, hex2rgb(S.bg1));
+  gl.uniform3fv(U.uBg2, hex2rgb(S.bg2));
+  const pal = S.pal.slice(0, 8), flat = new Float32Array(24);
+  pal.forEach((c, i) => flat.set(hex2oklab(c), i * 3));
+  gl.uniform3fv(U.uPal, flat);
+  gl.uniform1f(U.uPalN, pal.length);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ---------- layout / render loop ----------
+const stage = document.getElementById('stage');
+let dirty = true;
+function resize() {
+  const ar = FORMATS[format][1], m = 36;
+  const W = stage.clientWidth - m * 2, H = stage.clientHeight - m * 2;
+  let w = W, h = w / ar; if (h > H) { h = H; w = h * ar; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.style.width = Math.round(w) + 'px'; cv.style.height = Math.round(h) + 'px';
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  dirty = true;
+}
+function frame(now) {
+  if (animating) { tAnim += (now - t0) / 1000; dirty = true; }
+  t0 = now;
+  if (dirty) { draw(cv.width, cv.height, animating ? Math.min(quality, 1) : quality); dirty = false; }
+  requestAnimationFrame(frame);
+}
+let hashTimer;
+function changed() {
+  dirty = true;
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => history.replaceState(null, '', '#' + btoa(JSON.stringify({ seed, format, S }))), 300);
+}
+
+// ---------- random ----------
+function randPalette(r) {
+  const n = r.int(3, 6), h0 = r.range(0, 360);
+  const scheme = r.wpick(['analog', 'spectral', 'comp', 'triad', 'warmcool'], [3, 3, 2, 1.5, 2]);
+  const sweep = { analog: r.range(50, 110), spectral: r.range(160, 320), comp: 180, triad: 240, warmcool: r.range(120, 200) }[scheme];
+  const dir = r.chance(0.5) ? 1 : -1, out = [];
+  for (let i = 0; i < n; i++) {
+    const t = n > 1 ? i / (n - 1) : 0;
+    const L = scheme === 'warmcool' ? 0.55 + 0.38 * Math.abs(Math.sin(t * Math.PI * r.range(0.6, 1.4))) : r.range(0.5, 0.93);
+    out.push(oklch2hex(L, r.range(0.08, 0.26) * (L > 0.9 ? 0.5 : 1), h0 + dir * sweep * t + r.range(-12, 12)));
+  }
+  if (r.chance(0.2)) out.splice(r.int(0, n - 1), 0, oklch2hex(r.range(0.95, 0.99), 0.02, h0));   // light accent
+  return out.slice(0, 8);
+}
+function randomState(sd) {
+  const r = makeRng(sd);
+  const s = { ...DEFAULTS };
+  s.pal = r.chance(0.35) ? r.pick(Object.values(PALETTES)).slice() : randPalette(r);
+  if (r.chance(0.3)) s.pal.reverse();
+  // source
+  const src = r.wpick(['orb', 'nest', 'echo', 'spot'], [3, 2, 1.5, 1.5]);
+  s.N = 1; s.cx = 0; s.cy = 0;
+  s.super = r.wpick([2, r.range(1.4, 1.9), r.range(2.4, 5)], [7, 1, 1]);
+  s.aspect = r.chance(0.6) ? 1 : r.range(0.75, 1.4);
+  if (src === 'orb') s.R = r.range(0.5, 0.82);
+  else if (src === 'nest') {
+    s.R = r.range(0.6, 0.85); s.N = r.int(2, 12); s.shrink = r.range(0.05, 0.6);
+    s.nestAng = r.range(-180, 180); s.spread = r.wpick([1, 0, r.range(0.3, 1.3)], [3, 1, 2]);
+    s.order = r.chance(0.8) ? 0 : 1; s.wobble = r.chance(0.8) ? 0 : r.range(0.05, 0.3);
+  } else if (src === 'echo') {
+    s.R = r.range(0.3, 0.5); s.echo = r.int(1, 2); s.echoOff = r.range(0.9, 1.4);
+    s.echoScale = r.range(0.75, 1); s.echoShift = r.range(0.2, 0.5) * (r.chance(0.5) ? 1 : -1);
+    s.rot = r.pick([0, 90, r.range(-180, 180)]);
+  } else {
+    s.R = r.range(0.06, 0.16); s.cx = r.range(-0.3, 0.3); s.cy = r.range(-0.3, 0.3); s.soft = r.range(0.6, 1.6);
+  }
+  // colour field: pick a dominant term, sprinkle the rest
+  const field = r.wpick(['local', 'global', 'linear', 'layers'], [3, 2, 3, s.N > 1 ? 2 : 0]);
+  s.wG = s.wL = s.wLin = s.wLay = 0; s.layerPhase = 0;
+  if (field === 'local') { s.wL = r.range(0.6, 1.1); s.wG = r.range(0, 0.3); }
+  else if (field === 'global') { s.wG = r.range(0.6, 1.1); s.wL = r.range(0, 0.3); }
+  else if (field === 'linear') { s.wLin = r.range(0.3, 1.4) * (r.chance(0.5) ? 1 : -1); s.layerPhase = s.N > 1 && r.chance(0.5) ? r.range(-0.2, 0.2) : 0; }
+  else { s.wLay = r.range(0.6, 1); s.wL = r.range(0, 0.5); }
+  if (src === 'spot') { s.wL = r.range(0.8, 1.1); s.wG = 0; s.wLin = 0; }
+  s.gAng = r.range(-180, 180);
+  s.palMode = r.wpick([0, 1, 2], [1.5, 1.5, 3]);
+  s.gPhase = s.palMode == 2 ? r.range(-0.1, 0.1) : r.range(0, 1);
+  // texture, frequency per source radius
+  s.tex = r.wpick([0, 1, 2, 3, 4], [4, 2, 2.5, 1, 1]);
+  s.texFreq = r.range(25, 110) * s.R / 0.6; s.texAmt = r.range(0.25, 0.65);
+  s.texShift = r.range(0.25, 0.75) * (r.chance(0.5) ? 1 : -1); s.texOff = r.range(0.2, 1);
+  s.texAng = r.pick([0, 90, r.range(-180, 180)]); s.texGlobal = r.chance(0.35) ? 1 : 0;
+  if (s.tex == 4) s.texFreq = r.range(15, 45) * s.R / 0.6;
+  if (src !== 'spot') s.soft = r.wpick([0, r.range(0.01, 0.05), r.range(0.06, 0.2)], [6, 1.5, 1.5]);
+  s.opacity = r.chance(0.8) ? 1 : r.range(0.6, 0.92);
+  s.frost = r.chance(0.85) ? 0 : r.range(0.1, 0.4);
+  s.shade = r.chance(0.75) ? 0 : r.range(-0.4, 0.5);
+  if (r.chance(0.22)) {
+    s.halo = r.range(0.4, 1); s.haloRing = r.chance(0.5) ? 1 : 0; s.haloSize = r.range(0.8, 1.3) * s.R;
+    s.haloSoft = r.range(0.15, 0.6) * Math.max(s.R, 0.3); s.haloX = r.range(-0.3, 0.3); s.haloY = r.range(-0.3, 0.3);
+    s.haloShift = r.range(-0.4, 0.4);
+  }
+  // lens
+  if (src === 'spot' || r.chance(0.8)) {
+    s.lens = 1;
+    s.lAng = src === 'spot' ? r.pick([0, 90, 180, -90]) : r.wpick([0, 90, r.range(-180, 180)], [5, 3, 1]);
+    s.lN = src === 'spot' ? r.int(6, 14) : r.wpick([r.int(4, 9), r.int(10, 20), r.int(21, 44)], [3, 4, 1.5]);
+    const full = r.chance(0.5);
+    const ext = full ? 1.3 : s.R * r.range(0.9, 1.25);
+    s.lStart = -ext; s.lEnd = ext;
+    if (src === 'spot') {
+      // the spot sits just before the glass; ribs run away from it
+      const a = Math.PI / 180 * s.lAng, along = s.cx * Math.cos(a) + s.cy * Math.sin(a);
+      s.cx -= Math.cos(a) * (along + 0.6); s.cy -= Math.sin(a) * (along + 0.6);
+      s.lStart = -0.6 + s.R * r.range(0.8, 1.6); s.lEnd = 1.4; s.lAnchor = 0;
+    }
+    s.lGap = r.chance(0.65) ? 0 : r.range(0.08, 0.4);
+    const style = r.wpick(['compress', 'magnify', 'invert', 'focus'], [3, 2, 2, src === 'spot' ? 6 : 1.5]);
+    s.lMag = { compress: r.range(1.3, 2.6), magnify: r.range(0.3, 0.8), invert: r.range(-1.6, -0.4), focus: r.range(0.7, 1.4) }[style];
+    if (src !== 'spot') s.lAnchor = r.pick([0, 0.5, 1]);
+    s.lPull = style === 'focus' ? r.range(0.7, 1) : r.chance(0.7) ? 0 : r.range(0.1, 0.5);
+    s.lCurve = r.chance(0.6) ? 0 : r.range(-0.6, 0.6);
+    s.lProfile = r.wpick([0, 1, 2, 3, 4, 5], [2, style === 'focus' ? 4 : 1, 1, 2, 2.5, 0.7]);
+    if (style === 'focus') { s.lZoom0 = r.range(0.4, 1); s.lZoom1 = r.range(0.08, 0.35); }
+    else { s.lZoom0 = r.range(0.8, 1.2); s.lZoom1 = r.wpick([1, r.range(0.5, 0.9), r.range(1.3, 2.2)], [2, 1.5, 2]); }
+    s.lCross = r.chance(0.7) ? 1 : r.range(0, 1);
+    s.lAlong = style === 'focus' ? r.range(0.15, 0.5) : r.chance(0.7) ? 1 : r.range(0, 1);
+    if (style === 'focus') s.lMag = r.range(0.4, 0.9);
+    s.lBend = r.chance(0.75) ? 0 : r.range(-0.8, 0.8);
+    s.lShift = r.chance(0.8) ? 0 : r.range(-0.5, 0.5);
+    s.lJitter = r.chance(0.8) ? 0 : r.range(0.05, 0.4);
+    s.lBg = src === 'spot' ? 0 : r.chance(0.6) ? 1 : 0;
+    s.lCA = r.chance(0.7) ? 0 : r.range(0.02, 0.12);
+    s.lShade = r.chance(0.6) ? 0 : r.range(-0.15, 0.25);
+    s.lShine = r.chance(0.8) ? 0 : r.range(0.05, 0.3);
+  }
+  const bg = r.wpick(['light', 'dark', 'grad', 'white'], [4, 2, 2.5, 1]);
+  const bh = r.range(0, 360);
+  if (bg === 'light') { s.bgType = 0; s.bg1 = oklch2hex(r.range(0.84, 0.93), r.range(0, 0.025), bh); }
+  else if (bg === 'dark') { s.bgType = 0; s.bg1 = oklch2hex(r.range(0.08, 0.2), r.range(0, 0.03), bh); }
+  else if (bg === 'white') { s.bgType = 0; s.bg1 = '#ffffff'; }
+  else {
+    s.bgType = r.chance(0.75) ? 1 : 2; s.bgAng = r.range(-180, 180);
+    const L = r.range(0.45, 0.8);
+    s.bg1 = oklch2hex(L, r.range(0.06, 0.14), bh); s.bg2 = oklch2hex(L + r.range(-0.1, 0.1), r.range(0.06, 0.14), bh + r.range(60, 160));
+  }
+  s.paper = r.chance(0.5) ? r.range(0.02, 0.06) : 0;
+  s.grain = r.range(0.01, 0.04);
+  return s;
+}
+function mutate() {
+  const r = makeRng(seed + ':' + Math.random());
+  for (const [k, , mn, mx, st, , x = {}] of SPEC) {
+    if (x.sel || x.color || ['N', 'lN', 'cx', 'cy', 'R', 'echo'].includes(k) || !r.chance(0.35)) continue;
+    const v = S[k] + (mx - mn) * r.range(-0.06, 0.06);
+    S[k] = Math.round(clamp(v, mn, mx) / st) * st;
+  }
+  if (S.lens && r.chance(0.3)) S.lN = clamp(S.lN + r.int(-2, 2), 1, 64);
+  refreshUI(); changed();
+}
+
+// ---------- UI ----------
+const ctrlEls = {};
+function fmt(v, st) { return st >= 1 ? String(Math.round(v)) : (+v).toFixed(st < 0.01 ? 3 : 2); }
+function buildUI() {
+  const box = document.getElementById('controls');
+  let grp, grpName;
+  for (const [k, label, mn, mx, st, g, x = {}] of SPEC) {
+    if (g !== grpName) {
+      grpName = g; grp = document.createElement('div'); grp.className = 'grp'; grp.dataset.g = g;
+      grp.innerHTML = `<h2>${g}</h2>`; box.appendChild(grp);
+    }
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label title="${label}">${label}</label>`;
+    let inp, out = document.createElement('output');
+    if (x.sel) {
+      inp = document.createElement('select');
+      x.sel.forEach((o, i) => inp.add(new Option(o, i)));
+      inp.onchange = () => { S[k] = +inp.value; refreshUI(); changed(); };
+      out = document.createElement('span');
+    } else if (x.color) {
+      inp = document.createElement('input'); inp.type = 'color';
+      inp.oninput = () => { S[k] = inp.value; changed(); };
+      out = document.createElement('span');
+    } else {
+      inp = document.createElement('input'); inp.type = 'range'; inp.min = mn; inp.max = mx; inp.step = st;
+      inp.oninput = () => { S[k] = +inp.value; out.value = fmt(S[k], st); changed(); };
+      inp.ondblclick = () => { S[k] = DEFAULTS[k]; refreshUI(); changed(); };
+    }
+    row.append(inp, out); grp.appendChild(row);
+    ctrlEls[k] = { row, inp, out, st, x };
+  }
+}
+function buildPalUI() {
+  const row = document.getElementById('palRow'); row.innerHTML = '';
+  S.pal.forEach((c, i) => {
+    const inp = document.createElement('input'); inp.type = 'color'; inp.value = c;
+    inp.oninput = () => { S.pal[i] = inp.value; changed(); };
+    row.appendChild(inp);
+  });
+}
+function refreshUI() {
+  for (const k in ctrlEls) {
+    const { row, inp, out, st, x } = ctrlEls[k];
+    inp.value = S[k];
+    if (!x.sel && !x.color) out.value = fmt(S[k], st);
+    row.classList.toggle('hide', !!(x.show && !x.show(S)));
+  }
+  document.getElementById('seed').value = seed;
+  document.getElementById('format').value = format;
+  buildPalUI();
+}
+function status(t) { document.getElementById('status').textContent = t; }
+
+function newForm(sd) {
+  seed = sd || randSeed();
+  S = randomState(seed);
+  refreshUI(); changed(); status('seed ' + seed);
+}
+function applyPreset(name) {
+  const p = PRESETS[name];
+  S = { ...DEFAULTS, ...p, pal: p.pal.slice() };
+  refreshUI(); changed(); status('пресет: ' + name);
+}
+
+function save() {
+  const ar = FORMATS[format][1];
+  let w, h; if (ar >= 1) { w = expSize; h = Math.round(expSize / ar); } else { h = expSize; w = Math.round(expSize * ar); }
+  const maxV = gl.getParameter(gl.MAX_VIEWPORT_DIMS), maxS = Math.min(maxV[0], maxV[1], gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+  if (Math.max(w, h) > maxS) { const k = maxS / Math.max(w, h); w = Math.floor(w * k); h = Math.floor(h * k); }
+  const pw = cv.width, ph = cv.height, sw = cv.style.width, sh = cv.style.height;
+  cv.width = w; cv.height = h; cv.style.width = sw; cv.style.height = sh;
+  status('рендер ' + w + '×' + h + '…');
+  draw(w, h, 3);
+  cv.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = `spectral-${seed}-${w}x${h}.png`; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    cv.width = pw; cv.height = ph; dirty = true;
+    status('сохранено ' + a.download);
+  }, 'image/png');
+}
+
+function init() {
+  if (!gl) { status('WebGL2 недоступен'); return; }
+  try { initGL(); } catch (e) { status('shader: ' + e.message); console.error(e); return; }
+  buildUI();
+  const fSel = document.getElementById('format');
+  for (const k in FORMATS) fSel.add(new Option(FORMATS[k][0], k));
+  fSel.onchange = () => { format = fSel.value; resize(); changed(); };
+  const eSel = document.getElementById('exp');
+  for (const k in EXPORTS) eSel.add(new Option(EXPORTS[k], k));
+  eSel.value = expSize; eSel.onchange = () => expSize = +eSel.value;
+  const qSel = document.getElementById('quality');
+  for (const k in QUALITY) qSel.add(new Option(QUALITY[k], k));
+  qSel.value = quality; qSel.onchange = () => { quality = +qSel.value; dirty = true; };
+  const pr = document.getElementById('presets');
+  Object.keys(PRESETS).forEach((n, i) => {
+    const b = document.createElement('button'); b.textContent = `${i + 1} ${n}`; b.onclick = () => applyPreset(n); pr.appendChild(b);
+  });
+  const pSel = document.getElementById('palSel');
+  pSel.add(new Option('—', ''));
+  for (const k in PALETTES) pSel.add(new Option(k, k));
+  pSel.onchange = () => { if (pSel.value) { S.pal = PALETTES[pSel.value].slice(); buildPalUI(); changed(); } pSel.value = ''; };
+  document.getElementById('pAdd').onclick = () => { if (S.pal.length < 8) { S.pal.push(S.pal[S.pal.length - 1]); buildPalUI(); changed(); } };
+  document.getElementById('pDel').onclick = () => { if (S.pal.length > 2) { S.pal.pop(); buildPalUI(); changed(); } };
+  document.getElementById('pRev').onclick = () => { S.pal.reverse(); buildPalUI(); changed(); };
+  document.getElementById('pShuf').onclick = () => {
+    for (let i = S.pal.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [S.pal[i], S.pal[j]] = [S.pal[j], S.pal[i]]; }
+    buildPalUI(); changed();
+  };
+  document.getElementById('pRnd').onclick = () => { S.pal = randPalette(makeRng(randSeed())); buildPalUI(); changed(); };
+
+  document.getElementById('bNew').onclick = () => newForm();
+  document.getElementById('bDice').onclick = () => newForm();
+  document.getElementById('bMut').onclick = mutate;
+  document.getElementById('bSave').onclick = save;
+  const bA = document.getElementById('bAnim');
+  const toggleAnim = () => { animating = !animating; bA.classList.toggle('on', animating); dirty = true; };
+  bA.onclick = toggleAnim;
+  document.getElementById('seed').onchange = e => newForm(e.target.value.trim() || randSeed());
+  cv.onclick = () => newForm();
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+    if (e.metaKey || e.ctrlKey) return;
+    const k = e.key.toLowerCase();
+    if (k === ' ' || k === 'r') { e.preventDefault(); newForm(); }
+    else if (k === 'm') mutate();
+    else if (k === 'a') toggleAnim();
+    else if (k === 's') save();
+    else if (k >= '1' && k <= '6') applyPreset(Object.keys(PRESETS)[+k - 1]);
+  });
+  addEventListener('resize', resize);
+
+  let loaded = false;
+  // short links: #seed=abc or #preset=name, optionally followed by &key=value overrides
+  const kv = Object.fromEntries(location.hash.slice(1).split('&').map(x => x.split('=').map(decodeURIComponent)));
+  if (kv.seed || PRESETS[kv.preset]) {
+    if (kv.seed) { seed = kv.seed; S = randomState(seed); }
+    else { const p = PRESETS[kv.preset]; S = { ...DEFAULTS, ...p, pal: p.pal.slice() }; }
+    for (const k in kv) if (k in DEFAULTS && k !== 'pal') S[k] = /^#/.test(kv[k]) ? kv[k] : +kv[k];
+    loaded = true;
+  } else if (location.hash.length > 1) {
+    try {
+      const st = JSON.parse(atob(location.hash.slice(1)));
+      seed = st.seed || seed; format = FORMATS[st.format] ? st.format : format;
+      S = { ...DEFAULTS, ...st.S }; loaded = true;
+    } catch (e) { /* ignore broken hash */ }
+  }
+  if (!loaded) status('пресет: моаре');
+  refreshUI(); resize();
+  requestAnimationFrame(frame);
+}
+init();
+</script>
+</body>
+</html>
