@@ -42,6 +42,9 @@
     color: rgba(225, 230, 250, .9); font: 11px/1 -apple-system, system-ui, sans-serif; letter-spacing:.02em;
     transition: background .15s; }
   .btns button:hover { background: rgba(160, 175, 235, .22); }
+  .chk { display: flex; align-items: center; gap: 6px; margin-top: 10px; cursor: pointer;
+    color: rgba(205, 210, 235, .7); }
+  .chk input { margin: 0; accent-color: #cdd6ff; cursor: pointer; }
 </style>
 <script type="importmap">
 { "imports": {
@@ -59,6 +62,7 @@
     <button id="reset">сброс</button>
     <button id="png" title="Enter">png</button>
   </div>
+  <label class="chk"><input type="checkbox" id="transp"> png с прозрачностью</label>
 </div>
 <div id="hint">тяни — вращать · Alt+тяни — двигать · колесо — зум · пробел — случайно · R — автовращение · Enter — PNG · H — панель</div>
 
@@ -83,6 +87,7 @@ const P = {
   bloom:    { label: 'Свечение',    min: 0,    max: 1.4,  step: 0.02, val: 0.55 },
   spin:     { label: 'Вращение',    min: 0,    max: 1,    step: 0.02, val: 0.28 },
   zoom:     { label: 'Дистанция',   min: 5.0,  max: 15.0, step: 0.1,  val: 8.5 },
+  glassA:   { label: 'Стекло в png', min: 0,   max: 1,    step: 0.02, val: 1 },
 };
 const DEF = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, v.val]));
 
@@ -112,6 +117,7 @@ const uniforms = {
   uAmbient:  { value: DEF.ambient },
   uAbsorb:   { value: DEF.absorb },
   uExposure: { value: DEF.exposure },
+  uMask:     { value: 0 },
 };
 
 const frag = /* glsl */`
@@ -119,7 +125,7 @@ precision highp float;
 varying vec2 vUv;
 uniform vec2 uRes, uPan;
 uniform mat3 uRot, uRotInv;
-uniform float uDist, uFov, uIOR, uDisp, uBevel, uLightInt, uLightSoft, uAmbient, uAbsorb, uExposure;
+uniform float uDist, uFov, uIOR, uDisp, uBevel, uLightInt, uLightSoft, uAmbient, uAbsorb, uExposure, uMask;
 uniform int uBounces;
 
 const vec3 HALF = vec3(1.0);
@@ -204,6 +210,7 @@ void main(){
     if(t > 20.0) break;
   }
   if(!hit){ gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0); return; }
+  if(uMask > 0.5){ gl_FragColor = vec4(1.0); return; }   // silhouette for transparent PNG
 
   vec3 n  = calcN(p);
   vec3 wN = uRot * n;
@@ -317,12 +324,43 @@ document.getElementById('reset').addEventListener('click', () => {
   uniforms.uPan.value.set(0, 0);
 });
 document.getElementById('png').addEventListener('click', savePNG);
+const transp = document.getElementById('transp');
+const maskRT = new THREE.WebGLRenderTarget(1, 1);
 function savePNG(){
-  renderer.domElement.toBlob(b => {
+  downloadPNG(transp.checked ? transparentCanvas() : renderer.domElement);
+}
+function downloadPNG(canvas){
+  canvas.toBlob(b => {
     const a = document.createElement('a');
     a.href = URL.createObjectURL(b); a.download = 'cube.png'; a.click();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
   });
+}
+// cube silhouette is opaque down to P.glassA; everything else gets alpha from its brightness (screen-like over any bg)
+function transparentCanvas(){
+  const { x: w, y: h } = renderer.getDrawingBufferSize(new THREE.Vector2());
+  maskRT.setSize(w, h);
+  uniforms.uMask.value = 1;
+  renderer.setRenderTarget(maskRT); renderer.render(scene, cam); renderer.setRenderTarget(null);
+  uniforms.uMask.value = 0;
+  const mask = new Uint8Array(w * h * 4);
+  renderer.readRenderTargetPixels(maskRT, 0, 0, w, h, mask);
+  composer.render();
+
+  const c = document.createElement('canvas'); c.width = w; c.height = h;
+  const ctx = c.getContext('2d');
+  ctx.drawImage(renderer.domElement, 0, 0);
+  const img = ctx.getImageData(0, 0, w, h), d = img.data;
+  const glass = P.glassA.val;
+  for(let y = 0; y < h; y++) for(let x = 0; x < w; x++){
+    const i = (y * w + x) * 4;
+    const a = Math.max(Math.round(mask[((h - 1 - y) * w + x) * 4] * glass), d[i], d[i + 1], d[i + 2]);
+    if(a === 0){ d[i + 3] = 0; continue; }
+    const k = 255 / a;
+    d[i] *= k; d[i + 1] *= k; d[i + 2] *= k; d[i + 3] = a;
+  }
+  ctx.putImageData(img, 0, 0);
+  return c;
 }
 const R =(a, b) => a + Math.random() * (b - a);
 document.getElementById('rnd').addEventListener('click', randomize);
