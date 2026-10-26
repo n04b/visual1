@@ -8,6 +8,7 @@
   html, body { margin: 0; height: 100%; background: #000; overflow: hidden; }
   canvas { display: block; width: 100vw; height: 100vh; cursor: grab; touch-action: none; }
   canvas:active { cursor: grabbing; }
+  body.alt canvas { cursor: move; }
   #hint {
     position: fixed; left: 16px; bottom: 14px;
     font: 12px/1.4 -apple-system, system-ui, sans-serif; letter-spacing: .02em;
@@ -56,9 +57,10 @@
   <div class="btns">
     <button id="rnd">случайно</button>
     <button id="reset">сброс</button>
+    <button id="png" title="Enter">png</button>
   </div>
 </div>
-<div id="hint">тяни — вращать · колесо — зум · пробел — случайно · R — автоворащение · S — PNG · H — панель</div>
+<div id="hint">тяни — вращать · Alt+тяни — двигать · колесо — зум · пробел — случайно · R — автовращение · Enter — PNG · H — панель</div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -95,11 +97,12 @@ const scene = new THREE.Scene();
 const cam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 
 const uniforms = {
-  uRes:      { value: new THREE.Vector2(innerWidth, innerHeight) },
+  uRes:      { value: renderer.getDrawingBufferSize(new THREE.Vector2()) },
+  uPan:      { value: new THREE.Vector2() },
   uRot:      { value: new THREE.Matrix3() },
   uRotInv:   { value: new THREE.Matrix3() },
   uDist:     { value: DEF.zoom },
-  uFov:      { value: 0.42 },
+  uFov:      { value: 0.74 },
   uIOR:      { value: DEF.ior },
   uDisp:     { value: DEF.disp },
   uBounces:  { value: DEF.bounces },
@@ -114,7 +117,7 @@ const uniforms = {
 const frag = /* glsl */`
 precision highp float;
 varying vec2 vUv;
-uniform vec2 uRes;
+uniform vec2 uRes, uPan;
 uniform mat3 uRot, uRotInv;
 uniform float uDist, uFov, uIOR, uDisp, uBevel, uLightInt, uLightSoft, uAmbient, uAbsorb, uExposure;
 uniform int uBounces;
@@ -185,7 +188,7 @@ float trans(vec3 p, vec3 rd, vec3 n, float ior, vec3 chan){
 
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
-  vec3 roW = vec3(0.0, 0.0, uDist);
+  vec3 roW = vec3(-uPan, uDist);   // cube shifted by uPan == camera shifted by -uPan
   vec3 rdW = normalize(vec3(uv * uFov, -1.0));
   // into cube-local space
   vec3 ro = uRotInv * roW;
@@ -246,14 +249,21 @@ syncRot();
 
 // ---------- interaction ----------
 const el = renderer.domElement;
-let drag = false, px = 0, py = 0, moved = false;
+let drag = false, pan = false, px = 0, py = 0, moved = false;
 const _q = new THREE.Quaternion(), _e = new THREE.Euler();
-el.addEventListener('pointerdown', e => { drag = true; moved = false; px = e.clientX; py = e.clientY; el.setPointerCapture(e.pointerId); });
+el.addEventListener('pointerdown', e => { drag = true; pan = e.altKey; moved = false; px = e.clientX; py = e.clientY; el.setPointerCapture(e.pointerId); });
 el.addEventListener('pointerup',   () => drag = false);
 el.addEventListener('pointermove', e => {
   if(!drag) return;
   const dx = e.clientX - px, dy = e.clientY - py; px = e.clientX; py = e.clientY;
   if(Math.abs(dx) + Math.abs(dy) > 2) moved = true;
+  if(pan){
+    // world units per CSS pixel at the cube's depth — keeps the cube under the cursor
+    const s = uniforms.uFov.value * uniforms.uDist.value / innerHeight;
+    uniforms.uPan.value.x += dx * s;
+    uniforms.uPan.value.y -= dy * s;
+    return;
+  }
   _e.set(dy * 0.006, dx * 0.006, 0, 'XYZ');
   _q.setFromEuler(_e);
   q.premultiply(_q).normalize();
@@ -304,8 +314,17 @@ function apply(k){
 document.getElementById('reset').addEventListener('click', () => {
   for(const [k, s] of Object.entries(P)){ s.val = DEF[k]; apply(k); }
   q.setFromEuler(new THREE.Euler(-0.50, 0.62, 0.10, 'XYZ'));
+  uniforms.uPan.value.set(0, 0);
 });
-const R = (a, b) => a + Math.random() * (b - a);
+document.getElementById('png').addEventListener('click', savePNG);
+function savePNG(){
+  renderer.domElement.toBlob(b => {
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(b); a.download = 'cube.png'; a.click();
+    setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+  });
+}
+const R =(a, b) => a + Math.random() * (b - a);
 document.getElementById('rnd').addEventListener('click', randomize);
 function randomize(){
   P.ior.val = R(1.35, 2.1);
@@ -325,17 +344,17 @@ const panel = document.getElementById('panel');
 const hint = document.getElementById('hint');
 let autoOn = true;
 addEventListener('keydown', e => {
+  if(e.key === 'Alt') document.body.classList.add('alt');
   const k = e.key.toLowerCase();
   if(k === 'h'){ panel.classList.toggle('hidden'); }
   else if(k === 'r'){ autoOn = !autoOn; }
   else if(k === ' '){ e.preventDefault(); randomize(); }
-  else if(k === 's'){
-    renderer.domElement.toBlob(b => {
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(b); a.download = 'cube.png'; a.click();
-    });
-  }
+  // preventDefault keeps Enter from also clicking a focused panel button
+  else if(k === 'enter'){ e.preventDefault(); if(!e.repeat) savePNG(); }
+  else if(k === 's'){ savePNG(); }
 });
+addEventListener('keyup', e => { if(e.key === 'Alt') document.body.classList.remove('alt'); });
+addEventListener('blur', () => document.body.classList.remove('alt'));
 setTimeout(() => hint.style.opacity = '0', 6000);
 addEventListener('pointerdown', () => { hint.style.opacity = '0'; });
 
@@ -358,7 +377,7 @@ requestAnimationFrame(tick);
 addEventListener('resize', () => {
   renderer.setSize(innerWidth, innerHeight);
   composer.setSize(innerWidth, innerHeight);
-  uniforms.uRes.value.set(innerWidth, innerHeight);
+  renderer.getDrawingBufferSize(uniforms.uRes.value);
 });
 </script>
 </body>
