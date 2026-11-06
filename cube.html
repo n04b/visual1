@@ -42,6 +42,7 @@
     color: rgba(225, 230, 250, .9); font: 11px/1 -apple-system, system-ui, sans-serif; letter-spacing:.02em;
     transition: background .15s; }
   .btns button:hover { background: rgba(160, 175, 235, .22); }
+  .btns button.on { background: rgba(170, 185, 245, .32); border-color: rgba(190, 205, 255, .45); }
   .chk { display: flex; align-items: center; gap: 6px; margin-top: 10px; cursor: pointer;
     color: rgba(205, 210, 235, .7); }
   .chk input { margin: 0; accent-color: #cdd6ff; cursor: pointer; }
@@ -61,10 +62,11 @@
     <button id="rnd">случайно</button>
     <button id="reset">сброс</button>
     <button id="png" title="Enter">png</button>
+    <button id="front" title="F">фронт</button>
   </div>
   <label class="chk"><input type="checkbox" id="transp"> png с прозрачностью</label>
 </div>
-<div id="hint">тяни — вращать · Alt+тяни — двигать · колесо — зум · пробел — случайно · R — автовращение · Enter — PNG · H — панель</div>
+<div id="hint">тяни — вращать · Alt+тяни — двигать · колесо — зум · пробел — случайно · R — автовращение · F — фронт · Enter — PNG · H — панель</div>
 
 <script type="module">
 import * as THREE from 'three';
@@ -75,18 +77,19 @@ import { OutputPass } from 'three/addons/postprocessing/OutputPass.js';
 
 // ---------- parameters ----------
 const P = {
-  ior:      { label: 'Преломление', min: 1.15, max: 2.4,  step: 0.01, val: 1.52 },
-  disp:     { label: 'Дисперсия',   min: 0,    max: 0.22, step: 0.005, val: 0.055 },
-  bounces:  { label: 'Отражения',   min: 1,    max: 7,    step: 1,    val: 4, int: true },
-  bevel:    { label: 'Фаска',       min: 0,    max: 0.28, step: 0.01, val: 0.06 },
+  ior:      { label: 'Преломление', min: 1.15, max: 2.4,  step: 0.01, val: 2.02 },
+  disp:     { label: 'Дисперсия',   min: 0,    max: 0.22, step: 0.005, val: 0.15 },
+  bounces:  { label: 'Отражения',   min: 1,    max: 7,    step: 1,    val: 1, int: true },
+  bevel:    { label: 'Фаска',       min: 0,    max: 0.5,  step: 0.01, val: 0.13 },
   lightInt: { label: 'Свет',        min: 0.4,  max: 4.0,  step: 0.05, val: 1.9 },
-  lightSoft:{ label: 'Мягкость',    min: 0,    max: 1,    step: 0.02, val: 0.55 },
+  lightSoft:{ label: 'Мягкость',    min: 0,    max: 1,    step: 0.02, val: 0.40 },
   ambient:  { label: 'Ambient',     min: 0,    max: 0.6,  step: 0.02, val: 0.12 },
   absorb:   { label: 'Плотность',   min: 0,    max: 0.5,  step: 0.01, val: 0.05 },
   exposure: { label: 'Экспозиция',  min: 0.3,  max: 2.5,  step: 0.05, val: 1.15 },
-  bloom:    { label: 'Свечение',    min: 0,    max: 1.4,  step: 0.02, val: 0.55 },
-  spin:     { label: 'Вращение',    min: 0,    max: 1,    step: 0.02, val: 0.28 },
-  zoom:     { label: 'Дистанция',   min: 5.0,  max: 15.0, step: 0.1,  val: 8.5 },
+  bloom:    { label: 'Свечение',    min: 0,    max: 1.4,  step: 0.02, val: 0 },
+  spin:     { label: 'Вращение',    min: 0,    max: 1,    step: 0.02, val: 0 },
+  zoom:     { label: 'Дистанция',   min: 5.0,  max: 15.0, step: 0.1,  val: 5.0 },
+  persp:    { label: 'Перспектива', min: 0,    max: 2.5,  step: 0.02, val: 1 },
   glassA:   { label: 'Стекло в png', min: 0,   max: 1,    step: 0.02, val: 1 },
 };
 const DEF = Object.fromEntries(Object.entries(P).map(([k, v]) => [k, v.val]));
@@ -118,6 +121,7 @@ const uniforms = {
   uAbsorb:   { value: DEF.absorb },
   uExposure: { value: DEF.exposure },
   uMask:     { value: 0 },
+  uPersp:    { value: DEF.persp },
 };
 
 const frag = /* glsl */`
@@ -125,7 +129,7 @@ precision highp float;
 varying vec2 vUv;
 uniform vec2 uRes, uPan;
 uniform mat3 uRot, uRotInv;
-uniform float uDist, uFov, uIOR, uDisp, uBevel, uLightInt, uLightSoft, uAmbient, uAbsorb, uExposure, uMask;
+uniform float uDist, uFov, uIOR, uDisp, uBevel, uLightInt, uLightSoft, uAmbient, uAbsorb, uExposure, uMask, uPersp;
 uniform int uBounces;
 
 const vec3 HALF = vec3(1.0);
@@ -194,8 +198,11 @@ float trans(vec3 p, vec3 rd, vec3 n, float ior, vec3 chan){
 
 void main(){
   vec2 uv = (gl_FragCoord.xy - 0.5 * uRes) / uRes.y;
-  vec3 roW = vec3(-uPan, uDist);   // cube shifted by uPan == camera shifted by -uPan
-  vec3 rdW = normalize(vec3(uv * uFov, -1.0));
+  // every ray passes through the same point on the cube's plane (z = 0) whatever uPersp is,
+  // so the cube keeps its size: 0 = orthographic, 1 = eye at uDist, >1 = eye at uDist / uPersp
+  vec2 sp = uv * uFov * uDist;
+  vec3 roW = vec3(sp * (1.0 - uPersp) - uPan, uDist);   // cube shifted by uPan == camera shifted by -uPan
+  vec3 rdW = normalize(vec3(sp * uPersp / uDist, -1.0));
   // into cube-local space
   vec3 ro = uRotInv * roW;
   vec3 rd = uRotInv * rdW;
@@ -271,6 +278,7 @@ el.addEventListener('pointermove', e => {
     uniforms.uPan.value.y -= dy * s;
     return;
   }
+  anim = null; if(frontOn) leaveFront();
   _e.set(dy * 0.006, dx * 0.006, 0, 'XYZ');
   _q.setFromEuler(_e);
   q.premultiply(_q).normalize();
@@ -314,11 +322,32 @@ function apply(k){
     case 'exposure': uniforms.uExposure.value = v; break;
     case 'bloom': bloom.strength = v; break;
     case 'zoom': uniforms.uDist.value = v; break;
+    case 'persp': uniforms.uPersp.value = v; break;
   }
   syncUI(k);
 }
 
+// ---------- front view: animate to face-on and back to the saved angle ----------
+const frontBtn = document.getElementById('front');
+const FRONT_Q = new THREE.Quaternion();
+let frontOn = false, savedQ = null, anim = null;   // anim: { from, to, t }
+function animateTo(target){ anim = { from: q.clone(), to: target.clone(), t: 0 }; }
+function toggleFront(){
+  if(frontOn){
+    animateTo(savedQ);
+    leaveFront();
+  } else {
+    savedQ = anim ? anim.to.clone() : q.clone();
+    animateTo(FRONT_Q);
+    frontOn = true; frontBtn.classList.add('on');
+  }
+}
+// leaving by hand (drag, reset, random) drops the saved angle
+function leaveFront(){ frontOn = false; savedQ = null; frontBtn.classList.remove('on'); }
+frontBtn.addEventListener('click', toggleFront);
+
 document.getElementById('reset').addEventListener('click', () => {
+  anim = null; if(frontOn) leaveFront();
   for(const [k, s] of Object.entries(P)){ s.val = DEF[k]; apply(k); }
   q.setFromEuler(new THREE.Euler(-0.50, 0.62, 0.10, 'XYZ'));
   uniforms.uPan.value.set(0, 0);
@@ -365,6 +394,7 @@ function transparentCanvas(){
 const R =(a, b) => a + Math.random() * (b - a);
 document.getElementById('rnd').addEventListener('click', randomize);
 function randomize(){
+  anim = null; if(frontOn) leaveFront();
   P.ior.val = R(1.35, 2.1);
   P.disp.val = R(0.02, 0.16);
   P.bounces.val = Math.round(R(2, 6));
@@ -386,6 +416,7 @@ addEventListener('keydown', e => {
   const k = e.key.toLowerCase();
   if(k === 'h'){ panel.classList.toggle('hidden'); }
   else if(k === 'r'){ autoOn = !autoOn; }
+  else if(k === 'f' || k === 'а'){ toggleFront(); }
   else if(k === ' '){ e.preventDefault(); randomize(); }
   // preventDefault keeps Enter from also clicking a focused panel button
   else if(k === 'enter'){ e.preventDefault(); if(!e.repeat) savePNG(); }
@@ -402,7 +433,12 @@ const spinQ = new THREE.Quaternion();
 let last = performance.now();
 function tick(now){
   const dt = Math.min(0.05, (now - last) / 1000); last = now;
-  if(autoOn && !drag && P.spin.val > 0.001){
+  if(anim){
+    anim.t = Math.min(1, anim.t + dt / 0.6);
+    const e = anim.t * anim.t * (3 - 2 * anim.t);
+    q.slerpQuaternions(anim.from, anim.to, e);
+    if(anim.t >= 1) anim = null;
+  } else if(autoOn && !drag && !frontOn && P.spin.val > 0.001){
     spinQ.setFromAxisAngle(spinAxis, P.spin.val * dt * 0.7);
     q.premultiply(spinQ).normalize();
   }
