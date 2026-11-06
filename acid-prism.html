@@ -1,0 +1,963 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Acid Prism</title>
+<style>
+  :root { --bg:#0d0d10; --panel:#151518; --fg:#ddd; --dim:#777; --acc:#d84bff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #24222b, #0e0d12 72%); }
+  #cv { display:block; cursor:grab; touch-action:none; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #cv.drag { cursor:grabbing; }
+  #panel { width:300px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .row { display:grid; grid-template-columns: 92px 1fr 44px; align-items:center; gap:6px; margin:3px 0; }
+  .row label { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row output { text-align:right; font-size:11px; }
+  .row.hide, .grp.hide { display:none; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  input[type=color] { width:100%; height:22px; padding:0; border:1px solid #333; background:#0c0c0c; cursor:pointer; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #presets button { flex:1 1 30%; padding:6px 4px; }
+  #palRow { display:flex; gap:4px; margin:6px 0; }
+  #palRow input { flex:1; min-width:0; }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Acid Prism</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bMut" title="M">mutate</button>
+    <button id="bAnim" title="A">animate</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <div class="row"><label>экспорт</label><select id="exp"></select><span></span></div>
+  <div class="row"><label>качество</label><select id="quality"></select><span></span></div>
+  <h2>Пресеты</h2>
+  <div class="btns" id="presets"></div>
+  <h2>Палитра</h2>
+  <div class="row"><label>набор</label><select id="palSel"></select><span></span></div>
+  <div id="palRow"></div>
+  <div class="btns">
+    <button id="pAdd">+</button><button id="pDel">−</button>
+    <button id="pRev">реверс</button><button id="pShuf">микс</button><button id="pRnd">новая</button>
+  </div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Кристалл — выпуклый многогранник, пространство вокруг — тоже. Каждая грань и каждая стена
+    показывает свой кусок одного поля: шума, закрученного сам в себя, со своим масштабом,
+    поворотом и сдвигом цвета. Значение поля бежит по палитре по кругу, «резкость» превращает
+    градиент в полосы. Стены под скользящим углом вытягивают узор в штрихи и муар,
+    «прозрачность» показывает пространство сквозь кристалл с преломлением и дисперсией.<br><br>
+    тяни — камера, Shift+тяни — кристалл<br>
+    колесо — дистанция<br>
+    Space / R — новая, M — мутация, A — анимация<br>
+    1–6 — пресеты, S — сохранить PNG<br>
+    Ссылка в адресной строке хранит текущее состояние.
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function rngFrom(a) {
+  const n = mulberry32(a);
+  const r = () => n();
+  r.range = (x, y) => x + (y - x) * n();
+  r.int = (x, y) => x + Math.floor(n() * (y - x + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => { let s = 0; for (const w of ws) s += w; let v = n() * s;
+    for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i]; return items[items.length - 1]; };
+  return r;
+}
+const makeRng = s => rngFrom(hashStr(s));
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const wrapDeg = v => ((v + 180) % 360 + 360) % 360 - 180;
+
+// ---------- color ----------
+const hex2rgb = h => { h = h.replace('#', ''); return [0, 2, 4].map(i => parseInt(h.substr(i, 2), 16) / 255); };
+const toLin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const toGam = c => c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+function hex2oklab(h) {
+  const [r, g, b] = hex2rgb(h).map(toLin);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+function oklch2hex(L, C, H) {
+  const a = C * Math.cos(H * Math.PI / 180), b = C * Math.sin(H * Math.PI / 180);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  return '#' + rgb.map(c => Math.round(clamp(toGam(clamp(c))) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+const PALETTES = {
+  'кислота':  ['#ff2fd8', '#36ff4a', '#2a33ff', '#ff6a14', '#fff23a', '#22f0ff', '#9a35ff'],
+  'неон':     ['#00f0ff', '#7a5cff', '#ff2bd6', '#ffe14a'],
+  'винил':    ['#00aeef', '#ec008c', '#fff200', '#00c35a', '#2e3192'],
+  'термо':    ['#14004a', '#4a00c0', '#e0007a', '#ff7200', '#ffee00', '#fffbe0'],
+  'ультра':   ['#2a00ff', '#ff00c8', '#00ffd0', '#ff2a00'],
+  'плёнка':   ['#ffc8ee', '#9fefff', '#fff4b0', '#c3b0ff', '#98ffd0', '#ffb3c4'],
+  'нефть':    ['#06070f', '#1b2a8f', '#5a1fa8', '#0f8a72', '#d9ad27', '#0b0b14', '#8a1b78'],
+  'пастель':  ['#ffd6e0', '#c9e4ff', '#d8ffd1', '#fff3b0', '#e2d0ff'],
+};
+
+// ---------- params ----------
+// [key, label, min, max, step, group, extra]; extra: {sel:[...]}, {show:fn}, {color:1}
+const XTAL = s => s.size > 0, GLASS = s => s.size > 0 && s.glass > 0, ENV = s => s.env > 0;
+const SPEC = [
+  ['shape', 'форма', 0, 6, 1, 'Кристалл', { sel: ['куб', 'октаэдр', 'ромбододекаэдр', 'икосаэдр', 'кварц', 'кристалл', 'осколок'] }],
+  ['faces', 'граней', 5, 24, 1, 'Кристалл', { show: s => s.shape >= 5 }],
+  ['trunc', 'срез углов', 0, 1, 0.01, 'Кристалл', { show: s => s.shape <= 2 }],
+  ['irreg', 'неровность', 0, 1, 0.01, 'Кристалл'],
+  ['size', 'размер', 0, 2.2, 0.01, 'Кристалл'],
+  ['stretch', 'вытянутость', 0.3, 3, 0.01, 'Кристалл', { show: XTAL }],
+  ['rx', 'наклон', -180, 180, 1, 'Кристалл', { show: XTAL }],
+  ['ry', 'поворот', -180, 180, 1, 'Кристалл', { show: XTAL }],
+  ['rz', 'крен', -180, 180, 1, 'Кристалл', { show: XTAL }],
+
+  ['glass', 'прозрачность', 0, 1, 0.01, 'Оптика', { show: XTAL }],
+  ['ior', 'преломление', 1, 2.6, 0.01, 'Оптика', { show: s => XTAL(s) && (s.glass > 0 || s.reflect > 0) }],
+  ['disp', 'дисперсия', 0, 0.3, 0.005, 'Оптика', { show: GLASS }],
+  ['inner', 'дальние грани', 0, 1, 0.01, 'Оптика', { show: GLASS }],
+  ['reflect', 'отражение', 0, 1, 0.01, 'Оптика', { show: XTAL }],
+  ['shade', 'объём', 0, 1, 0.01, 'Оптика', { show: XTAL }],
+  ['edge', 'рёбра', -1, 1, 0.01, 'Оптика', { show: XTAL }],
+  ['edgeW', 'толщина рёбер', 0, 1, 0.01, 'Оптика', { show: s => XTAL(s) && s.edge != 0 }],
+
+  ['env', 'тип', 0, 3, 1, 'Пространство', { sel: ['нет', 'комната', 'тоннель', 'пещера'] }],
+  ['envSides', 'стен', 3, 16, 1, 'Пространство', { show: s => s.env >= 2 }],
+  ['envSize', 'размер', 1.5, 30, 0.1, 'Пространство', { show: ENV }],
+  ['envTilt', 'перекос', 0, 1, 0.01, 'Пространство', { show: ENV }],
+  ['ao', 'тени углов', 0, 1, 0.01, 'Пространство', { show: ENV }],
+  ['bg', 'фон', 0, 0, 0, 'Пространство', { color: 1, show: s => s.env == 0 }],
+
+  ['yaw', 'азимут', -180, 180, 1, 'Камера'],
+  ['pitch', 'высота', -85, 85, 1, 'Камера'],
+  ['dist', 'дистанция', 1.2, 14, 0.01, 'Камера'],
+  ['fov', 'угол обзора', 10, 150, 1, 'Камера'],
+  ['roll', 'завал', -180, 180, 1, 'Камера'],
+
+  ['scale', 'масштаб', 0.05, 6, 0.01, 'Узор'],
+  ['envScale', 'масштаб стен', 0.05, 6, 0.01, 'Узор', { show: ENV }],
+  ['warp', 'закрутка', 0, 6, 0.01, 'Узор'],
+  ['oct', 'детали', 1, 7, 1, 'Узор'],
+  ['rough', 'шероховатость', 0.3, 0.85, 0.01, 'Узор'],
+  ['bands', 'полос', 0.2, 16, 0.05, 'Узор'],
+  ['var', 'разброс граней', 0, 1, 0.01, 'Узор'],
+  ['aniso', 'вытягивание', 0, 1, 0.01, 'Узор'],
+  ['fold', 'зеркала', 0, 5, 1, 'Узор', { sel: ['нет', 'зеркало', 'крест', 'калейдо 3', 'калейдо 4', 'калейдо 6'] }],
+  ['foldAmt', 'доля граней', 0, 1, 0.01, 'Узор', { show: s => s.fold > 0 }],
+
+  ['sharp', 'резкость', 0, 1, 0.01, 'Цвет'],
+  ['relief', 'рельеф', -1, 1, 0.01, 'Цвет'],
+  ['facePhase', 'сдвиг по граням', 0, 1, 0.01, 'Цвет'],
+  ['phase', 'фаза', 0, 1, 0.005, 'Цвет'],
+  ['line', 'контуры', 0, 0.5, 0.005, 'Цвет'],
+  ['lineCol', 'цвет контуров', 0, 0, 0, 'Цвет', { color: 1, show: s => s.line > 0 || (s.size > 0 && s.edge < 0) }],
+  ['sat', 'насыщенность', 0, 2, 0.01, 'Цвет'],
+  ['bright', 'яркость', 0.3, 2, 0.01, 'Цвет'],
+
+  ['glitch', 'глитч', 0, 1, 0.01, 'Пост'],
+  ['ca', 'аберрация', 0, 0.06, 0.001, 'Пост'],
+  ['vignette', 'виньетка', 0, 1, 0.01, 'Пост'],
+  ['grain', 'зерно', 0, 0.3, 0.005, 'Пост'],
+
+  ['flow', 'течение', -1, 1, 0.01, 'Анимация'],
+  ['cycle', 'бег цвета', -1, 1, 0.01, 'Анимация'],
+  ['spin', 'вращение', -1, 1, 0.01, 'Анимация'],
+];
+
+const DEFAULTS = {
+  shape: 0, faces: 10, trunc: 0, irreg: 0.06, size: 1.15, stretch: 1, rx: 28, ry: 38, rz: 12,
+  glass: 0, ior: 1.6, disp: 0.05, inner: 0.2, reflect: 0, shade: 0.25, edge: 0.12, edgeW: 0.08,
+  env: 3, envSides: 11, envSize: 4, envTilt: 0.7, ao: 0.3, bg: '#0b0a12',
+  yaw: 8, pitch: 12, dist: 3, fov: 75, roll: 0,
+  scale: 0.48, envScale: 0.55, warp: 2.2, oct: 4, rough: 0.45, bands: 3.5, var: 0.7, aniso: 0.75, fold: 1, foldAmt: 0.4,
+  sharp: 0.6, relief: 0.35, facePhase: 1, phase: 0, line: 0.1, lineCol: '#170c48', sat: 1.15, bright: 1,
+  glitch: 0, ca: 0, vignette: 0.1, grain: 0.02,
+  flow: 0.15, cycle: 0.05, spin: 0.15,
+  pal: PALETTES['кислота'].slice(),
+};
+
+const PRESETS = {
+  'кислота': { pal: PALETTES['кислота'].slice() },
+  'призма': { shape: 3, irreg: 0.1, size: 1.25, rx: -20, ry: 30, rz: 5,
+    glass: 1, ior: 1.75, disp: 0.08, inner: 0.15, reflect: 0.25, shade: 0, edge: 0.35, edgeW: 0.06,
+    env: 1, envSize: 5, envTilt: 0.35, ao: 0.3, yaw: -10, pitch: 8, dist: 3.4, fov: 80,
+    scale: 0.62, envScale: 0.62, warp: 2.2, bands: 4, var: 0.5, aniso: 0.3, fold: 0, sharp: 0.85, relief: 0.2, line: 0,
+    sat: 1.1, pal: PALETTES['неон'].slice() },
+  'тоннель': { shape: 1, trunc: 0.35, size: 1.2, rx: 10, ry: 20, rz: 0, shade: 0.5, edge: 0.5, edgeW: 0.06,
+    env: 2, envSides: 6, envSize: 3.2, envTilt: 0.2, ao: 0.35, yaw: 12, pitch: 6, dist: 2.9, fov: 85,
+    scale: 0.96, envScale: 0.48, warp: 2, bands: 3.5, var: 0.4, aniso: 0.8, fold: 2, foldAmt: 0.6,
+    sharp: 0.95, relief: 0.1, line: 0.08, lineCol: '#101010', glitch: 0.1, pal: PALETTES['винил'].slice() },
+  'калейдо': { shape: 5, faces: 14, irreg: 0.3, size: 1.2, glass: 0.5, ior: 1.5, disp: 0.04, inner: 0.3,
+    env: 3, envSides: 14, envSize: 6, envTilt: 0.5, fov: 90, dist: 3.6,
+    scale: 0.6, envScale: 0.68, warp: 2.4, bands: 4, var: 0.6, aniso: 0.2, fold: 5, foldAmt: 1,
+    sharp: 0.8, relief: 0.4, pal: PALETTES['термо'].slice() },
+  'плёнка': { shape: 4, size: 1.2, stretch: 1.25, rx: 15, ry: 25, rz: -20, glass: 0.35, ior: 1.45, disp: 0.03, inner: 0.4, reflect: 0.3,
+    shade: 0.3, edge: 0.4, edgeW: 0.1, env: 1, envSize: 5, envTilt: 0.5, ao: 0.25, fov: 70, dist: 3.8,
+    scale: 0.42, envScale: 0.38, warp: 3, bands: 3, var: 0.5, aniso: 0.3, fold: 0,
+    sharp: 0.15, relief: 0.2, line: 0, sat: 1.15, pal: PALETTES['плёнка'].slice() },
+  'нефть': { shape: 6, faces: 9, irreg: 0.2, size: 1.1, rx: 60, ry: -30, rz: 20, edge: -0.6, edgeW: 0.05,
+    env: 3, envSides: 9, envSize: 4.5, envTilt: 0.8, ao: 0.4, fov: 85,
+    scale: 0.55, envScale: 0.56, warp: 2.6, bands: 4.5, var: 0.8, aniso: 0.6, fold: 0,
+    sharp: 0.9, relief: 0.6, line: 0, lineCol: '#000000', bright: 1.1, glitch: 0.06, pal: PALETTES['нефть'].slice() },
+};
+const presetState = name => { const p = PRESETS[name]; return { ...DEFAULTS, ...p, pal: (p.pal || DEFAULTS.pal).slice() }; };
+let S = presetState('кислота');
+let seed = randSeed();
+let animating = false, t0 = performance.now(), tAnim = 0;
+
+const FORMATS = { sq: ['1:1', 1], p45: ['4:5', 4 / 5], p23: ['2:3', 2 / 3], p916: ['9:16', 9 / 16], l32: ['3:2', 3 / 2], l169: ['16:9', 16 / 9] };
+let format = 'sq';
+const EXPORTS = { 1080: '1080 px', 2160: '2160 px', 3240: '3240 px', 4320: '4320 px' };
+let expSize = 2160;
+const QUALITY = { 1: '1× (быстро)', 2: '2×2', 3: '3×3' };
+let quality = 1;
+
+// ---------- geometry ----------
+// planes are [nx, ny, nz, d]: the solid is everything with n·x <= d
+const D2R = Math.PI / 180, PHI = (1 + Math.sqrt(5)) / 2;
+const nrm = v => { const l = Math.hypot(v[0], v[1], v[2]) || 1; return [v[0] / l, v[1] / l, v[2] / l]; };
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const mul3 = (A, B) => A.map(row => [0, 1, 2].map(j => row[0] * B[0][j] + row[1] * B[1][j] + row[2] * B[2][j]));
+const apply3 = (M, v) => M.map(row => dot3(row, v));
+function eulerM(ax, ay, az) {   // rows of Ry·Rx·Rz
+  const cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay), cz = Math.cos(az), sz = Math.sin(az);
+  return mul3(mul3([[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]], [[1, 0, 0], [0, cx, -sx], [0, sx, cx]]), [[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]]);
+}
+function fib(n) {
+  const out = [], ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < n; i++) { const y = 1 - 2 * (i + 0.5) / n, r = Math.sqrt(1 - y * y); out.push([Math.cos(ga * i) * r, y, Math.sin(ga * i) * r]); }
+  return out;
+}
+const AXES = [[1, 0, 0], [-1, 0, 0], [0, 1, 0], [0, -1, 0], [0, 0, 1], [0, 0, -1]];
+const CORNERS = [-1, 1].flatMap(x => [-1, 1].flatMap(y => [-1, 1].map(z => [x, y, z])));
+const EDGES = [[0, 1], [0, 2], [1, 2]].flatMap(([a, b]) => [[1, 1], [1, -1], [-1, 1], [-1, -1]].map(([sa, sb]) => {
+  const v = [0, 0, 0]; v[a] = sa; v[b] = sb; return v; }));
+const DODECA = [...CORNERS, ...[[1, 1], [1, -1], [-1, 1], [-1, -1]].flatMap(([a, b]) =>
+  [[0, a / PHI, b * PHI], [a / PHI, b * PHI, 0], [a * PHI, 0, b / PHI]])];
+// rough per-shape scale so every form reads about the same size at size = 1
+const SHAPE_K = [0.8, 0.85, 0.92, 1, 1, 1, 0.95];
+
+// a plane under the linear map x' = diag(k)·x
+function scalePlane(p, k) {
+  const m = [p[0] / k[0], p[1] / k[1], p[2] / k[2]], l = Math.hypot(m[0], m[1], m[2]);
+  return [m[0] / l, m[1] / l, m[2] / l, p[3] / l];
+}
+// a direction no plane faces would leave the solid open to infinity; cap it
+function closeHull(pl, dCap, max) {
+  for (const v of fib(120)) if (pl.length < max && !pl.some(p => dot3(p, v) > 0.25)) pl.push([...v, dCap]);
+  return pl;
+}
+
+function crystalPlanes(s) {
+  if (s.size <= 0.001) return [];
+  // jitter is drawn in a fixed order so sliders scale it instead of reshuffling it
+  const r = makeRng(seed + ':x');
+  const jit = Array.from({ length: 24 }, () => [r() - 0.5, r() - 0.5, r() - 0.5, r() - 0.5]);
+  const rot = eulerM(r() * 7, r() * 7, r() * 7);
+  const shardK = [r.range(0.4, 0.65), r.range(1.7, 2.6), r.range(0.8, 1.15)];
+  let pl = [];
+  const add = (v, d) => pl.push([...nrm(v), d]);
+  const tr = s.trunc, r3 = Math.sqrt(3);
+  switch (s.shape) {
+    case 0: AXES.forEach(v => add(v, 1)); if (tr > 0) CORNERS.forEach(v => add(v, lerp(r3, 2 / r3, tr))); break;
+    case 1: CORNERS.forEach(v => add(v, 1)); if (tr > 0) AXES.forEach(v => add(v, lerp(r3, r3 / 2, tr))); break;
+    case 2: EDGES.forEach(v => add(v, 1)); if (tr > 0) AXES.forEach(v => add(v, lerp(Math.SQRT2, 0.8, tr))); break;
+    case 3: DODECA.forEach(v => add(v, 1)); break;
+    case 4: {   // hexagonal prism with pyramid caps
+      const a = 52 * D2R, R = 0.62, H = 0.95;
+      for (let i = 0; i < 6; i++) {
+        const t = i * Math.PI / 3, c = Math.cos(t), sn = Math.sin(t);
+        add([c, 0, sn], R);
+        add([c * Math.cos(a), Math.sin(a), sn * Math.cos(a)], R * Math.cos(a) + H * Math.sin(a));
+        add([c * Math.cos(a), -Math.sin(a), sn * Math.cos(a)], R * Math.cos(a) + H * Math.sin(a));
+      }
+      break;
+    }
+    default:
+      fib(s.faces).forEach(v => add(apply3(rot, v), 1));
+      if (s.shape === 6) pl = pl.map(p => scalePlane(p, shardK));
+  }
+  const amt = s.irreg * 0.45 + (s.shape >= 5 ? 0.12 : 0);
+  pl = pl.map((p, i) => {
+    const j = jit[i % 24];
+    return [...nrm([p[0] + j[0] * amt, p[1] + j[1] * amt, p[2] + j[2] * amt]), p[3] * (1 + j[3] * s.irreg * 0.7)];
+  });
+  pl = pl.map(p => scalePlane(p, [1, s.stretch, 1]));
+  closeHull(pl, Math.max(...pl.map(p => p[3])), 24);
+  const k = s.size * SHAPE_K[s.shape];
+  return pl.slice(0, 24).map(p => [p[0], p[1], p[2], p[3] * k]);
+}
+// how far the farthest corner sticks out from the centre
+function crystalRadius(pl) {
+  return Math.max(...fib(200).map(v => Math.min(...pl.map(p => { const c = dot3(p, v); return c > 1e-3 ? p[3] / c : Infinity; }))));
+}
+
+function envPlanes(s, cam, cp) {
+  if (s.env == 0) return [];
+  const r = makeRng(seed + ':e');
+  const jit = Array.from({ length: 16 }, () => [r() - 0.5, r() - 0.5, r() - 0.5, r() - 0.5]);
+  const rot = eulerM(r() * 7, r() * 7, r() * 7), a0 = r() * 7;
+  const E = s.envSize;
+  let pl = [];
+  if (s.env == 1) AXES.forEach(v => pl.push([...v, E]));
+  else if (s.env == 2) {   // n-gon tube along z, capped far away
+    const n = Math.min(s.envSides, 14);
+    for (let i = 0; i < n; i++) { const a = a0 + i / n * Math.PI * 2; pl.push([Math.cos(a), Math.sin(a), 0, E * 0.5]); }
+    pl.push([0, 0, 1, E * 3], [0, 0, -1, E * 3]);
+  } else fib(Math.max(s.envSides, 6)).forEach(v => pl.push([...apply3(rot, v), E]));
+  const t = s.envTilt;
+  pl = pl.map((p, i) => {
+    const j = jit[i];
+    return [...nrm([p[0] + j[0] * t * 0.7, p[1] + j[1] * t * 0.7, p[2] + j[2] * t * 0.7]), p[3] * (1 + j[3] * t * 0.8)];
+  });
+  closeHull(pl, E, 16);
+  // camera and crystal have to stay inside: push back any wall they poke through
+  const keep = cp.length ? crystalRadius(cp) * 1.05 : 0;
+  return pl.map(p => [p[0], p[1], p[2], Math.max(p[3], dot3(p, cam) + 0.3, keep)]);
+}
+
+function camera(s) {
+  const yaw = s.yaw * D2R, pit = s.pitch * D2R, roll = s.roll * D2R;
+  const pos = [s.dist * Math.cos(pit) * Math.sin(yaw), s.dist * Math.sin(pit), s.dist * Math.cos(pit) * Math.cos(yaw)];
+  const F = nrm(pos.map(x => -x));
+  const R = nrm(cross3(F, [0, 1, 0])), U = cross3(R, F);
+  const c = Math.cos(roll), sn = Math.sin(roll);
+  return { pos, F, R: R.map((x, i) => x * c + U[i] * sn), U: U.map((x, i) => x * c - R[i] * sn), tanF: Math.tan(s.fov * D2R / 2) };
+}
+
+// ---------- gl ----------
+const cv = document.getElementById('cv');
+const gl = cv.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false });
+const VS = `#version 300 es
+in vec2 a; void main(){ gl_Position = vec4(a,0.,1.); }`;
+const FS = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+uniform vec2 uRes; uniform float uTime, uSeed, uSS;
+uniform vec3 uPal[8]; uniform float uPalN;
+uniform vec3 uBg, uLineCol;
+uniform vec4 uPl[24]; uniform int uPlN;
+uniform vec4 uEnv[16]; uniform int uEnvN;
+uniform mat3 uRot;
+uniform vec3 uCamPos, uCamR, uCamU, uCamF; uniform float uTanF;
+uniform float uSize, uGlass, uIor, uDisp, uInner, uReflect, uShade, uEdge, uEdgeW, uAo, uEnvSize;
+uniform float uScale, uEnvScale, uWarp, uOct, uRough, uBands, uVar, uAniso, uFold, uFoldAmt, uFlow, uCycle;
+uniform float uSharp, uRelief, uFacePhase, uPhase, uLine, uSat, uBright;
+uniform float uGlitch, uCa, uVignette, uGrain;
+
+const float TAU = 6.2831853;
+float px;    // sample footprint on screen
+float tm;
+
+float hash1(float n){ return fract(sin(n*12.9898 + uSeed*78.233)*43758.5453); }
+float hash2(vec2 p){ vec3 p3 = fract(vec3(p.xyx)*.1031); p3 += dot(p3, p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }
+vec2 grad(vec2 i){ return vec2(hash2(i), hash2(i+vec2(17.31, 41.7)))*2.-1.; }
+float gnoise(vec2 p){
+  vec2 i = floor(p), f = fract(p);
+  vec2 u = f*f*f*(f*(f*6.-15.)+10.);
+  float a = dot(grad(i), f),               b = dot(grad(i+vec2(1,0)), f-vec2(1,0));
+  float c = dot(grad(i+vec2(0,1)), f-vec2(0,1)), d = dot(grad(i+vec2(1,1)), f-vec2(1,1));
+  return mix(mix(a,b,u.x), mix(c,d,u.x), u.y);
+}
+const mat2 M2 = mat2(1.6, 1.2, -1.2, 1.6);
+float fbm(vec2 p){
+  float s = 0., a = 0.5; int n = int(uOct+0.5);
+  for (int i = 0; i < 7; i++){ if (i >= n) break; s += a*gnoise(p); p = M2*p + vec2(3.1, 7.7); a *= uRough; }
+  return s;
+}
+// noise warped by itself twice: the smooth melted contours
+float field(vec2 p){
+  vec2 fl = vec2(tm*uFlow*0.25);
+  vec2 q = vec2(fbm(p + fl), fbm(p + vec2(5.2,1.3) - fl.yx));
+  vec2 r = vec2(fbm(p + uWarp*q + vec2(1.7,9.2) + 0.6*fl), fbm(p + uWarp*q + vec2(8.3,2.8) - 0.5*fl.yx));
+  return fbm(p + uWarp*r);
+}
+
+vec3 ok2rgb(vec3 c){
+  float l_ = c.x + 0.3963377774*c.y + 0.2158037573*c.z;
+  float m_ = c.x - 0.1055613458*c.y - 0.0638541728*c.z;
+  float s_ = c.x - 0.0894841775*c.y - 1.2914855480*c.z;
+  float l=l_*l_*l_, m=m_*m_*m_, s=s_*s_*s_;
+  vec3 lin = clamp(vec3( 4.0767416621*l - 3.3077115913*m + 0.2309699292*s,
+                        -1.2684380046*l + 2.6097574011*m - 0.3413193965*s,
+                        -0.0041960863*l - 0.7034186147*m + 1.7076147010*s), 0., 1.);
+  return mix(lin*12.92, 1.055*pow(lin, vec3(1./2.4))-0.055, step(0.0031308, lin));
+}
+// cyclic palette; sharpness squeezes each colour-to-colour gradient into a hard step
+vec3 acid(float u){
+  float n = uPalN, x = fract(u)*n, fi = floor(x), f = x - fi;
+  int N = int(n), a = min(int(fi), N-1), b = a+1;
+  if (b >= N) b = 0;
+  float w = 1. - uSharp;
+  float g = clamp((f - 1. + w)/max(w, 1e-4), 0., 1.); g = g*g*(3.-2.*g);
+  vec3 c = mix(uPal[a], uPal[b], g);
+  c.x += uRelief*0.24*(f-0.5);
+  vec3 col = ok2rgb(c);
+  // one contour per palette cycle, where the last colour wraps to the first
+  if (uLine > 0.){ float d = min(x, n-x); col = mix(col, uLineCol, 1.-smoothstep(uLine*0.5, uLine*0.5+0.04, d)); }
+  return col;
+}
+
+vec2 fold(vec2 p, float k){
+  if (k < 1.5) return vec2(abs(p.x), p.y);
+  if (k < 2.5) return abs(p);
+  float n = k < 3.5 ? 3. : k < 4.5 ? 4. : 6., s = TAU/n;
+  float a = abs(mod(atan(p.y, p.x), s) - 0.5*s);
+  return length(p)*vec2(cos(a), sin(a));
+}
+vec4 h4(float id){ return vec4(hash1(id*7.13+1.), hash1(id*3.71+2.), hash1(id*5.17+3.), hash1(id*9.31+4.)); }
+
+// every face gets its own piece of the field: rotated, stretched, rescaled, colour-shifted
+vec3 surf(vec3 p, vec3 n, float id, float sc){
+  vec3 t = normalize(cross(n, abs(n.y) < 0.95 ? vec3(0,1,0) : vec3(1,0,0))), b = cross(n, t);
+  vec2 uv = vec2(dot(p, t), dot(p, b));
+  vec4 h = h4(id), g = h4(id + 31.7);
+  float ca = cos(h.x*TAU), sa = sin(h.x*TAU);
+  uv = mat2(ca, sa, -sa, ca)*uv;
+  uv.x *= exp2((h.y-0.5)*uAniso*5.);
+  uv *= sc*exp2((h.z-0.5)*uVar*3.);
+  if (uFold > 0.5 && h.w < uFoldAmt) uv = fold(uv, uFold);
+  uv += (g.xy-0.5)*90.;
+  return acid(field(uv)*uBands + uPhase + uFacePhase*g.z + tm*uCycle*0.2);
+}
+
+// world space: the room around everything, seen from inside
+vec3 envCol(vec3 ro, vec3 rd){
+  float t1 = 1e9; int fi = -1;
+  for (int j = 0; j < 16; j++){
+    if (j >= uEnvN) break;
+    vec4 P = uEnv[j]; float dn = dot(rd, P.xyz);
+    if (dn > 1e-6){ float t = max((P.w - dot(ro, P.xyz))/dn, 0.); if (t < t1){ t1 = t; fi = j; } }
+  }
+  if (fi < 0) return uBg;
+  vec3 p = ro + rd*t1; vec4 P = uEnv[fi];
+  // pattern scale follows the room, so a bigger room shows the same pattern bigger
+  vec3 col = surf(p, P.xyz, 100. + float(fi), uEnvScale*4./uEnvSize);
+  if (uAo > 0.){
+    // distance to the nearest corner seam, measured inside the wall
+    float e = 1e9;
+    for (int j = 0; j < 16; j++){
+      if (j >= uEnvN) break;
+      if (j == fi) continue;
+      vec4 Q = uEnv[j]; float c = dot(P.xyz, Q.xyz);
+      e = min(e, (Q.w - dot(p, Q.xyz))/sqrt(max(1.-c*c, 1e-4)));
+    }
+    col *= mix(1., 0.15 + 0.85*smoothstep(0., uEnvSize*0.6, e), uAo);
+  }
+  return col;
+}
+
+// crystal space: refract in, bounce around until the ray escapes, refract out
+vec3 glassRay(vec3 p, vec3 d0, vec3 n, float ior){
+  vec3 d = refract(d0, n, 1./ior), inn = vec3(0.);
+  for (int k = 0; k < 6; k++){
+    float t1 = 1e9; int fj = -1;
+    for (int j = 0; j < 24; j++){
+      if (j >= uPlN) break;
+      vec4 P = uPl[j]; float dn = dot(d, P.xyz);
+      if (dn > 1e-6){ float t = (P.w - dot(p, P.xyz))/dn; if (t < t1){ t1 = t; fj = j; } }
+    }
+    if (fj < 0) break;
+    p += d*max(t1, 0.);
+    vec3 nj = uPl[fj].xyz;
+    if (uInner > 0.001) inn = surf(p, nj, float(fj), uScale/uSize);
+    vec3 o = refract(d, -nj, ior);
+    if (dot(o, o) < 1e-6){ d = reflect(d, -nj); continue; }
+    d = o; break;
+  }
+  return mix(envCol(uRot*p, uRot*d), inn, uInner);
+}
+
+vec3 shade(vec3 ro, vec3 rd){
+  if (uPlN == 0) return envCol(ro, rd);
+  mat3 Rt = transpose(uRot);
+  vec3 lo = Rt*ro, ld = Rt*rd;
+  float t0 = -1e9, t1 = 1e9; int f0 = -1, f1 = -1;
+  for (int i = 0; i < 24; i++){
+    if (i >= uPlN) break;
+    vec4 P = uPl[i]; float dn = dot(ld, P.xyz), s = P.w - dot(lo, P.xyz);
+    if (abs(dn) < 1e-7){ if (s < 0.) return envCol(ro, rd); continue; }
+    float t = s/dn;
+    if (dn < 0.){ if (t > t0){ t0 = t; f0 = i; } }
+    else if (t < t1){ t1 = t; f1 = i; }
+  }
+  if (t0 > t1 || t1 < 0.) return envCol(ro, rd);
+  bool inside = t0 < 0.;
+  float th = inside ? t1 : t0; int fi = inside ? f1 : f0;
+  vec3 p = lo + ld*th, n0 = uPl[fi].xyz, n = inside ? -n0 : n0;
+  vec3 col = surf(p, n0, float(fi), uScale/uSize);
+  vec3 L = normalize(-0.55*uCamR + 0.8*uCamU - 0.6*uCamF);
+  col *= mix(1., 0.4 + 0.95*(dot(uRot*n, L)*0.5+0.5), uShade);
+  if (uGlass > 0.001 && !inside){
+    vec3 g = uDisp > 0.0005
+      ? vec3(glassRay(p, ld, n, uIor-uDisp).r, glassRay(p, ld, n, uIor).g, glassRay(p, ld, n, uIor+uDisp).b)
+      : glassRay(p, ld, n, uIor);
+    col = mix(col, g, uGlass);
+  }
+  if (uReflect > 0.001){
+    float c = clamp(-dot(ld, n), 0., 1.), F0 = pow((uIor-1.)/(uIor+1.), 2.);
+    float F = F0 + (1.-F0)*pow(1.-c, 5.);
+    col = mix(col, envCol(ro + rd*th, uRot*reflect(ld, n)), uReflect*(0.2 + 0.8*F));
+  }
+  if (abs(uEdge) > 0.001){
+    float e = 1e9;
+    for (int j = 0; j < 24; j++){
+      if (j >= uPlN) break;
+      if (j == fi) continue;
+      vec4 Q = uPl[j]; float c = dot(n0, Q.xyz);
+      e = min(e, (Q.w - dot(p, Q.xyz))/sqrt(max(1.-c*c, 1e-4)));
+    }
+    float fp = px*uTanF*th, w = uEdgeW*0.12*uSize;
+    float ln = 1. - smoothstep(w, w + fp*1.5, e);
+    col = mix(col, uEdge > 0. ? vec3(1.) : uLineCol, ln*abs(uEdge));
+  }
+  return col;
+}
+
+vec3 render(vec2 fc){
+  vec2 pc = (fc - 0.5*uRes)*2./min(uRes.x, uRes.y);
+  return shade(uCamPos, normalize(uCamF + (pc.x*uCamR + pc.y*uCamU)*uTanF));
+}
+
+void main(){
+  int ss = int(uSS+0.5);
+  px = 2./min(uRes.x, uRes.y)/float(ss);
+  tm = uTime;
+  vec2 fc = gl_FragCoord.xy;
+  // glitch: some horizontal bands slip sideways, others smear out from a point
+  if (uGlitch > 0.001){
+    float y = fc.y/uRes.y, cb = floor(y*9.);
+    float by = floor(y*(12. + floor(hash1(cb*3.3+0.7)*70.))) + cb*100.;
+    if (hash1(by*1.37+5.) < uGlitch*0.5){
+      if (hash1(by*0.73+1.) < 0.5) fc.x += (hash1(by*4.7)-0.5)*uRes.x*0.5*uGlitch;
+      else { float x0 = hash1(by*2.11+9.)*uRes.x; fc.x = x0 + (fc.x - x0)*mix(0.01, 0.25, hash1(by*5.9)); }
+    }
+  }
+  vec3 acc = vec3(0.);
+  for (int y = 0; y < 3; y++) for (int x = 0; x < 3; x++){
+    if (x >= ss || y >= ss) continue;
+    vec2 f = fc + (vec2(x, y)+0.5)/float(ss) - 0.5;
+    if (uCa > 0.0005){
+      vec2 c = 0.5*uRes, d = f - c;
+      acc += vec3(render(c + d*(1.+uCa)).r, render(f).g, render(c + d*(1.-uCa)).b);
+    } else acc += render(f);
+  }
+  vec3 col = acc/float(ss*ss);
+  col = mix(vec3(dot(col, vec3(0.2126, 0.7152, 0.0722))), col, uSat)*uBright;
+  vec2 q = gl_FragCoord.xy/uRes - 0.5;
+  col *= 1. - uVignette*smoothstep(0.25, 0.85, length(q)*1.2);
+  col += (hash2(gl_FragCoord.xy + fract(uSeed*13.1)*500.) - 0.5)*uGrain;
+  fragColor = vec4(clamp(col, 0., 1.), 1.);
+}`;
+
+function compile(type, src) {
+  const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+let prog, U = {};
+function initGL() {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(prog, i).name.replace('[0]', ''); U[name] = gl.getUniformLocation(prog, name); }
+}
+const uName = k => 'u' + k[0].toUpperCase() + k.slice(1);
+const flatPlanes = (pl, n) => { const f = new Float32Array(n * 4); pl.forEach((p, i) => f.set(p, i * 4)); return f; };
+
+function draw(w, h, ss) {
+  gl.viewport(0, 0, w, h);
+  gl.uniform2f(U.uRes, w, h);
+  gl.uniform1f(U.uTime, tAnim);
+  gl.uniform1f(U.uSeed, (hashStr(seed) % 10000) / 1000);
+  gl.uniform1f(U.uSS, ss);
+  for (const [k, , , , , , x = {}] of SPEC) {
+    if (!U[uName(k)]) continue;
+    if (x.color) gl.uniform3fv(U[uName(k)], hex2rgb(S[k]));
+    else gl.uniform1f(U[uName(k)], S[k]);
+  }
+  const pal = S.pal.slice(0, 8), flat = new Float32Array(24);
+  pal.forEach((c, i) => flat.set(hex2oklab(c), i * 3));
+  gl.uniform3fv(U.uPal, flat);
+  gl.uniform1f(U.uPalN, pal.length);
+
+  const cam = camera(S);
+  gl.uniform3fv(U.uCamPos, cam.pos); gl.uniform3fv(U.uCamR, cam.R); gl.uniform3fv(U.uCamU, cam.U); gl.uniform3fv(U.uCamF, cam.F);
+  gl.uniform1f(U.uTanF, cam.tanF);
+  const cp = crystalPlanes(S), ep = envPlanes(S, cam.pos, cp);
+  gl.uniform4fv(U.uPl, flatPlanes(cp, 24)); gl.uniform1i(U.uPlN, cp.length);
+  gl.uniform4fv(U.uEnv, flatPlanes(ep, 16)); gl.uniform1i(U.uEnvN, ep.length);
+  const M = eulerM(S.rx * D2R, (S.ry + S.spin * tAnim * 40) * D2R, S.rz * D2R);
+  gl.uniformMatrix3fv(U.uRot, false, [M[0][0], M[1][0], M[2][0], M[0][1], M[1][1], M[2][1], M[0][2], M[1][2], M[2][2]]);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ---------- layout / render loop ----------
+const stage = document.getElementById('stage');
+let dirty = true, exporting = false, interactUntil = 0, lastQ = 0;
+function resize() {
+  const ar = FORMATS[format][1], m = 36;
+  const W = stage.clientWidth - m * 2, H = stage.clientHeight - m * 2;
+  let w = W, h = w / ar; if (h > H) { h = H; w = h * ar; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.style.width = Math.round(w) + 'px'; cv.style.height = Math.round(h) + 'px';
+  cv.width = Math.round(w * dpr); cv.height = Math.round(h * dpr);
+  dirty = true;
+}
+function frame(now) {
+  if (!exporting) {
+    if (animating) { tAnim += (now - t0) / 1000; dirty = true; }
+    // drop to one sample while something moves, come back to full quality once it stops
+    const q = animating || now < interactUntil ? 1 : quality;
+    if (q !== lastQ) { dirty = true; lastQ = q; }
+    if (dirty) { draw(cv.width, cv.height, q); dirty = false; }
+  }
+  t0 = now;
+  requestAnimationFrame(frame);
+}
+let hashTimer;
+function changed() {
+  dirty = true;
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => history.replaceState(null, '', '#' + btoa(encodeURIComponent(JSON.stringify({ seed, format, S })))), 300);
+}
+
+// ---------- random ----------
+function randPalette(r) {
+  const n = r.int(4, 8), h0 = r.range(0, 360);
+  const scheme = r.wpick(['rainbow', 'jumps', 'duo', 'film'], [3, 2.5, 1.5, 1.2]);
+  const step = (r.chance(0.5) ? 1 : -1) * 360 / n * r.range(0.8, 1.7), out = [];
+  for (let i = 0; i < n; i++) {
+    if (scheme === 'rainbow') out.push(oklch2hex(r.range(0.6, 0.92), r.range(0.2, 0.32), h0 + step * i));
+    else if (scheme === 'jumps') out.push(oklch2hex(r.range(0.55, 0.92), r.range(0.2, 0.32), h0 + r.int(0, 5) * 60 + r.range(-15, 15)));
+    else if (scheme === 'duo') out.push(oklch2hex(i % 2 ? r.range(0.3, 0.55) : r.range(0.75, 0.95), r.range(0.12, 0.3), h0 + (i % 2) * 180 + r.range(-20, 20)));
+    else out.push(oklch2hex(r.range(0.82, 0.95), r.range(0.06, 0.14), h0 + i * r.range(40, 90)));
+  }
+  if (r.chance(0.3)) out[r.int(0, n - 1)] = oklch2hex(r.range(0.12, 0.25), r.range(0.05, 0.15), h0 + 200);   // dark accent
+  return out;
+}
+function randomState(sd) {
+  const r = makeRng(sd);
+  const s = { ...DEFAULTS };
+  s.pal = r.chance(0.45) ? r.pick(Object.values(PALETTES)).slice() : randPalette(r);
+  if (r.chance(0.3)) s.pal.reverse();
+  const deg = () => Math.round(r.range(-180, 180));
+  // crystal
+  s.shape = r.wpick([0, 1, 2, 3, 4, 5, 6], [3, 2, 1.5, 1.5, 1.5, 2.5, 1.5]);
+  s.faces = r.int(6, 18);
+  s.trunc = r.chance(0.3) ? r.range(0.15, 1) : 0;
+  s.irreg = r.wpick([0, r.range(0.05, 0.25), r.range(0.3, 0.7)], [3, 3, 1]);
+  s.size = r.chance(0.07) ? 0 : r.range(0.85, 1.35);
+  s.stretch = r.chance(0.6) ? 1 : r.range(0.6, 1.9);
+  s.rx = deg(); s.ry = deg(); s.rz = deg();
+  // optics
+  const look = r.wpick(['opaque', 'mixed', 'glass'], [4, 1.5, 2]);
+  s.glass = look === 'opaque' ? 0 : look === 'mixed' ? r.range(0.3, 0.7) : r.range(0.85, 1);
+  s.ior = r.range(1.3, 2.3); s.disp = r.chance(0.5) ? r.range(0.02, 0.12) : 0;
+  s.inner = r.chance(0.5) ? 0 : r.range(0.1, 0.5);
+  s.reflect = r.chance(0.5) ? 0 : r.range(0.05, 0.35);
+  s.shade = r.range(0, 0.5);
+  s.edge = r.wpick([0, r.range(0.2, 0.8), -r.range(0.3, 1)], [3, 1.5, 1.5]);
+  s.edgeW = r.range(0.03, 0.25);
+  // space and camera: frame the crystal at about half the picture, keep the room in proportion
+  s.env = r.wpick([0, 1, 2, 3], [0.6, 2, 1.5, 3]);
+  s.envSides = s.env === 2 ? r.int(3, 8) : r.int(6, 14);
+  s.yaw = Math.round(r.range(-45, 45)); s.pitch = Math.round(r.range(-20, 30));
+  s.fov = Math.round(r.wpick([r.range(40, 65), r.range(65, 100), r.range(100, 130)], [1.5, 3, 1.2]));
+  const R = s.size > 0 ? crystalRadius(crystalPlanes(s)) : 1;
+  s.dist = clamp(R * r.range(1.5, 2.2) / Math.tan(s.fov * D2R / 2), R * 1.25, 14);
+  s.roll = r.chance(0.7) ? 0 : Math.round(r.range(-30, 30));
+  s.envSize = clamp(Math.max(s.dist * r.range(1.15, 1.8), R * 1.6), 1.5, 30);
+  s.envTilt = r.wpick([0, r.range(0.1, 0.4), r.range(0.4, 1)], [1, 2, 2]);
+  s.ao = r.chance(0.5) ? 0 : r.range(0.1, 0.5);
+  s.bg = oklch2hex(r.range(0.05, 0.2), r.range(0, 0.05), r.range(0, 360));
+  // pattern
+  s.scale = r.range(0.3, 0.8); s.envScale = r.range(0.35, 0.85);
+  s.warp = r.wpick([r.range(0.8, 1.6), r.range(1.6, 2.8), r.range(2.8, 4.5)], [1, 3, 1.5]);
+  s.oct = r.int(3, 5); s.rough = r.range(0.38, 0.55);
+  // stripes per unit grow with scale, warp and palette length; aim at a density that reads as stripes, not noise
+  s.bands = clamp(r.range(12, 30) / (s.scale * (1 + 0.5 * s.warp) * s.pal.length), 0.2, 16);
+  s.var = r.range(0, 0.8); s.aniso = r.chance(0.5) ? 0 : r.range(0.1, 0.8);
+  s.fold = r.wpick([0, 1, 2, 3, 4, 5], [4, 2, 1, 1, 1, 1]); s.foldAmt = r.range(0.3, 1);
+  // colour
+  s.sharp = r.wpick([r.range(0, 0.4), r.range(0.4, 0.8), r.range(0.8, 1)], [1.5, 2, 2]);
+  s.relief = r.chance(0.4) ? 0 : r.range(-0.6, 0.6);
+  s.facePhase = r.range(0, 1); s.phase = r.range(0, 1);
+  s.line = r.chance(0.5) ? 0 : r.range(0.04, 0.2);
+  s.lineCol = oklch2hex(r.range(0.08, 0.25), r.range(0.03, 0.15), r.range(240, 320));
+  s.sat = r.range(0.95, 1.25); s.bright = r.range(0.95, 1.1);
+  // post and motion
+  s.glitch = r.chance(0.7) ? 0 : r.range(0.05, 0.4);
+  s.ca = r.chance(0.75) ? 0 : r.range(0.003, 0.015);
+  s.vignette = r.range(0, 0.35); s.grain = r.range(0.01, 0.04);
+  s.flow = r.range(0.05, 0.3) * (r.chance(0.5) ? 1 : -1);
+  s.cycle = r.range(-0.15, 0.15); s.spin = r.range(-0.3, 0.3);
+  return s;
+}
+function mutate() {
+  const r = makeRng(seed + ':' + Math.random());
+  for (const [k, , mn, mx, st, , x = {}] of SPEC) {
+    if (x.sel || x.color || ['faces', 'envSides', 'oct', 'size'].includes(k) || !r.chance(0.35)) continue;
+    const v = S[k] + (mx - mn) * r.range(-0.06, 0.06);
+    S[k] = Math.round(clamp(v, mn, mx) / st) * st;
+  }
+  if (r.chance(0.3)) S.faces = clamp(S.faces + r.int(-2, 2), 5, 24);
+  refreshUI(); changed();
+}
+
+// ---------- UI ----------
+const ctrlEls = {};
+function fmt(v, st) { return st >= 1 ? String(Math.round(v)) : (+v).toFixed(st < 0.01 ? 3 : 2); }
+function buildUI() {
+  const box = document.getElementById('controls');
+  let grp, grpName;
+  for (const [k, label, mn, mx, st, g, x = {}] of SPEC) {
+    if (g !== grpName) {
+      grpName = g; grp = document.createElement('div'); grp.className = 'grp'; grp.dataset.g = g;
+      grp.innerHTML = `<h2>${g}</h2>`; box.appendChild(grp);
+    }
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label title="${label}">${label}</label>`;
+    let inp, out = document.createElement('output');
+    if (x.sel) {
+      inp = document.createElement('select');
+      x.sel.forEach((o, i) => inp.add(new Option(o, i)));
+      inp.onchange = () => { S[k] = +inp.value; refreshUI(); changed(); };
+      out = document.createElement('span');
+    } else if (x.color) {
+      inp = document.createElement('input'); inp.type = 'color';
+      inp.oninput = () => { S[k] = inp.value; changed(); };
+      out = document.createElement('span');
+    } else {
+      inp = document.createElement('input'); inp.type = 'range'; inp.min = mn; inp.max = mx; inp.step = st;
+      // some sliders reveal or hide others, so re-check visibility as they move
+      inp.oninput = () => { S[k] = +inp.value; out.value = fmt(S[k], st); refreshVis(); changed(); };
+      inp.ondblclick = () => { S[k] = DEFAULTS[k]; refreshUI(); changed(); };
+    }
+    row.append(inp, out); grp.appendChild(row);
+    ctrlEls[k] = { row, inp, out, st, x };
+  }
+}
+function buildPalUI() {
+  const row = document.getElementById('palRow'); row.innerHTML = '';
+  S.pal.forEach((c, i) => {
+    const inp = document.createElement('input'); inp.type = 'color'; inp.value = c;
+    inp.oninput = () => { S.pal[i] = inp.value; changed(); };
+    row.appendChild(inp);
+  });
+}
+function syncCtrl(keys) {
+  for (const k of keys) { const { inp, out, st } = ctrlEls[k]; inp.value = S[k]; out.value = fmt(S[k], st); }
+}
+function refreshVis() {
+  for (const k in ctrlEls) { const { row, x } = ctrlEls[k]; row.classList.toggle('hide', !!(x.show && !x.show(S))); }
+}
+function refreshUI() {
+  for (const k in ctrlEls) {
+    const { inp, out, st, x } = ctrlEls[k];
+    inp.value = S[k];
+    if (!x.sel && !x.color) out.value = fmt(S[k], st);
+  }
+  refreshVis();
+  document.getElementById('seed').value = seed;
+  document.getElementById('format').value = format;
+  buildPalUI();
+}
+function status(t) { document.getElementById('status').textContent = t; }
+
+function newForm(sd) {
+  seed = sd || randSeed();
+  S = randomState(seed);
+  refreshUI(); changed(); status('seed ' + seed);
+}
+function applyPreset(name) {
+  S = presetState(name);
+  refreshUI(); changed(); status('пресет: ' + name);
+}
+
+// big exports render tile by tile, one per frame, so a slow GPU never stalls long enough to lose the context
+function save() {
+  if (exporting) return;
+  const ar = FORMATS[format][1];
+  let w, h; if (ar >= 1) { w = expSize; h = Math.round(expSize / ar); } else { h = expSize; w = Math.round(expSize * ar); }
+  const maxV = gl.getParameter(gl.MAX_VIEWPORT_DIMS), maxS = Math.min(maxV[0], maxV[1], gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+  if (Math.max(w, h) > maxS) { const k = maxS / Math.max(w, h); w = Math.floor(w * k); h = Math.floor(h * k); }
+  exporting = true;
+  const pw = cv.width, ph = cv.height;
+  cv.width = w; cv.height = h;
+  const T = 384, tiles = [];
+  for (let y = 0; y < h; y += T) for (let x = 0; x < w; x += T) tiles.push([x, y]);
+  let i = 0;
+  const step = () => {
+    gl.enable(gl.SCISSOR_TEST);
+    const [x, y] = tiles[i++];
+    gl.scissor(x, y, T, T);
+    draw(w, h, 3);
+    gl.flush();
+    gl.disable(gl.SCISSOR_TEST);
+    status(`рендер ${w}×${h} — ${Math.round(i / tiles.length * 100)}%`);
+    if (i < tiles.length) { requestAnimationFrame(step); return; }
+    cv.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = `acid-prism-${seed}-${w}x${h}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      cv.width = pw; cv.height = ph; dirty = true; exporting = false;
+      status('сохранено ' + a.download);
+    }, 'image/png');
+  };
+  status(`рендер ${w}×${h}…`);
+  requestAnimationFrame(step);
+}
+
+function initPointer() {
+  let drag = null;
+  cv.addEventListener('pointerdown', e => {
+    drag = { x: e.clientX, y: e.clientY };
+    cv.setPointerCapture(e.pointerId); cv.classList.add('drag');
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (e.shiftKey) { S.ry = wrapDeg(S.ry + dx * 0.5); S.rx = wrapDeg(S.rx + dy * 0.5); syncCtrl(['rx', 'ry']); }
+    else { S.yaw = wrapDeg(S.yaw - dx * 0.3); S.pitch = clamp(S.pitch + dy * 0.3, -85, 85); syncCtrl(['yaw', 'pitch']); }
+    interactUntil = performance.now() + 250; changed();
+  });
+  const end = () => { drag = null; cv.classList.remove('drag'); };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    S.dist = clamp(S.dist * Math.exp(e.deltaY * 0.001), 1.2, 14); syncCtrl(['dist']);
+    interactUntil = performance.now() + 250; changed();
+  }, { passive: false });
+}
+
+function init() {
+  if (!gl) { status('WebGL2 недоступен'); return; }
+  try { initGL(); } catch (e) { status('shader: ' + e.message); console.error(e); return; }
+  buildUI();
+  const fSel = document.getElementById('format');
+  for (const k in FORMATS) fSel.add(new Option(FORMATS[k][0], k));
+  fSel.onchange = () => { format = fSel.value; resize(); changed(); };
+  const eSel = document.getElementById('exp');
+  for (const k in EXPORTS) eSel.add(new Option(EXPORTS[k], k));
+  eSel.value = expSize; eSel.onchange = () => expSize = +eSel.value;
+  const qSel = document.getElementById('quality');
+  for (const k in QUALITY) qSel.add(new Option(QUALITY[k], k));
+  qSel.value = quality; qSel.onchange = () => { quality = +qSel.value; dirty = true; };
+  const pr = document.getElementById('presets');
+  Object.keys(PRESETS).forEach((n, i) => {
+    const b = document.createElement('button'); b.textContent = `${i + 1} ${n}`; b.onclick = () => applyPreset(n); pr.appendChild(b);
+  });
+  const pSel = document.getElementById('palSel');
+  pSel.add(new Option('—', ''));
+  for (const k in PALETTES) pSel.add(new Option(k, k));
+  pSel.onchange = () => { if (pSel.value) { S.pal = PALETTES[pSel.value].slice(); buildPalUI(); changed(); } pSel.value = ''; };
+  document.getElementById('pAdd').onclick = () => { if (S.pal.length < 8) { S.pal.push(S.pal[S.pal.length - 1]); buildPalUI(); changed(); } };
+  document.getElementById('pDel').onclick = () => { if (S.pal.length > 2) { S.pal.pop(); buildPalUI(); changed(); } };
+  document.getElementById('pRev').onclick = () => { S.pal.reverse(); buildPalUI(); changed(); };
+  document.getElementById('pShuf').onclick = () => {
+    for (let i = S.pal.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [S.pal[i], S.pal[j]] = [S.pal[j], S.pal[i]]; }
+    buildPalUI(); changed();
+  };
+  document.getElementById('pRnd').onclick = () => { S.pal = randPalette(makeRng(randSeed())); buildPalUI(); changed(); };
+
+  document.getElementById('bNew').onclick = () => newForm();
+  document.getElementById('bDice').onclick = () => newForm();
+  document.getElementById('bMut').onclick = mutate;
+  document.getElementById('bSave').onclick = save;
+  const bA = document.getElementById('bAnim');
+  const toggleAnim = () => { animating = !animating; bA.classList.toggle('on', animating); dirty = true; };
+  bA.onclick = toggleAnim;
+  document.getElementById('seed').onchange = e => newForm(e.target.value.trim() || randSeed());
+  initPointer();
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+    if (e.metaKey || e.ctrlKey) return;
+    const k = e.key.toLowerCase();
+    if (k === ' ' || k === 'r') { e.preventDefault(); newForm(); }
+    else if (k === 'm') mutate();
+    else if (k === 'a') toggleAnim();
+    else if (k === 's') save();
+    else if (k >= '1' && k <= '6') applyPreset(Object.keys(PRESETS)[+k - 1]);
+  });
+  addEventListener('resize', resize);
+
+  let loaded = false;
+  // short links: #seed=abc or #preset=name, optionally followed by &key=value overrides
+  const kv = Object.fromEntries(location.hash.slice(1).split('&').map(x => x.split('=').map(decodeURIComponent)));
+  if (kv.seed || PRESETS[kv.preset]) {
+    if (kv.seed) { seed = kv.seed; S = randomState(seed); }
+    else S = presetState(kv.preset);
+    for (const k in kv) if (k in DEFAULTS && k !== 'pal') S[k] = /^#/.test(kv[k]) ? kv[k] : +kv[k];
+    loaded = true;
+  } else if (location.hash.length > 1) {
+    try {
+      const st = JSON.parse(decodeURIComponent(atob(location.hash.slice(1))));
+      seed = st.seed || seed; format = FORMATS[st.format] ? st.format : format;
+      S = { ...DEFAULTS, ...st.S }; loaded = true;
+    } catch (e) { /* ignore broken hash */ }
+  }
+  if (!loaded) status('пресет: кислота');
+  refreshUI(); resize();
+  requestAnimationFrame(frame);
+}
+init();
+</script>
+</body>
+</html>
