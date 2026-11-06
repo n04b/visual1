@@ -1,0 +1,1136 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Soft Matter</title>
+<style>
+  :root { --bg:#101012; --panel:#161618; --fg:#ddd; --dim:#777; --acc:#7c80ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262628, #111113 72%); }
+  #cv { display:block; cursor:grab; touch-action:none; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #cv.drag { cursor:grabbing; }
+  #panel { width:300px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  body.nopanel #panel { display:none; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .grp h2 { cursor:pointer; user-select:none; }
+  .grp h2::after { content:'−'; float:right; color:#555; }
+  .grp.closed h2::after { content:'+'; }
+  .grp.closed .row { display:none; }
+  .row { display:grid; grid-template-columns: 104px 1fr 44px; align-items:center; gap:6px; margin:3px 0; }
+  .row label { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row output { text-align:right; font-size:11px; }
+  .row.hide { display:none !important; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  input[type=color] { width:100%; height:22px; padding:0; border:1px solid #333; background:#0c0c0c; cursor:pointer; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #presets button { flex:1 1 30%; padding:6px 4px; }
+  #palRow { display:flex; gap:4px; margin:6px 0; }
+  #palRow input { flex:1; min-width:0; }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Soft Matter</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bMut" title="M">mutate</button>
+    <button id="bCol" title="C">цвет</button>
+    <button id="bAnim" title="A">animate</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <div class="row"><label>экспорт</label><select id="exp"></select><span></span></div>
+  <div class="row"><label>фон в png</label><select id="expBg"></select><span></span></div>
+  <div class="row"><label>качество</label><select id="quality"></select><span></span></div>
+  <h2>Пресеты</h2>
+  <div class="btns" id="presets"></div>
+  <h2>Палитра</h2>
+  <div class="row"><label>набор</label><select id="palSel"></select><span></span></div>
+  <div id="palRow"></div>
+  <div class="btns">
+    <button id="pAdd">+</button><button id="pDel">−</button>
+    <button id="pRev">реверс</button><button id="pShuf">микс</button><button id="pRnd">новая</button>
+  </div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Форма — несколько капель-ядер, слитых гладким объединением, и отростки, выращенные из их
+    поверхности: петли, трубки, шипы, вилки и наросты. Трубки просверливают тело, так что внутри
+    видна тёмная полость. У каждой части свой цвет; на стыках цвета перетекают друг в друга,
+    «размытие» задаёт ширину перехода, «пятна» — мягкие пятна краски поверх. Первый цвет
+    палитры — цвет тела, самый тёмный достаётся зубцам вилок.<br><br>
+    тяни — вращать, Shift+тяни — свет<br>
+    колесо — масштаб, двойной клик по ползунку — сброс<br>
+    Space / R — новая, M — мутация, C — перекрасить<br>
+    A — анимация, H — панель, 1–6 — пресеты, S — PNG<br>
+    Ссылка в адресной строке хранит текущее состояние.
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function rngFrom(a) {
+  const n = mulberry32(a);
+  const r = () => n();
+  r.range = (x, y) => x + (y - x) * n();
+  r.int = (x, y) => x + Math.floor(n() * (y - x + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => { let s = 0; for (const w of ws) s += w; let v = n() * s;
+    for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i]; return items[items.length - 1]; };
+  return r;
+}
+const makeRng = s => rngFrom(hashStr(s));
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const wrapDeg = v => ((v + 180) % 360 + 360) % 360 - 180;
+const TAU = Math.PI * 2, D2R = Math.PI / 180;
+
+// ---------- color ----------
+const hex2rgb = h => { h = h.replace('#', ''); return [0, 2, 4].map(i => parseInt(h.substr(i, 2), 16) / 255); };
+const toLin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const toGam = c => c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+function hex2oklab(h) {
+  const [r, g, b] = hex2rgb(h).map(toLin);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  return [0.2104542553 * l + 0.7936177850 * m - 0.0040720468 * s,
+          1.9779984951 * l - 2.4285922050 * m + 0.4505937099 * s,
+          0.0259040371 * l + 0.7827717662 * m - 0.8086757660 * s];
+}
+function oklch2hex(L, C, H) {
+  const a = C * Math.cos(H * Math.PI / 180), b = C * Math.sin(H * Math.PI / 180);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  return '#' + rgb.map(c => Math.round(clamp(toGam(clamp(c))) * 255).toString(16).padStart(2, '0')).join('');
+}
+
+// the first colour is the body, the rest are accents
+const PALETTES = {
+  'референс': ['#e8e8e5', '#6c70e2', '#e4e86c', '#e00808', '#2fc893', '#08150e'],
+  'глина':    ['#d9c2a7', '#b5603c', '#e8dccb', '#7a4a32', '#c99a5b', '#3b2a22'],
+  'конфета':  ['#fff1f4', '#ff8fb8', '#8fd3ff', '#ffe27a', '#b6f2c7', '#c7a6ff'],
+  'игрушка':  ['#f4f1ea', '#ffcc00', '#0066ff', '#ff2a1a', '#00b25c', '#111111'],
+  'неон':     ['#1c1b29', '#00f0ff', '#ff2bd6', '#c6ff00', '#7a5cff', '#000000'],
+  'мята':     ['#e9f5ef', '#2fc893', '#9fe8d0', '#1b6f5c', '#f2f7a0', '#0d2a22'],
+  'закат':    ['#ffe7d6', '#ff6a3d', '#ffb84a', '#c02d5a', '#5b2a86', '#1a0f2e'],
+  'мел':      ['#efefec', '#d8d8d4', '#bdbdb8', '#9a9a95', '#e4e4df', '#2a2a28'],
+};
+
+// ---------- params ----------
+// [key, label, min, max, step, group, extra]; extra: {sel:[...]}, {show:fn}, {color:1}
+const HAS = s => s.count > 0, SPOTS = s => s.spots > 0;
+const SPEC = [
+  ['core', 'ядер', 1, 5, 1, 'Форма'],
+  ['coreSize', 'размер ядра', 0.3, 1.2, 0.01, 'Форма'],
+  ['coreSpread', 'разброс ядер', 0, 1, 0.01, 'Форма', { show: s => s.core > 1 }],
+  ['blend', 'слияние', 0, 1, 0.01, 'Форма'],
+  ['sculpt', 'лепка', 0, 1, 0.01, 'Форма'],
+  ['sculptFreq', 'частота лепки', 0.3, 4, 0.01, 'Форма', { show: s => s.sculpt > 0 }],
+  ['sym', 'симметрия', 0, 1, 1, 'Форма', { sel: ['нет', 'зеркальная'] }],
+
+  ['count', 'количество', 0, 10, 1, 'Отростки'],
+  ['len', 'длина', 0.3, 2, 0.01, 'Отростки', { show: HAS }],
+  ['thick', 'толщина', 0.3, 2, 0.01, 'Отростки', { show: HAS }],
+  ['wRing', 'петли', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['wTube', 'трубки', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['wHorn', 'шипы', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['wFork', 'вилки', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['wLump', 'наросты', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['bend', 'изгиб', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['hole', 'дыры', 0, 1, 0.01, 'Отростки', { show: HAS }],
+  ['face', 'к зрителю', 0, 1, 0.01, 'Отростки', { show: HAS }],
+
+  ['soft', 'размытие', 0, 1, 0.01, 'Цвет'],
+  ['spots', 'пятен', 0, 12, 1, 'Цвет'],
+  ['spotSize', 'размер пятен', 0.1, 1.5, 0.01, 'Цвет', { show: SPOTS }],
+  ['spotAmt', 'сила пятен', 0, 1, 0.01, 'Цвет', { show: SPOTS }],
+  ['sat', 'насыщенность', 0, 2, 0.01, 'Цвет'],
+
+  ['lAz', 'азимут', -180, 180, 1, 'Свет'],
+  ['lEl', 'высота', -90, 90, 1, 'Свет'],
+  ['key', 'основной', 0, 3, 0.01, 'Свет'],
+  ['amb', 'заполняющий', 0, 2, 0.01, 'Свет'],
+  ['wrap', 'мягкость', 0, 1, 0.01, 'Свет'],
+  ['shadow', 'тени', 0, 1, 0.01, 'Свет'],
+  ['penumbra', 'размытие теней', 0, 1, 0.01, 'Свет', { show: s => s.shadow > 0 }],
+  ['ao', 'пазухи', 0, 2, 0.01, 'Свет'],
+  ['aoR', 'радиус пазух', 0.1, 2, 0.01, 'Свет', { show: s => s.ao > 0 }],
+  ['spec', 'блик', 0, 1, 0.01, 'Свет'],
+  ['gloss', 'глянец', 0, 1, 0.01, 'Свет', { show: s => s.spec > 0 || s.reflect > 0 }],
+  ['reflect', 'отражение', 0, 1, 0.01, 'Свет'],
+  ['rim', 'кайма', 0, 1, 0.01, 'Свет'],
+  ['flat', 'плоскость', 0, 1, 0.01, 'Свет'],
+
+  ['rx', 'наклон', -180, 180, 1, 'Камера'],
+  ['ry', 'поворот', -180, 180, 1, 'Камера'],
+  ['rz', 'крен', -180, 180, 1, 'Камера'],
+  ['zoom', 'масштаб', 0.4, 2.5, 0.01, 'Камера'],
+  ['fov', 'перспектива', 1, 70, 1, 'Камера'],
+
+  ['bg', 'фон', 0, 0, 0, 'Фон и пост', { color: 1 }],
+  ['bgGrad', 'градиент фона', -1, 1, 0.01, 'Фон и пост'],
+  ['exposure', 'экспозиция', 0.3, 2.5, 0.01, 'Фон и пост'],
+  ['contrast', 'контраст', 0.5, 1.6, 0.01, 'Фон и пост'],
+  ['vignette', 'виньетка', 0, 1, 0.01, 'Фон и пост'],
+  ['grain', 'зерно', 0, 0.2, 0.002, 'Фон и пост'],
+
+  ['spin', 'вращение', -1, 1, 0.01, 'Анимация'],
+  ['flow', 'дыхание', 0, 1, 0.01, 'Анимация'],
+];
+// everything that changes the geometry or which part gets which colour
+const FORM_KEYS = ['core', 'coreSize', 'coreSpread', 'blend', 'sculpt', 'sym', 'count', 'len', 'thick',
+  'wRing', 'wTube', 'wHorn', 'wFork', 'wLump', 'bend', 'hole', 'face', 'spots', 'spotSize', 'spotAmt', 'cseed'];
+
+const DEFAULTS = {
+  core: 2, coreSize: 0.72, coreSpread: 0.55, blend: 0.55, sculpt: 0.25, sculptFreq: 1.3, sym: 0,
+  count: 5, len: 1, thick: 1, wRing: 1, wTube: 1, wHorn: 1, wFork: 1, wLump: 1, bend: 0.35, hole: 0.4, face: 0.8,
+  soft: 0.55, spots: 4, spotSize: 0.6, spotAmt: 0.85, sat: 1,
+  lAz: -35, lEl: 40, key: 1, amb: 0.85, wrap: 0.6, shadow: 0.4, penumbra: 0.75, ao: 1.2, aoR: 0.7,
+  spec: 0.1, gloss: 0.35, reflect: 0, rim: 0, flat: 0.3,
+  rx: 0, ry: 0, rz: 0, zoom: 1, fov: 22,
+  bg: '#c2c2c2', bgGrad: 0, exposure: 1, contrast: 1, vignette: 0, grain: 0.025,
+  spin: 0.15, flow: 0.2,
+  cseed: 'a',
+  pal: PALETTES['референс'].slice(),
+};
+
+// a preset may pin a seed: then it is one particular form, not just a look
+const PRESETS = {
+  'референс': { seed: 'r2928', cseed: 'c35', ry: -15, rz: -25 },
+  'глина': { seed: 'clay', pal: PALETTES['глина'].slice(), soft: 0.8, spots: 3, spotAmt: 0.5, sculpt: 0.6, sculptFreq: 1.8,
+    spec: 0.05, flat: 0.1, wrap: 0.5, ao: 1.3, shadow: 0.5, bg: '#d8d2ca' },
+  'конфета': { seed: 'candy', pal: PALETTES['конфета'].slice(), spec: 0.6, gloss: 0.75, reflect: 0.25, flat: 0.15,
+    soft: 0.4, bg: '#ffd9e4' },
+  'игрушка': { seed: 'toy', pal: PALETTES['игрушка'].slice(), soft: 0.08, spots: 0, spec: 0.45, gloss: 0.6, reflect: 0.15,
+    flat: 0.1, blend: 0.35, bg: '#e9e6df' },
+  'неон': { seed: 'neon', pal: PALETTES['неон'].slice(), bg: '#0c0b14', rim: 0.7, flat: 0.45, amb: 0.4, key: 0.8,
+    spots: 6, soft: 0.4 },
+  'тотем': { seed: 'totem', sym: 1, count: 7, pal: PALETTES['мята'].slice(), bg: '#dfe7e2' },
+};
+const presetState = name => { const p = PRESETS[name]; const s = { ...DEFAULTS, ...p, pal: (p.pal || DEFAULTS.pal).slice() }; delete s.seed; return s; };
+let S = presetState('референс');
+let seed = PRESETS['референс'].seed;
+let animating = false, t0 = performance.now(), tAnim = 0;
+
+const FORMATS = { sq: ['1:1', 1], p45: ['4:5', 4 / 5], p23: ['2:3', 2 / 3], p916: ['9:16', 9 / 16], l32: ['3:2', 3 / 2], l169: ['16:9', 16 / 9] };
+let format = 'sq';
+const EXPORTS = { 1080: '1080 px', 2160: '2160 px', 3240: '3240 px', 4320: '4320 px' };
+let expSize = 2160;
+const EXP_BG = { 0: 'с фоном', 1: 'прозрачный' };
+let expBg = 0;
+const QUALITY = { 1: '1× (быстро)', 2: '2×2', 3: '3×3' };
+let quality = 2;
+
+// ---------- geometry ----------
+const add3 = (a, b) => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const mul3 = (a, k) => [a[0] * k, a[1] * k, a[2] * k];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+const len3 = a => Math.hypot(a[0], a[1], a[2]);
+const nrm = a => { const l = len3(a) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
+const ang = (a, b) => Math.acos(clamp(dot3(a, b), -1, 1));
+const mirX = a => [-a[0], a[1], a[2]];
+const onSphere = (u, v) => { const z = 2 * u - 1, a = v * TAU, r = Math.sqrt(Math.max(0, 1 - z * z)); return [r * Math.cos(a), r * Math.sin(a), z]; };
+function fib(n) {
+  const out = [], ga = Math.PI * (3 - Math.sqrt(5));
+  for (let i = 0; i < n; i++) { const y = 1 - 2 * (i + 0.5) / n, r = Math.sqrt(1 - y * y); out.push([Math.cos(ga * i) * r, y, Math.sin(ga * i) * r]); }
+  return out;
+}
+// rows [x, y, z] of a right-handed frame: y is u, z leans towards zRef (the viewer by default)
+function frameY(u, zRef = [0, 0, 1]) {
+  let z = sub3(zRef, mul3(u, dot3(zRef, u)));
+  if (len3(z) < 1e-3) z = sub3([1, 0, 0], mul3(u, u[0]));
+  z = nrm(z);
+  return [cross3(u, z), u, z];
+}
+// turn a frame about its own y
+function spinY(f, a) {
+  const [x, y, z] = f, c = Math.cos(a), s = Math.sin(a);
+  return [add3(mul3(x, c), mul3(z, s)), y, sub3(mul3(z, c), mul3(x, s))];
+}
+const toLocal = (pr, p) => { const q = sub3(p, pr.c); return [dot3(pr.f[0], q), dot3(pr.f[1], q), dot3(pr.f[2], q)]; };
+
+// js twins of the shader's distance functions: they seat parts on the surface and frame the form
+const smin = (a, b, k) => { if (k <= 1e-5) return Math.min(a, b); const h = Math.max(k - Math.abs(a - b), 0) / k; return Math.min(a, b) - h * h * k * 0.25; };
+function sdEll(l, r) {
+  const k0 = Math.hypot(l[0] / r[0], l[1] / r[1], l[2] / r[2]);
+  const k1 = Math.hypot(l[0] / (r[0] * r[0]), l[1] / (r[1] * r[1]), l[2] / (r[2] * r[2]));
+  return k1 < 1e-9 ? -Math.min(r[0], r[1], r[2]) : k0 * (k0 - 1) / k1;
+}
+function sdCyl(l, r, hh, rr) {
+  const dx = Math.hypot(l[0], l[2]) - r + rr, dy = Math.abs(l[1]) - hh + rr;
+  return Math.min(Math.max(dx, dy), 0) + Math.hypot(Math.max(dx, 0), Math.max(dy, 0)) - rr;
+}
+function sdRoundCone(l, r1, r2, h) {
+  const b = (r1 - r2) / h, a = Math.sqrt(1 - b * b), qx = Math.hypot(l[0], l[2]), qy = l[1];
+  const k = -b * qx + a * qy;
+  if (k < 0) return Math.hypot(qx, qy) - r1;
+  if (k > a * h) return Math.hypot(qx, qy - h) - r2;
+  return a * qx + b * qy - r1;
+}
+function sdRBox(l, b, r) {
+  const q = [Math.abs(l[0]) - b[0] + r, Math.abs(l[1]) - b[1] + r, Math.abs(l[2]) - b[2] + r];
+  return Math.hypot(Math.max(q[0], 0), Math.max(q[1], 0), Math.max(q[2], 0)) + Math.min(Math.max(q[0], q[1], q[2]), 0) - r;
+}
+// part types: 0 ellipsoid, 1 ring (torus standing in its xy plane), 2 tube, 3 horn (round cone), 4 rounded box
+function primSDF(pr, l) {
+  const s = pr.s;
+  switch (pr.t) {
+    case 0: return sdEll(l, s);
+    case 1: return Math.hypot(Math.hypot(l[0], l[1] / s[2]) - s[0], l[2]) - s[1];
+    case 2: return sdCyl(l, s[0], s[1], s[2]);
+    case 3: { const h = s[2], y = l[1] + h / 2, t = clamp(y / h); return sdRoundCone([l[0] - s[3] * h * t * t, y, l[2]], s[0], s[1], h); }
+    default: return sdRBox(l, s, s[3]);
+  }
+}
+// a tube drills its bore through whatever it is stuck into
+const carveSDF = (pr, l) => { const e = pr.e, cy = (e[1] + e[2]) / 2, ch = (e[2] - e[1]) / 2; return sdCyl([l[0], l[1] - cy, l[2]], e[0], ch, 0); };
+function sceneSDF(prims, p, F) {
+  if (F.sym) p = [Math.sqrt(p[0] * p[0] + F.symK * F.symK), p[1], p[2]];
+  let d = 1e9, dc = 1e9;
+  for (const pr of prims) {
+    const l = toLocal(pr, p);
+    d = smin(d, primSDF(pr, l), pr.k);
+    if (pr.t === 2) dc = Math.min(dc, carveSDF(pr, l));
+  }
+  return dc < 1e8 ? -smin(-d, dc, F.carveK) : d;
+}
+
+const W_KEYS = ['wRing', 'wTube', 'wHorn', 'wFork', 'wLump'];
+// where each kind of part likes to grow: rings on top, tubes towards us, horns sideways, forks up and out, lumps low
+const AFF = [
+  d => 1.4 * d[1] + 0.25 * d[2],
+  d => d[2] + 0.2 * Math.abs(d[0]),
+  d => Math.abs(d[0]) - 0.2 * d[1],
+  d => 0.6 * d[1] + 0.5 * Math.abs(d[0]),
+  d => -0.4 * d[1] + 0.2 * Math.abs(d[0]),
+];
+const MAXP = 20, MAXS = 12;
+
+// how many of each kind: proportional to the weights, largest remainder, then shuffled
+function typeDeck(s, n, shuf) {
+  let w = W_KEYS.map(k => s[k]), tot = w.reduce((a, b) => a + b, 0);
+  if (tot <= 0) { w = [0, 0, 0, 0, 1]; tot = 1; }
+  const exact = w.map(x => x / tot * n), cnt = exact.map(Math.floor);
+  const left = n - cnt.reduce((a, b) => a + b, 0);
+  exact.map((x, i) => [x - cnt[i] + (w[i] > 0 ? 1e-6 * (5 - i) : -1), i]).sort((a, b) => b[0] - a[0])
+    .slice(0, left).forEach(([, i]) => cnt[i]++);
+  const deck = [];
+  cnt.forEach((c, i) => { for (let j = 0; j < c; j++) deck.push(i); });
+  for (let i = deck.length - 1; i > 0; i--) { const j = Math.floor(shuf[i] * (i + 1)); [deck[i], deck[j]] = [deck[j], deck[i]]; }
+  return deck;
+}
+
+// colours are stored as ranks so palette edits keep their meaning: -2 body, -1 darkest accent, [0,1) accent
+function buildForm(s, sd) {
+  const r = makeRng(sd + ':f'), rc = makeRng(sd + ':c:' + s.cseed);
+  const sym = s.sym > 0, cs = s.coreSize, L = s.len * cs, T = s.thick * cs, kB = s.blend * 2;
+  const amp = s.sculpt * 0.1 * cs, embed = 0.05 * cs + amp;
+  const F = { sym, symK: 0.06 * cs, carveK: 0.025 * cs };
+  const nSpots = Math.min(s.spots, MAXS);
+  let accR = rc();
+  const acc = () => (accR = (accR + 0.618034) % 1);
+  const faceSpin = a => lerp(-Math.PI, Math.PI, a) * (1 - s.face) + lerp(-0.25, 0.25, a) * s.face;
+
+  // core: a few overlapping ellipsoids. Every slot draws its numbers whether it is used or not,
+  // so sliders add and remove parts instead of reshuffling the rest
+  const core = [];
+  for (let i = 0; i < 5; i++) {
+    const a = Array.from({ length: 9 }, r), ca = rc();
+    if (i >= s.core) continue;
+    let off = mul3(onSphere(a[0], a[1]), i === 0 ? cs * 0.06 : cs * s.coreSpread * lerp(0.55, 1, a[2]));
+    const rad = i === 0 ? [lerp(0.95, 1.2, a[3]), lerp(0.72, 0.95, a[4]), lerp(0.75, 0.95, a[5])]
+                        : [lerp(0.5, 0.85, a[3]), lerp(0.45, 0.8, a[4]), lerp(0.45, 0.75, a[5])];
+    let f = spinY(frameY(onSphere(a[6], a[7])), a[8] * TAU);
+    if (sym && i === 0) { off = [0, off[1], off[2]]; f = frameY(nrm([0, 1, a[7] - 0.5])); }
+    else if (sym) off[0] = Math.abs(off[0]);
+    core.push({ t: 0, c: off, f, s: rad.map(v => v * cs), k: 0.22 * cs * kB, amp: 1, col: i === 0 || ca < 0.6 ? -2 : acc() });
+  }
+  const coreSDF = p => sceneSDF(core, p, F), o = core[0].c;
+  // outermost point of the core along d: sphere-trace inwards from outside
+  const surf = d => {
+    let t = 3 * cs + 1;
+    for (let i = 0; i < 200; i++) { const v = coreSDF(add3(o, mul3(d, t))); if (v < 1e-4) break; t -= v; if (t <= 0) { t = 0; break; } }
+    return add3(o, mul3(d, t));
+  };
+
+  // growth directions: best of 16 candidates, far from the others, leaning towards the viewer and up
+  const n = Math.min(s.count, 10), dirs = [];
+  for (let i = 0; i < 10; i++) {
+    const cand = Array.from({ length: 16 }, () => onSphere(r(), r()));
+    if (i >= n) continue;
+    let best = cand[0], bs = -1e9;
+    for (let d of cand) {
+      if (sym) d = [Math.abs(d[0]), d[1], d[2]];
+      let ma = Math.PI;
+      for (const e of dirs) ma = Math.min(ma, ang(d, e), sym ? ang(d, mirX(e)) : 9);
+      if (sym) ma = Math.min(ma, ang(d, mirX(d)) + 0.25);
+      const sc = ma + 0.45 * d[2] + 0.15 * d[1];
+      if (sc > bs) { bs = sc; best = d; }
+    }
+    dirs.push(best);
+  }
+  const shuf = Array.from({ length: 10 }, r), jit = Array.from({ length: 100 }, r);
+  // pair kinds with directions greedily, strongest liking first, so a ring gets the top if there is one
+  const deck = typeDeck(s, n, shuf), pairs = [], parts = [];
+  deck.forEach((ty, i) => dirs.forEach((d, j) => pairs.push([AFF[ty](d) + 0.25 * jit[i * 10 + j], i, j])));
+  pairs.sort((a, b) => b[0] - a[0]);
+  const usedI = new Set(), usedJ = new Set();
+  for (const [, i, j] of pairs) {
+    if (usedI.has(i) || usedJ.has(j)) continue;
+    usedI.add(i); usedJ.add(j); parts[i] = [deck[i], dirs[j]];
+  }
+
+  const prims = core.slice(), spots = [];
+  for (let i = 0; i < 10; i++) {
+    const a = Array.from({ length: 12 }, r), ca = [rc(), rc(), rc()];
+    if (i >= parts.length) continue;
+    const [ty, u] = parts[i], base = surf(u), list = [];
+    let spot = null;
+    if (ty === 0) {            // ring: a loop standing on the surface, hole just clear of it
+      const R = 0.42 * L * lerp(0.85, 1.2, a[0]);
+      const rr = R * lerp(0.62, 0.3, s.hole) * lerp(0.9, 1.1, a[1]);
+      const sy = lerp(1.05, 1.55, a[2]), k = 0.12 * cs * kB;
+      const c = add3(base, mul3(u, (R - rr) * sy + rr * 0.3 + k * 0.5));
+      list.push({ t: 1, c, f: spinY(frameY(u), faceSpin(a[3])), s: [R, rr, sy, 0], k, amp: 0.25, col: ca[0] < 0.7 ? -2 : acc() });
+      if (a[4] < 0.85) spot = { c, r: R * lerp(0.95, 1.25, a[5]), a: s.spotAmt * lerp(0.85, 1, a[6]), col: acc() };
+    } else if (ty === 1) {     // tube: a pipe whose bore goes on into the body
+      const ro = 0.32 * T * lerp(0.8, 1.2, a[0]), ri = ro * lerp(0.5, 0.82, s.hole);
+      const out = L * lerp(0.2, 0.45, a[1]), sink = embed + ro * 0.4, hh = (out + sink) / 2, deep = ro * 2.2;
+      const ax = nrm(add3(u, [0, 0, s.face * 0.6]));
+      list.push({ t: 2, c: add3(base, mul3(ax, (out - sink) / 2)), f: spinY(frameY(ax), a[2] * TAU),
+        s: [ro, hh, (ro - ri) * 0.45, 0], e: [ri, -hh - deep, hh + ro * 0.5, 0], k: 0.1 * cs * kB, amp: 0.1, col: acc(),
+        br: Math.hypot(ro, hh + deep) });
+    } else if (ty === 2) {     // horn: tapering, optionally curved spike
+      const r1 = 0.22 * T * lerp(0.8, 1.3, a[0]), r2 = r1 * lerp(0.3, 0.55, a[1]);
+      const h = L * lerp(0.9, 1.5, a[2]) + embed, bend = s.bend * lerp(-0.5, 0.5, a[3]);
+      list.push({ t: 3, c: add3(base, mul3(u, h / 2 - embed)), f: spinY(frameY(u), a[4] * TAU), s: [r1, r2, h, bend],
+        k: 0.16 * cs * kB, amp: 0.2, col: acc(), br: h / 2 + r1 + Math.abs(bend) * h });
+    } else if (ty === 3) {     // fork: a flat limb splitting into two square prongs
+      const lw = 0.25 * T * lerp(0.85, 1.2, a[0]), ld = lw * lerp(0.45, 0.75, a[1]), ll = L * lerp(0.2, 0.3, a[2]);
+      const f = spinY(frameY(u), faceSpin(a[3])), x = f[0], z = f[2];
+      const start = sub3(base, mul3(u, embed)), end = add3(start, mul3(u, 2 * ll)), colA = acc();
+      list.push({ t: 4, c: add3(start, mul3(u, ll)), f, s: [lw, ll, ld, ld * 0.9], k: 0.14 * cs * kB, amp: 0.15, col: colA });
+      const th = lerp(0.12, 0.35, a[4]), pw = lw * lerp(0.45, 0.6, a[5]), pl = L * lerp(0.28, 0.42, a[6]);
+      for (const sg of [1, -1]) {
+        const v = nrm(add3(mul3(u, Math.cos(th)), mul3(x, sg * Math.sin(th))));
+        const pli = pl * (1 + sg * lerp(-0.2, 0.2, a[7]));
+        const st = add3(sub3(end, mul3(u, pw * 1.5)), mul3(x, sg * lw * 0.5));
+        list.push({ t: 4, c: add3(st, mul3(v, pli)), f: [cross3(v, z), v, z], s: [pw, pli, pw * lerp(0.8, 1, a[8]), pw * 0.4],
+          k: 0.05 * cs * kB, amp: 0.1, col: sg > 0 ? colA : ca[1] < 0.65 ? -1 : acc() });
+      }
+    } else {                   // lump or flat lip
+      const rad = 0.32 * T * lerp(0.75, 1.3, a[0]), el = lerp(1, 1.6, a[1]), flap = a[2] < 0.45;
+      const rr = flap ? [rad * 1.4, rad * el * 0.85, rad * 0.3] : [rad, rad * el, rad * lerp(0.75, 1, a[3])];
+      list.push({ t: 0, c: add3(base, mul3(u, rr[1] * lerp(0.1, 0.45, a[5]) - embed * 0.5)), f: spinY(frameY(u), faceSpin(a[4])),
+        s: rr, k: 0.14 * cs * kB, amp: 0.7, col: ca[2] < 0.6 ? acc() : -2 });
+    }
+    if (prims.length + list.length > MAXP) continue;
+    prims.push(...list);
+    if (spot && spots.length < nSpots) spots.push(spot);
+  }
+  // paint spots on the core, mostly on the side facing us
+  for (let j = 0; j < MAXS; j++) {
+    const a = Array.from({ length: 5 }, r);
+    if (spots.length >= nSpots) continue;
+    const d = onSphere(a[0], a[1]);
+    if (a[2] < 0.7) d[2] = Math.abs(d[2]);
+    if (sym) d[0] = Math.abs(d[0]);
+    spots.push({ c: surf(d), r: s.spotSize * cs * lerp(0.5, 1, a[3]), a: s.spotAmt * lerp(0.65, 1, a[4]), col: acc() });
+  }
+  // accents pull harder than the body, so a part's colour spills onto the body around its root
+  for (const pr of prims) pr.cw = pr.col === -2 ? 1 : pr.col === -1 ? 2.5 : 1.8;
+
+  for (const pr of prims) {
+    if (pr.br === undefined) pr.br = pr.t === 0 ? Math.max(...pr.s) : pr.t === 1 ? (pr.s[0] + pr.s[1]) * pr.s[2] : Math.hypot(pr.s[0], pr.s[1], pr.s[2]);
+    if (pr.s.length < 4) pr.s = [...pr.s, 0];
+    if (!pr.e) pr.e = [0, 0, 0, 0];
+  }
+  // the frame is the smallest sphere around the surface: points traced inwards along many directions,
+  // plus each part's extreme points, since thin tips can slip between the traced directions
+  const sdf = p => sceneSDF(prims, p, F);
+  const R0 = Math.max(...prims.map(pr => len3(pr.c) + pr.br)) + 0.05, balls = [];
+  for (const d of fib(160)) {
+    let t = R0;
+    for (let i = 0; i < 90; i++) { const v = sdf(mul3(d, t)); if (v < 2e-3) break; t -= v; if (t <= 0) break; }
+    if (t > 0) balls.push([mul3(d, t), amp * 0.5]);
+  }
+  for (const pr of prims) {
+    const [x, y] = pr.f, s = pr.s, at = (a, b, rad) => balls.push([add3(pr.c, add3(mul3(x, a), mul3(y, b))), rad + amp * 0.5]);
+    if (pr.t === 1) { at(s[0], 0, s[1]); at(-s[0], 0, s[1]); at(0, s[0] * s[2], s[1] * s[2]); at(0, -s[0] * s[2], s[1] * s[2]); }
+    else if (pr.t === 2) { at(0, s[1], s[0]); at(0, -s[1], s[0]); }
+    else if (pr.t === 3) { at(0, -s[2] / 2, s[0]); at(s[3] * s[2], s[2] / 2, s[1]); }
+    else if (pr.t === 4) { at(0, s[1], Math.hypot(s[0], s[2])); at(0, -s[1], Math.hypot(s[0], s[2])); }
+    else at(0, 0, Math.max(s[0], s[1], s[2]) * 0.9);
+  }
+  // Badoiu–Clarkson: step towards the farthest ball with a shrinking step
+  let ctr = mul3(balls.reduce((a, [p]) => add3(a, p), [0, 0, 0]), 1 / balls.length);
+  const far = () => { let fb = balls[0], fd = -1; for (const b of balls) { const d = len3(sub3(b[0], ctr)) + b[1]; if (d > fd) { fd = d; fb = b; } } return [fb, fd]; };
+  for (let it = 1; it < 200; it++) {
+    if (sym) ctr[0] = 0;
+    const [[p, rad]] = far(), dir = sub3(p, ctr), l = len3(dir) || 1;
+    ctr = add3(ctr, mul3(dir, (1 + rad / l) / (it + 1)));
+  }
+  if (sym) ctr[0] = 0;
+  const fitR = Math.max(0.2, far()[1]);
+  for (const pr of prims) pr.c = sub3(pr.c, ctr);
+  for (const sp of spots) sp.c = sub3(sp.c, ctr);
+  const bound = Math.max(...prims.map(pr => len3(pr.c) + pr.br)) + amp + 0.02;
+  return { prims, spots, fitR, bound, amp, F, cs, parts };
+}
+let formCache = { key: '', form: null };
+function getForm() {
+  const key = seed + '|' + FORM_KEYS.map(k => S[k]).join(',');
+  if (key !== formCache.key) formCache = { key, form: buildForm(S, seed) };
+  return formCache.form;
+}
+
+// ---------- gl ----------
+const cv = document.getElementById('cv');
+const gl = cv.getContext('webgl2', { preserveDrawingBuffer: true, antialias: false, alpha: true, premultipliedAlpha: true });
+const VS = `#version 300 es
+in vec2 a; void main(){ gl_Position = vec4(a,0.,1.); }`;
+const FS = `#version 300 es
+precision highp float;
+out vec4 fragColor;
+#define MAXP ${MAXP}
+#define MAXS ${MAXS}
+uniform vec2 uRes; uniform float uSeed, uSS, uTransp;
+// parts: centre + bound radius, frame rows (w: type, fillet, sculpt weight), size, extra, colour (oklab)
+uniform vec4 uP[MAXP], uX[MAXP], uY[MAXP], uZ[MAXP], uSz[MAXP], uE[MAXP], uK[MAXP];
+uniform int uPN;
+uniform vec4 uSp[MAXS], uSc[MAXS]; uniform int uSN;
+uniform mat3 uRot;
+uniform float uDist, uTanF, uBound, uScale, uStepK, uAmpN, uFreqN, uFlowT, uSymK, uCarveK, uSym;
+uniform vec3 uLight, uBg;
+uniform float uSoft, uSat, uKey, uAmb, uWrap, uShadow, uPenumbra, uAo, uAoR, uSpec, uGloss, uReflect, uRim, uFlat;
+uniform float uBgGrad, uExposure, uContrast, uVignette, uGrain;
+
+float hash3(vec3 p){ p = fract(p*0.3183099 + 0.1); p *= 17.0; return fract(p.x*p.y*p.z*(p.x+p.y+p.z)); }
+float hash2(vec2 p){ vec3 p3 = fract(vec3(p.xyx)*.1031); p3 += dot(p3, p3.yzx+33.33); return fract((p3.x+p3.y)*p3.z); }
+float vnoise(vec3 x){
+  vec3 i = floor(x), f = fract(x); f = f*f*(3.-2.*f);
+  return mix(mix(mix(hash3(i), hash3(i+vec3(1,0,0)), f.x), mix(hash3(i+vec3(0,1,0)), hash3(i+vec3(1,1,0)), f.x), f.y),
+             mix(mix(hash3(i+vec3(0,0,1)), hash3(i+vec3(1,0,1)), f.x), mix(hash3(i+vec3(0,1,1)), hash3(i+vec3(1,1,1)), f.x), f.y), f.z)*2.-1.;
+}
+float sculptN(vec3 p){
+  vec3 q = p*uFreqN + vec3(uSeed*7.1, uSeed*3.3, uFlowT);
+  return vnoise(q)*0.7 + vnoise(q*2.03 + vec3(11.7, 3.1, -uFlowT*0.6))*0.3;
+}
+float smin(float a, float b, float k){ if (k <= 1e-5) return min(a, b); float h = max(k - abs(a-b), 0.)/k; return min(a, b) - h*h*k*0.25; }
+
+float sdEll(vec3 p, vec3 r){ float k0 = length(p/r), k1 = length(p/(r*r)); return k0*(k0-1.)/max(k1, 1e-6); }
+float sdCyl(vec3 p, float r, float hh, float rr){
+  vec2 d = vec2(length(p.xz) - r + rr, abs(p.y) - hh + rr);
+  return min(max(d.x, d.y), 0.) + length(max(d, 0.)) - rr;
+}
+float sdRoundCone(vec3 p, float r1, float r2, float h){
+  float b = (r1-r2)/h, a = sqrt(1.-b*b);
+  vec2 q = vec2(length(p.xz), p.y);
+  float k = dot(q, vec2(-b, a));
+  if (k < 0.) return length(q) - r1;
+  if (k > a*h) return length(q - vec2(0., h)) - r2;
+  return dot(q, vec2(a, b)) - r1;
+}
+float sdRBox(vec3 p, vec3 b, float r){ vec3 q = abs(p) - b + r; return length(max(q, 0.)) + min(max(q.x, max(q.y, q.z)), 0.) - r; }
+
+// one part in its own frame; dc gets the bore of a tube
+float primD(int i, vec3 p, inout float dc){
+  vec3 q = p - uP[i].xyz;
+  vec3 l = vec3(dot(uX[i].xyz, q), dot(uY[i].xyz, q), dot(uZ[i].xyz, q));
+  int ty = int(uX[i].w + 0.5);
+  vec4 s = uSz[i];
+  if (ty == 0) return sdEll(l, s.xyz);
+  if (ty == 1) return length(vec2(length(vec2(l.x, l.y/s.z)) - s.x, l.z)) - s.y;
+  if (ty == 2){
+    vec4 e = uE[i];
+    dc = min(dc, sdCyl(l - vec3(0., (e.y + e.z)*0.5, 0.), e.x, (e.z - e.y)*0.5, 0.));
+    return sdCyl(l, s.x, s.y, s.z);
+  }
+  if (ty == 3){ float h = s.z; l.y += h*0.5; float t = clamp(l.y/h, 0., 1.); l.x -= s.w*h*t*t; return sdRoundCone(l, s.x, s.y, h); }
+  return sdRBox(l, s.xyz, s.w);
+}
+vec3 fold(vec3 p){ if (uSym > 0.5) p.x = sqrt(p.x*p.x + uSymK*uSymK); return p; }
+
+float map(vec3 p){
+  p = fold(p);
+  float n = uAmpN > 0. ? sculptN(p) : 0.;
+  float d = 1e9, dc = 1e9;
+  for (int i = 0; i < MAXP; i++){
+    if (i >= uPN) break;
+    float k = uY[i].w, amp = uZ[i].w*uAmpN;
+    // a part farther than its fillet from what is already there cannot change the union; tubes still drill
+    float skip = d + k;
+    if (int(uX[i].w + 0.5) == 2) skip = max(skip, uCarveK);
+    if (length(p - uP[i].xyz) - uP[i].w - amp > skip) continue;
+    d = smin(d, primD(i, p, dc) + amp*n, k);
+  }
+  if (dc < 1e8) d = -smin(-d, dc, uCarveK);
+  return d;
+}
+
+// colour: every part pulls the surface towards its colour, nearer parts pull harder; then spots of paint on top
+vec3 surfColor(vec3 p){
+  p = fold(p);
+  float n = uAmpN > 0. ? sculptN(p) : 0.;
+  float ds[MAXP];
+  float dmin = 1e9, dc = 1e9;
+  for (int i = 0; i < MAXP; i++){
+    if (i >= uPN) break;
+    ds[i] = primD(i, p, dc) + uZ[i].w*uAmpN*n;
+    dmin = min(dmin, ds[i]);
+  }
+  float blur = mix(0.004, 0.34, uSoft*uSoft)*uScale;
+  vec3 acc = vec3(0.); float ws = 0.;
+  for (int i = 0; i < MAXP; i++){
+    if (i >= uPN) break;
+    float w = uK[i].w*exp(-(ds[i] - dmin)/blur);
+    acc += w*uK[i].xyz; ws += w;
+  }
+  vec3 c = acc/ws;
+  for (int j = 0; j < MAXS; j++){
+    if (j >= uSN) break;
+    // flat-topped falloff: a solid patch of colour with an airbrushed edge
+    vec3 v = p - uSp[j].xyz;
+    float q = dot(v, v)/(uSp[j].w*uSp[j].w);
+    c = mix(c, uSc[j].xyz, uSc[j].w*exp(-q*(0.3 + 0.4*q)));
+  }
+  return c;
+}
+
+vec3 ok2lin(vec3 c){
+  float l_ = c.x + 0.3963377774*c.y + 0.2158037573*c.z;
+  float m_ = c.x - 0.1055613458*c.y - 0.0638541728*c.z;
+  float s_ = c.x - 0.0894841775*c.y - 1.2914855480*c.z;
+  float l = l_*l_*l_, m = m_*m_*m_, s = s_*s_*s_;
+  return max(vec3( 4.0767416621*l - 3.3077115913*m + 0.2309699292*s,
+                  -1.2684380046*l + 2.6097574011*m - 0.3413193965*s,
+                  -0.0041960863*l - 0.7034186147*m + 1.7076147010*s), 0.);
+}
+vec3 lin2srgb(vec3 c){ c = clamp(c, 0., 1.); return mix(c*12.92, 1.055*pow(c, vec3(1./2.4)) - 0.055, step(0.0031308, c)); }
+
+vec3 calcN(vec3 p){
+  float e = 0.0012*uScale;
+  const vec2 k = vec2(1., -1.);
+  return normalize(k.xyy*map(p + k.xyy*e) + k.yyx*map(p + k.yyx*e) + k.yxy*map(p + k.yxy*e) + k.xxx*map(p + k.xxx*e));
+}
+// how buried a point is: probe outwards along the normal
+float calcAO(vec3 p, vec3 n){
+  float R = uAoR*0.45*uScale, occ = 0., sca = 1.;
+  for (int i = 0; i < 6; i++){
+    float h = R*(0.04 + float(i*i)/25.);
+    occ += max(h - map(p + n*h), 0.)/R*sca;
+    sca *= 0.72;
+  }
+  return clamp(1. - uAo*occ*0.9, 0., 1.);
+}
+// the start is jittered per pixel: banding from the inexact distances turns into fine grain
+float softShadow(vec3 ro, vec3 rd, float jit){
+  float k = mix(24., 1.6, uPenumbra), res = 1., t = (0.012 + 0.02*jit)*uScale, ph = 1e10;
+  for (int i = 0; i < 56; i++){
+    float h = map(ro + rd*t);
+    float y = h*h/(2.*ph), d = sqrt(max(h*h - y*y, 0.));
+    // a floor on the distance keeps contact shadows soft too, not only the far ones
+    res = min(res, k*d/max(t - y, 0.15*uPenumbra*uScale + 1e-4));
+    ph = h;
+    t += clamp(h*uStepK, 0.008*uScale, 0.2*uScale);
+    if (res < 0.002 || t > 2.*uBound) break;
+  }
+  res = clamp(res, 0., 1.);
+  return res*res*(3. - 2.*res);
+}
+// studio around the form for reflections: floor tinted by the background, bright ceiling, a softbox at the key light
+vec3 envMap(vec3 r){
+  vec3 bgl = pow(uBg, vec3(2.2));
+  vec3 c = mix(bgl*0.5, vec3(1.), smoothstep(-0.2, 0.9, r.y));
+  float w = mix(0.55, 0.96, uGloss);
+  return c + vec3(1.6)*smoothstep(w, 1., dot(r, uLight));
+}
+
+// linear colour of the form and its coverage (0 or 1) for one sample
+vec4 render(vec2 fc){
+  vec2 uv = (2.*fc - uRes)/uRes.y;
+  vec3 rdW = normalize(vec3(uv*uTanF, -1.)), roW = vec3(0., 0., uDist);
+  mat3 RT = transpose(uRot);
+  vec3 ro = RT*roW, rd = RT*rdW;
+  float b = dot(ro, rd), c = dot(ro, ro) - uBound*uBound, h = b*b - c;
+  if (h < 0.) return vec4(0.);
+  h = sqrt(h);
+  float t = max(-b - h, 0.), tEnd = -b + h;
+  bool hit = false;
+  for (int i = 0; i < 200; i++){
+    float d = map(ro + rd*t);
+    if (d < 0.0004*uScale) { hit = true; break; }
+    t += d*uStepK;
+    if (t > tEnd) break;
+  }
+  if (!hit) return vec4(0.);
+  vec3 p = ro + rd*t, n = calcN(p);
+  vec3 alb = ok2lin(surfColor(p));
+  // shade in world space: the light hangs on the camera, the form turns under it
+  vec3 N = uRot*n, V = -rdW, L = uLight;
+  float ndl = dot(N, L), nv = clamp(dot(N, V), 0., 1.);
+  float dif = clamp((ndl + uWrap)/(1. + uWrap), 0., 1.);
+  float sh = 1.;
+  if (uShadow > 0.001 && ndl > -0.35) sh = mix(1., softShadow(p + n*0.006*uScale, RT*L, hash2(fc*1.37)), uShadow);
+  float ao = uAo > 0. ? calcAO(p, n) : 1.;
+  vec3 sky = mix(vec3(0.6, 0.58, 0.56), vec3(1.), N.y*0.5 + 0.5);
+  vec3 col = alb*(uKey*dif*sh + uAmb*0.75*sky*ao);
+  float shin = exp2(mix(2.5, 10., uGloss));
+  col += uSpec*pow(clamp(dot(N, normalize(L + V)), 0., 1.), shin)*(shin + 8.)/25.*sh*clamp(ndl*4., 0., 1.);
+  float fr = (0.04 + 0.96*pow(1. - nv, 5.))*uReflect;
+  col = col*(1. - fr) + envMap(reflect(-V, N))*fr*mix(0.35, 1., ao);
+  col += alb*uRim*1.5*pow(1. - nv, 3.)*mix(0.5, 1., ao);
+  col = mix(col, alb*mix(1., ao, 0.75), uFlat);
+  return vec4(col*uExposure, 1.);
+}
+
+void main(){
+  int ss = int(uSS + 0.5);
+  vec3 acc = vec3(0.); float cov = 0.;
+  for (int y = 0; y < 3; y++) for (int x = 0; x < 3; x++){
+    if (x >= ss || y >= ss) continue;
+    vec4 c = render(gl_FragCoord.xy + (vec2(x, y) + 0.5)/float(ss) - 0.5);
+    if (c.a < 0.5) continue;
+    vec3 s = lin2srgb(c.rgb);
+    s = mix(vec3(dot(s, vec3(0.2126, 0.7152, 0.0722))), s, uSat);
+    acc += clamp((s - 0.5)*uContrast + 0.5, 0., 1.); cov += 1.;
+  }
+  float nS = float(ss*ss);
+  vec3 obj = acc/nS; cov /= nS;          // premultiplied by coverage
+  vec2 q = (gl_FragCoord.xy - 0.5*uRes)/uRes.y;
+  float rr = length(q);
+  vec3 bg = uBg*(1. + uBgGrad*0.3*(0.5 - smoothstep(0., 0.8, rr)));
+  vec3 col = uTransp > 0.5 ? obj : bg*(1. - cov) + obj;
+  col *= 1. - uVignette*0.8*smoothstep(0.3, 0.95, rr);
+  float lu = dot(col, vec3(0.2126, 0.7152, 0.0722));
+  col += (hash2(gl_FragCoord.xy + fract(uSeed*13.1)*500.) - 0.5)*uGrain*(0.6 + 0.9*(1. - lu))*(uTransp > 0.5 ? cov : 1.);
+  fragColor = uTransp > 0.5 ? vec4(clamp(col, 0., cov), cov) : vec4(clamp(col, 0., 1.), 1.);
+}`;
+
+function compile(type, src) {
+  const sh = gl.createShader(type); gl.shaderSource(sh, src); gl.compileShader(sh);
+  if (!gl.getShaderParameter(sh, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(sh));
+  return sh;
+}
+let prog, U = {};
+function initGL() {
+  prog = gl.createProgram();
+  gl.attachShader(prog, compile(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, compile(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  const buf = gl.createBuffer();
+  gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+  gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 3, -1, -1, 3]), gl.STATIC_DRAW);
+  const loc = gl.getAttribLocation(prog, 'a');
+  gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 2, gl.FLOAT, false, 0, 0);
+  const n = gl.getProgramParameter(prog, gl.ACTIVE_UNIFORMS);
+  for (let i = 0; i < n; i++) { const name = gl.getActiveUniform(prog, i).name.replace('[0]', ''); U[name] = gl.getUniformLocation(prog, name); }
+}
+const uName = k => 'u' + k[0].toUpperCase() + k.slice(1);
+const mm = (A, B) => A.map(row => [0, 1, 2].map(j => row[0] * B[0][j] + row[1] * B[1][j] + row[2] * B[2][j]));
+// form orientation Rx·Ry·Rz, the turntable spin adds to ry
+function rotM(s) {
+  const ax = s.rx * D2R, ay = (s.ry + s.spin * tAnim * 30) * D2R, az = s.rz * D2R;
+  const cx = Math.cos(ax), sx = Math.sin(ax), cy = Math.cos(ay), sy = Math.sin(ay), cz = Math.cos(az), sz = Math.sin(az);
+  return mm(mm([[1, 0, 0], [0, cx, -sx], [0, sx, cx]], [[cy, 0, sy], [0, 1, 0], [-sy, 0, cy]]), [[cz, -sz, 0], [sz, cz, 0], [0, 0, 1]]);
+}
+const lightDir = s => { const a = s.lAz * D2R, e = s.lEl * D2R; return [Math.sin(a) * Math.cos(e), Math.sin(e), Math.cos(a) * Math.cos(e)]; };
+// body is the first colour, -1 the darkest accent, accent ranks spread over the rest
+function colorResolver(pal) {
+  const ok = pal.map(hex2oklab), n = ok.length;
+  let di = Math.min(1, n - 1);
+  for (let i = 1; i < n; i++) if (ok[i][0] < ok[di][0]) di = i;
+  // a near-black is kept for prongs, not handed out as an ordinary accent
+  const accs = [];
+  for (let i = 1; i < n; i++) if (i !== di || n < 4 || ok[di][0] > 0.4) accs.push(i);
+  return v => n < 2 || v === -2 ? ok[0] : v === -1 ? ok[di] : ok[accs[Math.floor(v * accs.length) % accs.length]];
+}
+
+function draw(w, h, ss, transp = 0) {
+  const fm = getForm();
+  gl.viewport(0, 0, w, h);
+  gl.uniform2f(U.uRes, w, h);
+  gl.uniform1f(U.uSeed, (hashStr(seed) % 10000) / 1000);
+  gl.uniform1f(U.uSS, ss);
+  gl.uniform1f(U.uTransp, transp);
+  for (const [k, , , , , , x = {}] of SPEC) {
+    const loc = U[uName(k)];
+    if (!loc) continue;
+    if (x.color) gl.uniform3fv(loc, hex2rgb(S[k])); else gl.uniform1f(loc, S[k]);
+  }
+  const col = colorResolver(S.pal), v4 = () => new Float32Array(MAXP * 4);
+  const P = v4(), X = v4(), Y = v4(), Z = v4(), Sz = v4(), E = v4(), K = v4();
+  fm.prims.forEach((pr, i) => {
+    P.set([...pr.c, pr.br], i * 4);
+    X.set([...pr.f[0], pr.t], i * 4); Y.set([...pr.f[1], pr.k], i * 4); Z.set([...pr.f[2], pr.amp], i * 4);
+    Sz.set(pr.s, i * 4); E.set(pr.e, i * 4); K.set([...col(pr.col), pr.cw], i * 4);
+  });
+  for (const [n, a] of [['uP', P], ['uX', X], ['uY', Y], ['uZ', Z], ['uSz', Sz], ['uE', E], ['uK', K]]) if (U[n]) gl.uniform4fv(U[n], a);
+  gl.uniform1i(U.uPN, fm.prims.length);
+  const Sp = new Float32Array(MAXS * 4), Sc = new Float32Array(MAXS * 4);
+  fm.spots.forEach((sp, i) => { Sp.set([...sp.c, sp.r], i * 4); Sc.set([...col(sp.col), sp.a], i * 4); });
+  if (U.uSp) { gl.uniform4fv(U.uSp, Sp); gl.uniform4fv(U.uSc, Sc); }
+  gl.uniform1i(U.uSN, fm.spots.length);
+
+  const M = rotM(S);
+  gl.uniformMatrix3fv(U.uRot, false, [M[0][0], M[1][0], M[2][0], M[0][1], M[1][1], M[2][1], M[0][2], M[1][2], M[2][2]]);
+  // the camera stands where the form's bounding sphere just fits the view; a narrow picture is limited by its width
+  const F2 = S.fov * D2R / 2, R = fm.fitR * 1.03 / S.zoom / Math.min(1, w / h);
+  gl.uniform1f(U.uTanF, Math.tan(F2));
+  gl.uniform1f(U.uDist, R / Math.sin(F2));
+  gl.uniform1f(U.uBound, fm.bound);
+  gl.uniform1f(U.uScale, fm.fitR);
+  const freqN = S.sculptFreq / fm.cs;
+  gl.uniform1f(U.uAmpN, fm.amp);
+  gl.uniform1f(U.uFreqN, freqN);
+  gl.uniform1f(U.uFlowT, tAnim * S.flow * 0.35);
+  gl.uniform1f(U.uStepK, 0.9 / (1 + fm.amp * freqN * 2.5) / (1 + 0.6 * S.bend));
+  gl.uniform1f(U.uSymK, fm.F.symK);
+  gl.uniform1f(U.uCarveK, fm.F.carveK);
+  gl.uniform3fv(U.uLight, lightDir(S));
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ---------- layout / render loop ----------
+const stage = document.getElementById('stage');
+let dirty = true, exporting = false, interactUntil = 0, lastQ = 0, fullW = 1, fullH = 1, pxScale = 1;
+function setPixels() { cv.width = Math.max(1, Math.round(fullW * pxScale)); cv.height = Math.max(1, Math.round(fullH * pxScale)); dirty = true; }
+function resize() {
+  const ar = FORMATS[format][1], m = 36;
+  const W = stage.clientWidth - m * 2, H = stage.clientHeight - m * 2;
+  let w = W, h = w / ar; if (h > H) { h = H; w = h * ar; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.style.width = Math.round(w) + 'px'; cv.style.height = Math.round(h) + 'px';
+  fullW = w * dpr; fullH = h * dpr;
+  setPixels();
+}
+function frame(now) {
+  if (!exporting) {
+    if (animating) { tAnim += (now - t0) / 1000; dirty = true; }
+    // while something moves: one sample at about one pixel per css pixel; full quality once it stops
+    const moving = animating || now < interactUntil;
+    const q = moving ? 1 : quality, sc = moving ? Math.min(1, 1.1 / Math.min(window.devicePixelRatio || 1, 2)) : 1;
+    if (sc !== pxScale) { pxScale = sc; setPixels(); }
+    if (q !== lastQ) { dirty = true; lastQ = q; }
+    if (dirty) { draw(cv.width, cv.height, q); dirty = false; }
+  }
+  t0 = now;
+  requestAnimationFrame(frame);
+}
+let hashTimer;
+function changed() {
+  dirty = true;
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => history.replaceState(null, '', '#' + btoa(encodeURIComponent(JSON.stringify({ seed, format, S })))), 300);
+}
+
+// ---------- random ----------
+// a pale body, saturated accents, usually one near-black
+function randPalette(r) {
+  const h0 = r.range(0, 360), n = r.int(4, 6), out = [oklch2hex(r.range(0.9, 0.97), r.range(0, 0.03), h0 + r.range(-30, 30))];
+  const scheme = r.wpick(['spread', 'analog', 'duo'], [3, 1.5, 1.2]);
+  for (let i = 1; i < n; i++) {
+    const H = scheme === 'spread' ? h0 + i * 360 / (n - 1) + r.range(-20, 20)
+            : scheme === 'analog' ? h0 + (i - 1) * r.range(18, 35) : h0 + (i % 2) * 180 + r.range(-15, 15);
+    out.push(oklch2hex(r.range(0.55, 0.88), r.range(0.12, 0.26), H));
+  }
+  if (r.chance(0.7)) out.push(oklch2hex(r.range(0.12, 0.25), r.range(0.01, 0.06), h0 + 150));
+  return out;
+}
+function randomState(sd) {
+  const r = makeRng(sd), s = { ...DEFAULTS };
+  s.pal = r.chance(0.45) ? r.pick(Object.values(PALETTES)).slice() : randPalette(r);
+  s.cseed = Math.floor(r() * 1e9).toString(36);
+  // form
+  s.core = r.wpick([1, 2, 3, 4], [2, 3, 2, 1]);
+  s.coreSize = r.range(0.6, 0.85); s.coreSpread = r.range(0.35, 0.85);
+  s.blend = r.range(0.3, 0.8);
+  s.sculpt = r.chance(0.55) ? r.range(0.1, 0.6) : 0; s.sculptFreq = r.range(0.8, 2.2);
+  s.sym = r.chance(0.15) ? 1 : 0;
+  s.count = r.int(2, 7); s.len = r.range(0.75, 1.35); s.thick = r.range(0.75, 1.3);
+  for (const k of W_KEYS) s[k] = r.chance(0.75) ? r.range(0.3, 1) : 0;
+  if (W_KEYS.every(k => s[k] === 0)) s[r.pick(W_KEYS)] = 1;
+  s.bend = r.range(0, 0.8); s.hole = r.range(0.2, 0.75); s.face = r.range(0.5, 1);
+  // colour
+  s.soft = r.range(0.25, 0.8);
+  s.spots = r.wpick([0, r.int(2, 5), r.int(5, 10)], [1, 2, 1.5]);
+  s.spotSize = r.range(0.4, 1); s.spotAmt = r.range(0.6, 1); s.sat = r.range(0.95, 1.15);
+  // light and material
+  s.lAz = Math.round(r.range(-70, 70)); s.lEl = Math.round(r.range(15, 65));
+  s.key = r.range(0.8, 1.3); s.amb = r.range(0.6, 1); s.wrap = r.range(0.3, 0.8);
+  s.shadow = r.range(0, 0.6); s.penumbra = r.range(0.4, 0.9); s.ao = r.range(0.7, 1.4); s.aoR = r.range(0.5, 1);
+  const look = r.wpick(['matte', 'satin', 'gloss'], [3, 2, 1.2]);
+  s.spec = look === 'matte' ? r.range(0, 0.12) : look === 'satin' ? r.range(0.15, 0.35) : r.range(0.4, 0.8);
+  s.gloss = look === 'gloss' ? r.range(0.6, 0.9) : r.range(0.2, 0.5);
+  s.reflect = look === 'gloss' ? r.range(0.15, 0.45) : 0;
+  s.rim = r.chance(0.25) ? r.range(0.1, 0.5) : 0;
+  s.flat = r.range(0.1, 0.45);
+  // camera and background
+  s.rx = Math.round(r.range(-20, 20)); s.ry = Math.round(r.range(-40, 40)); s.rz = Math.round(r.range(-10, 10));
+  s.zoom = 1; s.fov = Math.round(r.range(12, 35));
+  s.bg = r.chance(0.2) ? oklch2hex(r.range(0.12, 0.25), r.range(0, 0.04), r.range(0, 360))
+                       : oklch2hex(r.range(0.74, 0.92), r.chance(0.6) ? 0 : r.range(0.01, 0.05), r.range(0, 360));
+  s.bgGrad = r.chance(0.5) ? 0 : r.range(-0.6, 0.6);
+  s.contrast = r.range(0.95, 1.1); s.vignette = r.chance(0.6) ? 0 : r.range(0.1, 0.4); s.grain = r.range(0.01, 0.04);
+  s.spin = r.range(0.1, 0.3) * (r.chance(0.5) ? 1 : -1); s.flow = r.range(0.1, 0.4);
+  // sliders hold values on their step grid
+  for (const [k, , mn, mx, st, , x = {}] of SPEC) if (!x.color && !x.sel) s[k] = clamp(Math.round(s[k] / st) * st, mn, mx);
+  return s;
+}
+function mutate() {
+  const r = makeRng(seed + ':' + Math.random());
+  for (const [k, , mn, mx, st, , x = {}] of SPEC) {
+    if (x.sel || x.color || ['core', 'count', 'spots', 'fov', 'zoom', 'exposure'].includes(k) || !r.chance(0.35)) continue;
+    S[k] = clamp(Math.round((S[k] + (mx - mn) * r.range(-0.06, 0.06)) / st) * st, mn, mx);
+  }
+  refreshUI(); changed(); status('мутация');
+}
+function recolor() { S.cseed = randSeed(); changed(); status('перекраска ' + S.cseed); }
+
+// ---------- UI ----------
+const ctrlEls = {};
+function fmt(v, st) { return st >= 1 ? String(Math.round(v)) : (+v).toFixed(st < 0.01 ? 3 : 2); }
+function buildUI() {
+  const box = document.getElementById('controls');
+  let grp, grpName;
+  for (const [k, label, mn, mx, st, g, x = {}] of SPEC) {
+    if (g !== grpName) {
+      grpName = g; grp = document.createElement('div'); grp.className = 'grp';
+      const h = document.createElement('h2'); h.textContent = g;
+      const gg = grp; h.onclick = () => gg.classList.toggle('closed');
+      grp.appendChild(h); box.appendChild(grp);
+    }
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label title="${label}">${label}</label>`;
+    let inp, out = document.createElement('output');
+    if (x.sel) {
+      inp = document.createElement('select');
+      x.sel.forEach((o, i) => inp.add(new Option(o, i)));
+      inp.onchange = () => { S[k] = +inp.value; refreshUI(); changed(); };
+      out = document.createElement('span');
+    } else if (x.color) {
+      inp = document.createElement('input'); inp.type = 'color';
+      inp.oninput = () => { S[k] = inp.value; changed(); };
+      out = document.createElement('span');
+    } else {
+      inp = document.createElement('input'); inp.type = 'range'; inp.min = mn; inp.max = mx; inp.step = st;
+      // some sliders reveal or hide others, so re-check visibility as they move
+      inp.oninput = () => { S[k] = +inp.value; out.value = fmt(S[k], st); refreshVis(); interactUntil = performance.now() + 250; changed(); };
+      inp.ondblclick = () => { S[k] = DEFAULTS[k]; refreshUI(); changed(); };
+    }
+    row.append(inp, out); grp.appendChild(row);
+    ctrlEls[k] = { row, inp, out, st, x };
+  }
+}
+function buildPalUI() {
+  const row = document.getElementById('palRow'); row.innerHTML = '';
+  S.pal.forEach((c, i) => {
+    const inp = document.createElement('input'); inp.type = 'color'; inp.value = c;
+    inp.oninput = () => { S.pal[i] = inp.value; changed(); };
+    row.appendChild(inp);
+  });
+}
+function syncCtrl(keys) {
+  for (const k of keys) { const { inp, out, st } = ctrlEls[k]; inp.value = S[k]; out.value = fmt(S[k], st); }
+}
+function refreshVis() {
+  for (const k in ctrlEls) { const { row, x } = ctrlEls[k]; row.classList.toggle('hide', !!(x.show && !x.show(S))); }
+}
+function refreshUI() {
+  for (const k in ctrlEls) {
+    const { inp, out, st, x } = ctrlEls[k];
+    inp.value = S[k];
+    if (!x.sel && !x.color) out.value = fmt(S[k], st);
+  }
+  refreshVis();
+  document.getElementById('seed').value = seed;
+  document.getElementById('format').value = format;
+  buildPalUI();
+}
+function status(t) { document.getElementById('status').textContent = t; }
+
+function newForm(sd) {
+  seed = sd || randSeed();
+  S = randomState(seed);
+  refreshUI(); changed(); status('seed ' + seed);
+}
+function applyPreset(name) {
+  S = presetState(name);
+  if (PRESETS[name].seed) seed = PRESETS[name].seed;
+  refreshUI(); changed(); status('пресет: ' + name);
+}
+
+// big exports render tile by tile, one per frame, so a slow GPU never stalls long enough to lose the context
+function save() {
+  if (exporting) return;
+  const ar = FORMATS[format][1];
+  let w, h; if (ar >= 1) { w = expSize; h = Math.round(expSize / ar); } else { h = expSize; w = Math.round(expSize * ar); }
+  const maxV = gl.getParameter(gl.MAX_VIEWPORT_DIMS), maxS = Math.min(maxV[0], maxV[1], gl.getParameter(gl.MAX_RENDERBUFFER_SIZE));
+  if (Math.max(w, h) > maxS) { const k = maxS / Math.max(w, h); w = Math.floor(w * k); h = Math.floor(h * k); }
+  exporting = true;
+  const pw = cv.width, ph = cv.height, transp = expBg;
+  cv.width = w; cv.height = h;
+  const T = 256, tiles = [];
+  for (let y = 0; y < h; y += T) for (let x = 0; x < w; x += T) tiles.push([x, y]);
+  let i = 0;
+  const step = () => {
+    gl.enable(gl.SCISSOR_TEST);
+    const [x, y] = tiles[i++];
+    gl.scissor(x, y, T, T);
+    draw(w, h, 3, transp);
+    gl.flush();
+    gl.disable(gl.SCISSOR_TEST);
+    status(`рендер ${w}×${h} — ${Math.round(i / tiles.length * 100)}%`);
+    if (i < tiles.length) { requestAnimationFrame(step); return; }
+    cv.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = `soft-matter-${seed}-${w}x${h}${transp ? '-alpha' : ''}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      cv.width = pw; cv.height = ph; dirty = true; exporting = false;
+      status('сохранено ' + a.download);
+    }, 'image/png');
+  };
+  status(`рендер ${w}×${h}…`);
+  requestAnimationFrame(step);
+}
+
+function initPointer() {
+  let drag = null;
+  cv.addEventListener('pointerdown', e => {
+    drag = { x: e.clientX, y: e.clientY };
+    cv.setPointerCapture(e.pointerId); cv.classList.add('drag');
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (e.shiftKey) { S.lAz = wrapDeg(S.lAz + dx * 0.5); S.lEl = clamp(S.lEl - dy * 0.5, -90, 90); syncCtrl(['lAz', 'lEl']); }
+    else { S.ry = wrapDeg(S.ry + dx * 0.4); S.rx = wrapDeg(S.rx + dy * 0.4); syncCtrl(['rx', 'ry']); }
+    interactUntil = performance.now() + 250; changed();
+  });
+  const end = () => { drag = null; cv.classList.remove('drag'); };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    S.zoom = clamp(S.zoom * Math.exp(-e.deltaY * 0.001), 0.4, 2.5); syncCtrl(['zoom']);
+    interactUntil = performance.now() + 250; changed();
+  }, { passive: false });
+}
+
+function init() {
+  if (!gl) { status('WebGL2 недоступен'); return; }
+  try { initGL(); } catch (e) { status('shader: ' + e.message); console.error(e); return; }
+  buildUI();
+  const sel = (id, opts, val, on) => {
+    const el = document.getElementById(id);
+    for (const k in opts) el.add(new Option(Array.isArray(opts[k]) ? opts[k][0] : opts[k], k));
+    el.value = val; el.onchange = () => on(el.value);
+  };
+  sel('format', FORMATS, format, v => { format = v; resize(); changed(); });
+  sel('exp', EXPORTS, expSize, v => expSize = +v);
+  sel('expBg', EXP_BG, expBg, v => expBg = +v);
+  sel('quality', QUALITY, quality, v => { quality = +v; dirty = true; });
+  const pr = document.getElementById('presets');
+  Object.keys(PRESETS).forEach((n, i) => {
+    const b = document.createElement('button'); b.textContent = `${i + 1} ${n}`; b.onclick = () => applyPreset(n); pr.appendChild(b);
+  });
+  const pSel = document.getElementById('palSel');
+  pSel.add(new Option('—', ''));
+  for (const k in PALETTES) pSel.add(new Option(k, k));
+  pSel.onchange = () => { if (pSel.value) { S.pal = PALETTES[pSel.value].slice(); buildPalUI(); changed(); } pSel.value = ''; };
+  document.getElementById('pAdd').onclick = () => { if (S.pal.length < 8) { S.pal.push(S.pal[S.pal.length - 1]); buildPalUI(); changed(); } };
+  document.getElementById('pDel').onclick = () => { if (S.pal.length > 2) { S.pal.pop(); buildPalUI(); changed(); } };
+  document.getElementById('pRev').onclick = () => { S.pal.reverse(); buildPalUI(); changed(); };
+  document.getElementById('pShuf').onclick = () => {
+    for (let i = S.pal.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [S.pal[i], S.pal[j]] = [S.pal[j], S.pal[i]]; }
+    buildPalUI(); changed();
+  };
+  document.getElementById('pRnd').onclick = () => { S.pal = randPalette(makeRng(randSeed())); buildPalUI(); changed(); };
+
+  document.getElementById('bNew').onclick = () => newForm();
+  document.getElementById('bDice').onclick = () => newForm();
+  document.getElementById('bMut').onclick = mutate;
+  document.getElementById('bCol').onclick = recolor;
+  document.getElementById('bSave').onclick = save;
+  const bA = document.getElementById('bAnim');
+  const toggleAnim = () => { animating = !animating; bA.classList.toggle('on', animating); dirty = true; };
+  bA.onclick = toggleAnim;
+  document.getElementById('seed').onchange = e => newForm(e.target.value.trim() || randSeed());
+  initPointer();
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase();
+    if (k === ' ' || k === 'r') { e.preventDefault(); newForm(); }
+    else if (k === 'm') mutate();
+    else if (k === 'c') recolor();
+    else if (k === 'a') toggleAnim();
+    else if (k === 's') save();
+    else if (k === 'h') { document.body.classList.toggle('nopanel'); resize(); }
+    else if (k >= '1' && k <= '6') applyPreset(Object.keys(PRESETS)[+k - 1]);
+  });
+  addEventListener('resize', resize);
+
+  let loaded = false;
+  // short links: #seed=abc or #preset=name, optionally followed by &key=value overrides
+  const kv = Object.fromEntries(location.hash.slice(1).split('&').map(x => x.split('=').map(decodeURIComponent)));
+  if (kv.seed || PRESETS[kv.preset]) {
+    if (kv.preset && PRESETS[kv.preset]) { S = presetState(kv.preset); seed = PRESETS[kv.preset].seed || seed; }
+    if (kv.seed) { seed = kv.seed; if (!kv.preset) S = randomState(seed); }
+    for (const k in kv) if (k in DEFAULTS && k !== 'pal') S[k] = /^#/.test(kv[k]) || k === 'cseed' ? kv[k] : +kv[k];
+    loaded = true;
+  } else if (location.hash.length > 1) {
+    try {
+      const st = JSON.parse(decodeURIComponent(atob(location.hash.slice(1))));
+      seed = st.seed || seed; format = FORMATS[st.format] ? st.format : format;
+      S = { ...DEFAULTS, ...st.S }; loaded = true;
+    } catch (e) { /* ignore broken hash */ }
+  }
+  if (!loaded) status('пресет: референс');
+  refreshUI(); resize();
+  requestAnimationFrame(frame);
+}
+init();
+</script>
+</body>
+</html>
