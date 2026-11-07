@@ -1,0 +1,1476 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Linefall</title>
+<style>
+  :root { --bg:#101012; --panel:#161618; --fg:#ddd; --dim:#777; --acc:#8fd0ff; }
+  * { box-sizing: border-box; }
+  html, body { margin:0; height:100%; background:var(--bg); color:var(--fg);
+    font: 12px/1.4 ui-monospace, Menlo, monospace; }
+  body { display:flex; }
+  #stage { flex:1; position:relative; min-width:0; display:flex; align-items:center; justify-content:center;
+    background: radial-gradient(ellipse at 50% 42%, #262628, #111113 72%); }
+  #cv { display:block; cursor:grab; touch-action:none; box-shadow: 0 22px 60px rgba(0,0,0,.6), 0 3px 8px rgba(0,0,0,.45); }
+  #cv.drag { cursor:grabbing; }
+  #panel { width:300px; background:var(--panel); padding:14px; overflow-y:auto; border-left:1px solid #222; }
+  body.nopanel #panel { display:none; }
+  h1 { font-size:13px; margin:0 0 10px; letter-spacing:.08em; text-transform:uppercase; }
+  h2 { font-size:11px; margin:14px 0 6px; color:var(--dim); letter-spacing:.08em; text-transform:uppercase; font-weight:400;
+    border-top:1px solid #242424; padding-top:10px; }
+  .grp h2 { cursor:pointer; user-select:none; }
+  .grp h2::after { content:'−'; float:right; color:#555; }
+  .grp.closed h2::after { content:'+'; }
+  .grp.closed .row { display:none; }
+  .row { display:grid; grid-template-columns: 104px 1fr 44px; align-items:center; gap:6px; margin:3px 0; }
+  .row label { color:var(--dim); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .row output { text-align:right; font-size:11px; }
+  .row.hide { display:none !important; }
+  input[type=range] { width:100%; accent-color:var(--acc); }
+  input[type=text], select { width:100%; background:#0c0c0c; color:var(--fg); border:1px solid #333; padding:4px 6px; font:inherit; }
+  input[type=color] { width:100%; height:22px; padding:0; border:1px solid #333; background:#0c0c0c; cursor:pointer; }
+  .btns { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+  button { flex:1; background:#222; color:var(--fg); border:1px solid #333; padding:7px 8px; font:inherit; cursor:pointer; }
+  button:hover { border-color:var(--acc); }
+  button.on { border-color:var(--acc); color:var(--acc); }
+  #presets button { flex:1 1 30%; padding:6px 4px; }
+  #palRow { display:flex; gap:4px; margin:6px 0; }
+  #palRow input { flex:1; min-width:0; }
+  #status { color:var(--dim); margin-top:10px; min-height:1.4em; font-size:11px; }
+  .hint { color:#555; margin-top:12px; }
+  @media (max-width: 700px) {
+    body { flex-direction:column; height:auto; }
+    #stage { flex:none; height:72vh; }
+    #panel { width:100%; border-left:0; border-top:1px solid #222; }
+  }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="cv"></canvas></div>
+<div id="panel">
+  <h1>Linefall</h1>
+  <div class="row"><label>seed</label><input type="text" id="seed"><button id="bDice" title="R">🎲</button></div>
+  <div class="btns">
+    <button id="bNew" title="Space">new</button>
+    <button id="bMut" title="M">mutate</button>
+    <button id="bCol" title="C">цвет</button>
+    <button id="bAnim" title="A">animate</button>
+    <button id="bSave" title="S">save png</button>
+  </div>
+  <div class="row"><label>формат</label><select id="format"></select><span></span></div>
+  <div class="row"><label>экспорт</label><select id="exp"></select><span></span></div>
+  <div class="row"><label>фон в png</label><select id="expBg"></select><span></span></div>
+  <div class="row"><label>качество</label><select id="quality"></select><span></span></div>
+  <h2>Пресеты</h2>
+  <div class="btns" id="presets"></div>
+  <h2>Палитра нитей</h2>
+  <div class="row"><label>набор</label><select id="palSel"></select><span></span></div>
+  <div id="palRow"></div>
+  <div class="btns">
+    <button id="pAdd">+</button><button id="pDel">−</button>
+    <button id="pRev">реверс</button><button id="pShuf">микс</button><button id="pRnd">новая</button>
+  </div>
+  <div id="controls"></div>
+  <div id="status"></div>
+  <div class="hint">
+    Сцена — изометрическая архитектура: тонкие плиты-террасы, стены, блоки и стеклянные
+    призмы; четыре типа композиции, всё раскладывается по seed. Поверхности не закрашены, а
+    прошиты нитями — это сечения формы вертикальными плоскостями, поэтому нить спускается по
+    стене, перегибается в скруглении у основания и уходит по полу. Потоки — свет, стекающий
+    с кромки стены вдоль нитей: копится к подножию, расходится веером, дымится и
+    раскладывается в спектр, торцы стен дают радугу. Призмы — полупрозрачные кубы с
+    глитч-ячейками, которые стекают вниз. Свисающие стены растворяются в фоне.<br><br>
+    тяни — камера, Shift+тяни — свет, Alt+тяни — сдвиг<br>
+    колесо — масштаб, двойной клик по ползунку — сброс<br>
+    Space / R — новая, M — мутация, C — палитра<br>
+    A — анимация, H — панель, 1–7 — пресеты, S — PNG<br>
+    Ссылка в адресной строке хранит текущее состояние.
+  </div>
+</div>
+<script>
+// ---------- rng ----------
+function hashStr(s) {
+  let h = 1779033703 ^ s.length;
+  for (let i = 0; i < s.length; i++) { h = Math.imul(h ^ s.charCodeAt(i), 3432918353); h = h << 13 | h >>> 19; }
+  h = Math.imul(h ^ h >>> 16, 2246822507); h = Math.imul(h ^ h >>> 13, 3266489909);
+  return (h ^ h >>> 16) >>> 0;
+}
+function mulberry32(a) {
+  return () => { a |= 0; a = a + 0x6D2B79F5 | 0; let t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t; return ((t ^ t >>> 14) >>> 0) / 4294967296; };
+}
+function rngFrom(a) {
+  const n = mulberry32(a);
+  const r = () => n();
+  r.range = (x, y) => x + (y - x) * n();
+  r.int = (x, y) => x + Math.floor(n() * (y - x + 1));
+  r.pick = arr => arr[Math.floor(n() * arr.length)];
+  r.chance = p => n() < p;
+  r.wpick = (items, ws) => { let s = 0; for (const w of ws) s += w; let v = n() * s;
+    for (let i = 0; i < items.length; i++) if ((v -= ws[i]) < 0) return items[i]; return items[items.length - 1]; };
+  return r;
+}
+const makeRng = s => rngFrom(hashStr(s));
+const randSeed = () => Math.random().toString(36).slice(2, 8);
+const clamp = (v, a = 0, b = 1) => v < a ? a : v > b ? b : v;
+const lerp = (a, b, t) => a + (b - a) * t;
+const fract = v => v - Math.floor(v);
+const wrapDeg = v => ((v + 180) % 360 + 360) % 360 - 180;
+const TAU = Math.PI * 2, D2R = Math.PI / 180;
+
+// ---------- color ----------
+const hex2rgb = h => { h = h.replace('#', ''); return [0, 2, 4].map(i => parseInt(h.substr(i, 2), 16) / 255); };
+const toLin = c => c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
+const toGam = c => c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+const lin3 = h => hex2rgb(h).map(toLin);
+function oklch2hex(L, C, H) {
+  const a = C * Math.cos(H * Math.PI / 180), b = C * Math.sin(H * Math.PI / 180);
+  const l = (L + 0.3963377774 * a + 0.2158037573 * b) ** 3;
+  const m = (L - 0.1055613458 * a - 0.0638541728 * b) ** 3;
+  const s = (L - 0.0894841775 * a - 1.2914855480 * b) ** 3;
+  const rgb = [4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+              -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+              -0.0041960863 * l - 0.7034186147 * m + 1.7076147010 * s];
+  return '#' + rgb.map(c => Math.round(clamp(toGam(clamp(c))) * 255).toString(16).padStart(2, '0')).join('');
+}
+// eight samples of the spectrum, violet to red, scaled so that together they make white
+function specColors() {
+  const out = [], sum = [0, 0, 0];
+  for (let j = 0; j < 8; j++) {
+    const h = 0.76 * (1 - j / 7);
+    const c = [0, 2 / 3, 1 / 3].map(o => { const v = clamp(Math.abs(fract(h + o) * 6 - 3) - 1); return v * v * (3 - 2 * v); });
+    out.push(c); c.forEach((v, k) => sum[k] += v);
+  }
+  return out.map(c => c.map((v, k) => v / sum[k]));
+}
+
+// threads pick their colours by rank, so a box keeps its look when the palette changes length
+const PALETTES = {
+  'референс': ['#efeef2', '#d2cdd6', '#8a3946', '#4e3055', '#a8a3ae', '#2b2731'],
+  'мел':      ['#f3f3ef', '#d8d8d2', '#b2b2ac', '#8e8e88', '#e7e7e1'],
+  'ржавчина': ['#f1e7dc', '#c66b3c', '#7c2e22', '#e9b27b', '#3a2420'],
+  'неон':     ['#ecfbff', '#00e5ff', '#ff3bd4', '#c8ff3a', '#7a5cff'],
+  'чернила':  ['#16151a', '#2c2a33', '#5a2630', '#1d2a44', '#444049'],
+  'лёд':      ['#f4fbff', '#bfe3f2', '#7fb4d6', '#d9ecf5', '#4a6f8f'],
+  'закат':    ['#ffe9d6', '#ff7a4a', '#ffbf5a', '#c42d5c', '#5b2a86'],
+};
+
+// ---------- params ----------
+// [key, label, min, max, step, group, extra]; extra: {sel:[...]}, {show:fn}, {color:1}
+const HASP = s => s.prisms > 0, HASF = s => s.flows > 0, HASG = s => s.slices > 0;
+const SPEC = [
+  ['arch', 'тип', 0, 4, 1, 'Композиция', { sel: ['авто', 'стена', 'гребень', 'ступени', 'квартал'] }],
+  ['walls', 'стены', 0, 6, 1, 'Композиция'],
+  ['wallH', 'высота стен', 0.3, 2, 0.01, 'Композиция'],
+  ['wallT', 'толщина стен', 0.2, 3, 0.01, 'Композиция'],
+  ['terr', 'террасы', 0, 5, 1, 'Композиция'],
+  ['slabT', 'толщина плит', 0.06, 2, 0.01, 'Композиция'],
+  ['mass', 'массив', 0, 1, 0.01, 'Композиция'],
+  ['hang', 'свисание', 0, 1, 0.01, 'Композиция'],
+  ['blocks', 'блоки', 0, 10, 1, 'Композиция'],
+  ['prisms', 'призмы', 0, 16, 1, 'Композиция'],
+  ['prismSize', 'размер призм', 0.3, 2.5, 0.01, 'Композиция', { show: HASP }],
+  ['fillet', 'скругление', 0, 2, 0.01, 'Композиция'],
+  ['bevel', 'фаска', 0, 1, 0.01, 'Композиция'],
+
+  ['density', 'частота', 4, 70, 0.5, 'Нити'],
+  ['lineW', 'толщина', 0.03, 0.8, 0.01, 'Нити'],
+  ['famA', 'вдоль x', 0, 1, 0.01, 'Нити'],
+  ['famB', 'вдоль y', 0, 1, 0.01, 'Нити'],
+  ['famC', 'горизонтали', 0, 1, 0.01, 'Нити'],
+  ['angle', 'угол', -90, 90, 1, 'Нити'],
+  ['lineVar', 'разброс', 0, 1, 0.01, 'Нити'],
+  ['gaps', 'пропуски', 0, 0.95, 0.01, 'Нити'],
+  ['groups', 'смешение', 0, 1, 0.01, 'Нити'],
+  ['jitter', 'пестрота', 0, 1, 0.01, 'Нити'],
+  ['floorTone', 'на полу', 0, 1.5, 0.01, 'Нити'],
+  ['edges', 'кромки', 0, 1, 0.01, 'Нити'],
+
+  ['flows', 'потоки', 0, 6, 1, 'Потоки'],
+  ['flowAmt', 'яркость', 0, 4, 0.01, 'Потоки', { show: HASF }],
+  ['rainbow', 'радуга', 0, 3, 0.01, 'Потоки', { show: HASF }],
+  ['flowW', 'ширина', 0.2, 3, 0.01, 'Потоки', { show: HASF }],
+  ['spread', 'веер', 0, 1.5, 0.01, 'Потоки', { show: HASF }],
+  ['flowLen', 'длина', 0.5, 20, 0.1, 'Потоки', { show: HASF }],
+  ['rise', 'пик', 0.05, 2, 0.01, 'Потоки', { show: HASF }],
+  ['streaks', 'полосы', 0, 1, 0.01, 'Потоки', { show: HASF }],
+  ['flowEdge', 'мягкость края', 0.02, 1, 0.01, 'Потоки', { show: HASF }],
+  ['disp', 'дисперсия', 0, 1.5, 0.01, 'Потоки', { show: HASF }],
+  ['smoke', 'дым', 0, 1, 0.01, 'Потоки', { show: HASF }],
+  ['wobble', 'извив', 0, 1, 0.01, 'Потоки', { show: HASF }],
+  ['haze', 'дымка', 0, 1, 0.01, 'Потоки', { show: HASF }],
+  ['flowInk', 'тушь', 0, 1, 0.01, 'Потоки', { show: HASF }],
+  ['flowCol', 'цвет', 0, 0, 0, 'Потоки', { color: 1, show: HASF }],
+
+  ['prismOp', 'плотность', 0, 1, 0.01, 'Призмы', { show: HASP }],
+  ['cells', 'ячейки', 0.5, 10, 0.1, 'Призмы', { show: HASP }],
+  ['cellAmt', 'цветные', 0, 1, 0.01, 'Призмы', { show: HASP }],
+  ['prismSat', 'насыщенность', 0, 1.5, 0.01, 'Призмы', { show: HASP }],
+  ['irid', 'перелив', 0, 2, 0.01, 'Призмы', { show: HASP }],
+  ['drip', 'стекание', 0, 4, 0.01, 'Призмы', { show: HASP }],
+  ['prismLines', 'нити', 0, 1, 0.01, 'Призмы', { show: HASP }],
+  ['prismEdge', 'рёбра', 0, 1, 0.01, 'Призмы', { show: HASP }],
+  ['prismGlow', 'свечение', 0, 2, 0.01, 'Призмы', { show: HASP }],
+
+  ['slices', 'срезы', 0, 1, 0.01, 'Глитч'],
+  ['shift', 'сдвиг', 0, 1, 0.01, 'Глитч', { show: HASG }],
+  ['sliceH', 'высота среза', 0.002, 0.1, 0.001, 'Глитч', { show: HASG }],
+  ['aberr', 'аберрация', 0, 1, 0.01, 'Глитч'],
+
+  ['bg', 'фон', 0, 0, 0, 'Свет и фон', { color: 1 }],
+  ['fill', 'заливка', 0, 1, 0.01, 'Свет и фон'],
+  ['shade', 'светотень', 0, 1, 0.01, 'Свет и фон'],
+  ['lAz', 'азимут света', -180, 180, 1, 'Свет и фон'],
+  ['lEl', 'высота света', 0, 90, 1, 'Свет и фон'],
+  ['dissolve', 'растворение', 0.3, 12, 0.1, 'Свет и фон'],
+  ['dissolveOff', 'граница', -4, 4, 0.01, 'Свет и фон'],
+  ['bloom', 'свечение', 0, 2, 0.01, 'Свет и фон'],
+  ['bloomR', 'радиус', 0.2, 3, 0.01, 'Свет и фон', { show: s => s.bloom > 0 }],
+  ['bloomThr', 'порог', 0, 2, 0.01, 'Свет и фон', { show: s => s.bloom > 0 }],
+  ['bgGrad', 'градиент фона', -1, 1, 0.01, 'Свет и фон'],
+  ['exposure', 'экспозиция', 0.3, 2.5, 0.01, 'Свет и фон'],
+  ['contrast', 'контраст', 0.5, 1.6, 0.01, 'Свет и фон'],
+  ['vignette', 'виньетка', 0, 1, 0.01, 'Свет и фон'],
+  ['grain', 'зерно', 0, 0.2, 0.002, 'Свет и фон'],
+
+  ['az', 'поворот', -180, 180, 1, 'Камера'],
+  ['el', 'наклон', 5, 89, 1, 'Камера'],
+  ['zoom', 'масштаб', 0.3, 4, 0.01, 'Камера'],
+  ['panX', 'сдвиг x', -2, 2, 0.01, 'Камера'],
+  ['panY', 'сдвиг y', -2, 2, 0.01, 'Камера'],
+
+  ['flowSpeed', 'течение', 0, 2, 0.01, 'Анимация'],
+  ['spin', 'вращение', -1, 1, 0.01, 'Анимация'],
+];
+// these change the geometry, everything else is a uniform
+const FORM_KEYS = ['arch', 'walls', 'wallH', 'wallT', 'terr', 'slabT', 'mass', 'hang', 'blocks', 'prisms', 'prismSize', 'flows'];
+// these only touch the final composite, so moving them skips the expensive pass
+const POST_KEYS = new Set(['bloom', 'bloomR', 'bloomThr', 'exposure', 'contrast', 'vignette', 'grain', 'aberr', 'bgGrad']);
+
+const DEFAULTS = {
+  arch: 1, walls: 2, wallH: 1, wallT: 1, terr: 3, slabT: 0.3, mass: 0.15, hang: 0.5, blocks: 3, prisms: 9, prismSize: 1,
+  fillet: 1.3, bevel: 0,
+  density: 30, lineW: 0.3, famA: 1, famB: 1, famC: 0, angle: 0, lineVar: 0.55, gaps: 0.12, groups: 0.15, jitter: 0.15,
+  floorTone: 0.12, edges: 0.25,
+  flows: 3, flowAmt: 2.6, rainbow: 2.2, flowW: 1, spread: 0.35, flowLen: 3, rise: 0.9, streaks: 0.7, flowEdge: 0.35,
+  disp: 0.6, smoke: 0.6, wobble: 0.5, haze: 0.4, flowInk: 0, flowCol: '#f4f6ff',
+  prismOp: 0.7, cells: 3, cellAmt: 0.38, prismSat: 0.9, irid: 0.8, drip: 1, prismLines: 0.4, prismEdge: 0.6, prismGlow: 0.35,
+  slices: 0.08, shift: 0.12, sliceH: 0.012, aberr: 0.1,
+  bg: '#59595b', fill: 0.35, shade: 0.5, lAz: -60, lEl: 25, dissolve: 3, dissolveOff: 0.4,
+  bloom: 0.55, bloomR: 1, bloomThr: 0.8, bgGrad: 0, exposure: 1, contrast: 1.05, vignette: 0, grain: 0.03,
+  az: -48, el: 26, zoom: 1, panX: 0, panY: 0,
+  flowSpeed: 0.4, spin: 0,
+  pal: PALETTES['референс'].slice(),
+};
+
+// a preset may pin a seed: then it is one particular scene, not just a look
+const PRESETS = {
+  'референс': { seed: 'r6' },
+  'ночь': { seed: 'night', bg: '#0c0c11', pal: PALETTES['лёд'].slice(), fill: 0.12, floorTone: 0.25, flowAmt: 2.2,
+    rainbow: 2.4, bloom: 1.3, haze: 0.45, edges: 0.3 },
+  'бумага': { seed: 'paper', bg: '#e9e6df', pal: PALETTES['чернила'].slice(), lineW: 0.42, density: 24, floorTone: 0.9,
+    fill: 0.25, flowInk: 1, flowAmt: 1.6, haze: 0.5, bloom: 0, rainbow: 1.6, aberr: 0.05, prismOp: 0.6, slices: 0 },
+  'водопад': { seed: 'falls', arch: 2, walls: 4, flows: 6, flowAmt: 1.5, spread: 0.6, haze: 0.25, bloom: 0.4, prisms: 5 },
+  'стекло': { seed: 'glass', arch: 3, prisms: 16, prismSize: 1.5, prismOp: 0.6, cellAmt: 0.55, drip: 2, flows: 2 },
+  'чертёж': { seed: 'plan', arch: 4, bg: '#173a66', pal: ['#eef4ff', '#a9c8ff', '#ffffff', '#7fa6e0'], prisms: 0,
+    famC: 0.35, edges: 0.7, fill: 0.15, floorTone: 0.6, flows: 2, rainbow: 0.5, bloom: 0.4, slices: 0, aberr: 0 },
+  'глитч': { seed: 'glitch', slices: 0.45, shift: 0.55, sliceH: 0.02, aberr: 0.9, cellAmt: 0.75, prisms: 14, drip: 2.5 },
+};
+const presetState = name => { const p = PRESETS[name]; const s = { ...DEFAULTS, ...p, pal: (p.pal || DEFAULTS.pal).slice() }; delete s.seed; return s; };
+let S = presetState('референс');
+let seed = PRESETS['референс'].seed;
+let animating = false, tAnim = 0;
+
+const FORMATS = { sq: ['1:1', 1], p45: ['4:5', 4 / 5], p23: ['2:3', 2 / 3], p916: ['9:16', 9 / 16], l32: ['3:2', 3 / 2], l169: ['16:9', 16 / 9] };
+let format = 'sq';
+const EXPORTS = { 1080: '1080 px', 2160: '2160 px', 3240: '3240 px', 4320: '4320 px' };
+let expSize = 2160;
+const EXP_BG = { 0: 'с фоном', 1: 'прозрачный' };
+let expBg = 0;
+const QUALITY = { 1: '1× (быстро)', 2: '2×2', 3: '3×3' };
+let quality = 2;
+
+// ---------- scene ----------
+// every opaque box is a column: its bottom sits far below, where the picture has long dissolved
+const MAXB = 40, MAXP = 16, MAXF = 8, ZCOL = -60;
+const snap = (v, g = 0.25) => Math.round(v / g) * g;
+const overlaps = (a, b, m = 0) => a.x0 < b.x1 + m && b.x0 < a.x1 + m && a.y0 < b.y1 + m && b.y0 < a.y1 + m;
+
+// The camera looks from +x, -y, so "far" is -x and +y and walls are put there, facing the viewer.
+// Every slot draws its numbers whether it is used or not, so count sliders add and remove parts
+// instead of reshuffling the rest.
+function buildScene(s, sd) {
+  const B = [], P = [], F = [], W = [], plats = [];
+  const arch = s.arch > 0 ? s.arch : 1 + Math.floor(makeRng(sd + ':arch')() * 4);
+  const rP = makeRng(sd + ':plat'), rW = makeRng(sd + ':wall'), rB = makeRng(sd + ':block');
+  const rQ = makeRng(sd + ':prism'), rF = makeRng(sd + ':flow'), rM = makeRng(sd + ':mat');
+  const rS = makeRng(sd + ':solid'), rH = makeRng(sd + ':hang');
+  const nums = (r, n) => Array.from({ length: n }, r);
+  const thick = a => (0.14 + 0.32 * a) * s.wallT, height = a => (2.6 + 2.4 * a) * s.wallH;
+
+  // kf is the fillet size relative to the "скругление" slider
+  const add = (x0, x1, y0, y1, z0, z1, role, kf, extra = {}) => {
+    if (B.length >= MAXB || Math.abs(x1 - x0) < 0.02 || Math.abs(y1 - y0) < 0.02) return null;
+    const b = { x0: Math.min(x0, x1), x1: Math.max(x0, x1), y0: Math.min(y0, y1), y1: Math.max(y0, y1), z0, z1, role, kf, fit: true, ...extra };
+    B.push(b); return b;
+  };
+  // platforms are thin slabs floating in the air, or now and then solid down into the void
+  const plat = (x0, x1, y0, y1, z1, extra) => {
+    const solid = rS() < s.mass;
+    const p = add(x0, x1, y0, y1, solid ? ZCOL : z1 - s.slabT, z1, 'plat', 0.4, extra);
+    if (p && p.fit) plats.push(p);
+    return p;
+  };
+  const inside = (b, x, y) => x >= b.x0 && x <= b.x1 && y >= b.y0 && y <= b.y1;
+  const groundAt = (x, y) => { let t = -Infinity; for (const b of B) if (inside(b, x, y)) t = Math.max(t, b.z1); return t; };
+
+  // lower terraces stepping out of a platform, mostly towards the viewer; some run off into the distance.
+  // With front set, the first two step out towards the viewer on both sides and the third runs away
+  const terraces = (n, front) => {
+    const out = [plats[0]];
+    let d0 = 0;
+    for (let i = 0; i < 6; i++) {
+      const a = nums(rP, 9);
+      if (i >= n) continue;
+      const par = front && i < 2 ? out[0] : a[0] < 0.55 ? out[out.length - 1] : out[Math.floor(a[1] * out.length)];
+      let dir = a[2] < 0.36 ? 0 : a[2] < 0.72 ? 1 : a[2] < 0.86 ? 2 : 3;   // +x, -y, -x, +y
+      if (front && i === 0) dir = d0 = a[2] < 0.5 ? 0 : 1;
+      else if (front && i === 1) dir = 1 - d0;
+      const alongX = dir === 0 || dir === 2, sg = dir === 0 || dir === 3 ? 1 : -1;
+      const endless = front && i === 2 ? true : a[3] < 0.2;
+      const ext = endless ? 16 + 10 * a[4] : 1.2 + 3 * a[4], ovl = 0.3 + 0.7 * a[5];
+      const lo = alongX ? par.x0 : par.y0, hi = alongX ? par.x1 : par.y1;
+      const plo = alongX ? par.y0 : par.x0, span = (alongX ? par.y1 : par.x1) - plo;
+      const wid = Math.max(0.75, span * (endless ? 0.25 + 0.3 * a[6] : 0.4 + 0.7 * a[6]));
+      const q0 = snap(plo + (1.3 * a[7] - 0.15) * (span - wid)), q1 = snap(q0 + wid);
+      const r0 = snap(sg > 0 ? hi - ovl : lo - ext), r1 = snap(sg > 0 ? hi + ext : lo + ovl);
+      const z = par.z1 - snap(0.3 + 1.2 * a[8]);
+      const t = alongX ? plat(r0, r1, q0, q1, z, { fit: !endless }) : plat(q0, q1, r0, r1, z, { fit: !endless });
+      if (t && !endless) out.push(t);
+    }
+  };
+
+  // a thin wall on a platform; u runs across the platform from its far side, v along it
+  const wall = (par, ax, u, v, len, t, H, kf) => {
+    let x0, x1, y0, y1;
+    if (ax === 'x') {
+      const L = Math.min(len, par.y1 - par.y0), x = snap(lerp(par.x0 + 0.2, par.x1 - 0.2 - t, u), 0.05), y = snap(lerp(par.y0, par.y1 - L, v));
+      [x0, x1, y0, y1] = [x, x + t, y, snap(y + L)];
+    } else {
+      const L = Math.min(len, par.x1 - par.x0), y = snap(lerp(par.y1 - 0.2, par.y0 + 0.2 + t, u), 0.05), x = snap(lerp(par.x0, par.x1 - L, v));
+      [x0, x1, y0, y1] = [x, snap(x + L), y - t, y];
+    }
+    // some walls go on through their slab and hang down below it like curtains
+    const hangs = rH() < s.hang;
+    if (W.some(w => overlaps(w, { x0, x1, y0, y1 }, 0.5))) return null;
+    const w = add(x0, x1, y0, y1, hangs ? ZCOL : par.z0 + 0.02, par.z1 + H, 'wall', kf, { ax, base: par.z1 });
+    if (w) W.push(w);
+    return w;
+  };
+  const extraWalls = (n, Hmax, from = 1) => {
+    for (let i = from; i < 6; i++) {
+      const a = nums(rW, 8);
+      if (i >= n || !plats.length) continue;
+      const par = plats[Math.floor(a[0] * plats.length)], ax = a[1] < 0.6 ? 'x' : 'y';
+      for (let tr = 0; tr < 9; tr++)
+        if (wall(par, ax, fract(a[2] + 0.618 * tr), fract(a[3] + 0.382 * tr), 0.8 + 2.6 * a[4],
+          (0.12 + 0.3 * a[5]) * s.wallT, Hmax * (0.25 + 0.5 * a[6]), 0.6 + 0.6 * a[7])) break;
+    }
+  };
+
+  // benches on the platforms and steps hanging over their edges
+  const blocks = n => {
+    for (let i = 0; i < 10; i++) {
+      const a = nums(rB, 9);
+      if (i >= n || !plats.length) continue;
+      const par = plats[Math.floor(a[0] * plats.length)];
+      const sx = snap(0.5 + 1.3 * a[1]), sy = snap(0.5 + 1.3 * a[2]);
+      let x0, y0, z1, z0 = par.z0;
+      if (a[3] < 0.4) {
+        const dir = Math.floor(a[4] * 4);
+        if (dir === 0) { x0 = par.x1 - sx * 0.4; y0 = lerp(par.y0, par.y1 - sy, a[5]); }
+        else if (dir === 2) { x0 = par.x0 - sx * 0.6; y0 = lerp(par.y0, par.y1 - sy, a[5]); }
+        else if (dir === 1) { y0 = par.y0 - sy * 0.6; x0 = lerp(par.x0, par.x1 - sx, a[5]); }
+        else { y0 = par.y1 - sy * 0.4; x0 = lerp(par.x0, par.x1 - sx, a[5]); }
+        z1 = par.z1 - snap(0.25 + 0.45 * a[6]);
+        if (par.z0 > ZCOL) z0 = z1 - s.slabT;
+      } else {
+        x0 = lerp(par.x0, par.x1 - sx, a[4]); y0 = lerp(par.y0, par.y1 - sy, a[5]);
+        z1 = par.z1 + snap(0.25 + 1.3 * a[6] * a[6]);
+      }
+      const r = { x0: snap(x0), x1: snap(x0) + sx, y0: snap(y0), y1: snap(y0) + sy };
+      if (!W.some(w => overlaps(w, r, 0.15))) add(r.x0, r.x1, r.y0, r.y1, z0, z1, 'block', 0.3);
+    }
+  };
+
+  // glass cubes around an anchor: on the ground, stacked on each other, or hanging past an edge
+  const prisms = (n, ax, ay, az, spread) => {
+    for (let i = 0; i < MAXP; i++) {
+      const a = nums(rQ, 10);
+      if (i >= n) continue;
+      const sz = (0.3 + 0.6 * a[0]) * s.prismSize;
+      let hx = sz / 2, hy = sz / 2, hz = sz / 2;
+      if (a[1] < 0.2) hz *= 1.8; else if (a[1] < 0.32) { hx *= 1.6; hz *= 0.5; } else if (a[1] < 0.44) { hy *= 1.6; hz *= 0.5; }
+      for (let tr = 0; tr < 8; tr++) {
+        const ang = (a[2] + 0.618 * tr) * TAU, rad = spread * Math.sqrt(fract(a[3] + 0.371 * tr));
+        const cx = snap(ax + Math.cos(ang) * rad, 0.125), cy = snap(ay + Math.sin(ang) * rad, 0.125);
+        const r = { x0: cx - hx, x1: cx + hx, y0: cy - hy, y1: cy + hy };
+        if (W.some(w => overlaps(w, r, 0.05))) continue;
+        let z0 = -Infinity;
+        for (const [px, py] of [[cx, cy], [r.x0 + 0.05, r.y0 + 0.05], [r.x1 - 0.05, r.y0 + 0.05], [r.x0 + 0.05, r.y1 - 0.05], [r.x1 - 0.05, r.y1 - 0.05]])
+          z0 = Math.max(z0, groundAt(px, py));
+        for (const p of P) if (overlaps(p, r, -0.03)) z0 = Math.max(z0, p.cz + p.hz);
+        if (!isFinite(z0)) z0 = az - 0.4 - 2 * a[4];
+        if (a[5] < 0.25) z0 -= hz * a[6];
+        P.push({ ...r, cx, cy, cz: z0 + hz, hx, hy, hz, drip: 0.3 + 1.4 * a[7], hue: a[8] });
+        break;
+      }
+    }
+  };
+
+  // light poured over walls: the tallest gets a broad flow over its top and a dispersed one off its front end
+  const flows = n => {
+    const ws = W.slice().sort((a, b) => (b.z1 - b.base) - (a.z1 - a.base)), cand = [];
+    ws.forEach((w, i) => { cand.push([w, false]); if (i === 0) cand.push([w, true]); });
+    ws.slice(1).forEach(w => cand.push([w, true]));
+    for (let i = 0; i < MAXF; i++) {
+      const a = nums(rF, 8);
+      if (i >= n || i >= cand.length) continue;
+      const [w, end] = cand[i], tx = w.ax === 'x';
+      const f = { zt: w.z1, h: w.z1 - w.base, amp: 0.75 + 0.5 * a[2], spread: 0.6 + 0.8 * a[3], len: 0.6 + 0.8 * a[4], ph: a[6] };
+      if (!end) {
+        // keep the broad white flow away from the end that faces the viewer, where the dispersed one runs
+        const v0 = tx ? w.y0 : w.x0, v1 = tx ? w.y1 : w.x1, at = 0.45 + 0.4 * a[0];
+        Object.assign(f, { axis: tx ? 0 : 1, c0: tx ? w.x0 : w.y0, c1: tx ? w.x1 : w.y1, mask: 3,
+          vc: lerp(v0, v1, tx ? at : 1 - at), hw: 0.1 + (v1 - v0) * (0.1 + 0.15 * a[1]), disp: 0.3 + 0.6 * a[5], kind: 0 });
+      } else if (tx) Object.assign(f, { axis: 1, c0: w.y0, c1: w.y0, mask: 1, vc: (w.x0 + w.x1) / 2, hw: (w.x1 - w.x0) / 2 + 0.04, disp: 2 + 1.5 * a[5], kind: 1 });
+      else Object.assign(f, { axis: 0, c0: w.x1, c1: w.x1, mask: 2, vc: (w.y0 + w.y1) / 2, hw: (w.y1 - w.y0) / 2 + 0.04, disp: 2 + 1.5 * a[5], kind: 1 });
+      F.push(f);
+    }
+  };
+
+  let main = null;
+  if (arch === 1) {
+    // стена: a terrace with a tall wall near its far edge and lower steps towards the viewer
+    const a = nums(rP, 4);
+    plat(-snap(2.2 + 1.6 * a[0]), snap(2.5 + 2 * a[1]), -snap(2.5 + 2 * a[2]), snap(2 + 1.5 * a[3]), 0);
+    terraces(s.terr, true);
+    const w = nums(rW, 10), p0 = plats[0], ax = w[0] < 0.65 ? 'x' : 'y';
+    const side = ax === 'x' ? p0.y1 - p0.y0 : p0.x1 - p0.x0;
+    if (s.walls > 0) main = wall(p0, ax, 0.12 * w[1], 0.15 + 0.7 * w[2], side * (0.45 + 0.4 * w[3]), thick(w[4]), height(w[5]), 0.8 + 0.4 * w[6]);
+    // a lower companion in front of it, parallel, shifted towards the end that faces the viewer
+    if (main && s.walls > 1)
+      wall(p0, ax, 0.35 + 0.4 * w[7], ax === 'x' ? 0.05 + 0.25 * w[8] : 0.7 + 0.25 * w[8], side * (0.3 + 0.3 * w[3]),
+        thick(w[4]) * 0.8, (main.z1 - main.base) * (0.4 + 0.3 * w[9]), 0.7 + 0.4 * w[6]);
+    extraWalls(s.walls, main ? main.z1 - main.base : height(0.5), 2);
+    blocks(s.blocks);
+    // prisms gather at the front corner, where the platform steps down, or at the wall's foot
+    const q = nums(rQ, 3);
+    const anchor = main && q[0] < 0.35
+      ? (main.ax === 'x' ? [main.x1 + 0.6 + 1.2 * q[1], lerp(main.y0, main.y1, 0.2 + 0.3 * q[2]), main.base]
+                         : [lerp(main.x0, main.x1, 0.5 + 0.3 * q[2]), main.y0 - 0.6 - 1.2 * q[1], main.base])
+      : [p0.x1 - 0.4 - 0.8 * q[1], p0.y0 + 0.4 + 0.8 * q[2], p0.z1];
+    prisms(s.prisms, ...anchor, 1.4 + 0.25 * Math.sqrt(s.prisms) * s.prismSize);
+  } else if (arch === 2) {
+    // гребень: parallel fins on one wide plate, heights rising, falling or random
+    const a = nums(rP, 4);
+    plat(-snap(3 + 1.5 * a[0]), snap(3 + 1.5 * a[1]), -snap(3 + 1.5 * a[2]), snap(3 + 1.5 * a[3]), 0);
+    terraces(s.terr, true);
+    const p0 = plats[0], w = nums(rW, 2), ax = w[0] < 0.6 ? 'x' : 'y', n = s.walls + 1, mode = Math.floor(w[1] * 3);
+    const side = ax === 'x' ? p0.y1 - p0.y0 : p0.x1 - p0.x0;
+    for (let i = 0; i < 7; i++) {
+      const b = nums(rW, 5);
+      if (i >= n) continue;
+      const u = n === 1 ? 0.3 : 0.05 + 0.85 * i / (n - 1);
+      const hk = mode === 0 ? (i + 1) / n : mode === 1 ? 1 - i / n : b[0];
+      const fin = wall(p0, ax, u, b[1], side * (0.35 + 0.5 * b[2]), thick(b[3]), height(0.2 + 0.8 * hk) * (0.6 + 0.4 * hk), 0.7 + 0.5 * b[4]);
+      if (fin && (!main || fin.z1 > main.z1)) main = fin;
+    }
+    blocks(s.blocks);
+    const q = nums(rQ, 2);
+    prisms(s.prisms, lerp(p0.x0, p0.x1, 0.45 + 0.3 * q[0]), lerp(p0.y0, p0.y1, 0.25 + 0.3 * q[1]), p0.z1, 2 + 0.3 * Math.sqrt(s.prisms));
+  } else if (arch === 3) {
+    // ступени: platforms cascading down towards the viewer
+    const a0 = nums(rP, 2), dx = 0.9 + a0[0], dy = 0.9 + a0[1];
+    let x = -3, y = 3, z = 0;
+    for (let i = 0; i < 9; i++) {
+      const a = nums(rP, 5);
+      if (i >= 3 + s.terr) continue;
+      const sx = 2.5 + 2.5 * a[0], sy = 2.5 + 2.5 * a[1];
+      plat(snap(x - sx / 2), snap(x + sx / 2), snap(y - sy / 2), snap(y + sy / 2), z);
+      x += dx * (0.7 + 0.6 * a[2]); y -= dy * (0.7 + 0.6 * a[3]); z -= snap(0.35 + 0.7 * a[4]);
+    }
+    const w = nums(rW, 8), p0 = plats[0], ax = w[0] < 0.6 ? 'x' : 'y';
+    if (s.walls > 0) main = wall(p0, ax, 0.1 * w[1], 0.2 + 0.6 * w[2], (ax === 'x' ? p0.y1 - p0.y0 : p0.x1 - p0.x0) * (0.5 + 0.4 * w[3]), thick(w[4]), height(w[5]), 0.8 + 0.4 * w[6]);
+    extraWalls(s.walls, main ? main.z1 - main.base : height(0.5));
+    blocks(s.blocks);
+    const mid = plats[Math.floor(plats.length / 2)], q = nums(rQ, 2);
+    prisms(s.prisms, lerp(mid.x0, mid.x1, 0.3 + 0.4 * q[0]), lerp(mid.y0, mid.y1, 0.3 + 0.4 * q[1]), mid.z1, 1.8 + 0.3 * Math.sqrt(s.prisms));
+  } else {
+    // квартал: a grid of lots with low blocks and the odd tower
+    const a = nums(rP, 2), N = 3 + Math.floor(a[0] * 3), cs = 1.2 + 0.8 * a[1], half = N * cs / 2;
+    const base = plat(-snap(half + 0.6), snap(half + 0.6), -snap(half + 0.6), snap(half + 0.6), 0);
+    terraces(s.terr);
+    for (let j = 0; j < 5; j++) for (let i = 0; i < 5; i++) {
+      const b = nums(rB, 5);
+      if (i >= N || j >= N || b[0] > 0.35 + 0.065 * s.blocks) continue;
+      const fx = 0.5 + 0.45 * b[1], fy = 0.5 + 0.45 * b[2], cx = -half + (i + 0.5) * cs, cy = -half + (j + 0.5) * cs;
+      const tower = b[3] < 0.15, hgt = tower ? (2 + 2.5 * b[4]) * s.wallH : 0.25 + 1.3 * b[4] * b[4];
+      const blk = add(snap(cx - fx * cs / 2, 0.125), snap(cx + fx * cs / 2, 0.125), snap(cy - fy * cs / 2, 0.125), snap(cy + fy * cs / 2, 0.125),
+        tower && rH() < s.hang ? ZCOL : base.z0, hgt, tower ? 'wall' : 'block', 0.35);
+      // towers shed flows like walls, across their narrower side
+      if (blk && tower) { blk.ax = blk.x1 - blk.x0 < blk.y1 - blk.y0 ? 'x' : 'y'; blk.base = 0; W.push(blk); }
+    }
+    extraWalls(s.walls + 1, height(0.6));
+    for (const w of W) if (!main || w.z1 > main.z1) main = w;
+    const q = nums(rQ, 2);
+    prisms(s.prisms, -half + 2 * half * q[0], -half + 2 * half * q[1], 0, half);
+  }
+  flows(s.flows);
+
+  // which part of the palette each box draws its threads from, and how bright they are
+  for (const b of B) {
+    const a = nums(rM, 3);
+    // the main wall takes the darker end of the palette, so the light poured over it stands out
+    b.pal = b === main ? 0.72 : a[0];
+    b.tone = b === main ? 1 : b.role === 'wall' ? 0.75 + 0.3 * a[1] : 0.85 + 0.3 * a[1];
+    b.fill = 0.9 + 0.2 * a[2];
+  }
+  const fitPl = plats.filter(p => p.fit);
+  const zBase = fitPl.length ? Math.min(...fitPl.map(p => p.z1)) : 0;
+  return { B, P, F, arch, zBase };
+}
+let scene = null, sceneKey = '';
+function getScene() {
+  const key = seed + '|' + FORM_KEYS.map(k => S[k]).join(',');
+  if (key !== sceneKey) { scene = buildScene(S, seed); sceneKey = key; }
+  return scene;
+}
+
+// orthographic camera that fits the scene's framing boxes
+function camera(aspect, sc, zf0, zf1) {
+  const az = S.az * D2R + 1e-4, el = S.el * D2R;
+  const ca = Math.cos(az), sa = Math.sin(az), ce = Math.cos(el), se = Math.sin(el);
+  const D = [-ca * ce, -sa * ce, -se], R = [-sa, ca, 0], U = [-ca * se, -sa * se, ce];
+  let x0 = 1e9, x1 = -1e9, y0 = 1e9, y1 = -1e9;
+  const pt = (x, y, z) => {
+    const px = x * R[0] + y * R[1], py = x * U[0] + y * U[1] + z * U[2];
+    x0 = Math.min(x0, px); x1 = Math.max(x1, px); y0 = Math.min(y0, py); y1 = Math.max(y1, py);
+  };
+  const zl = zf1 - 0.25 * (zf1 - zf0);
+  for (const b of sc.B) if (b.fit) for (const x of [b.x0, b.x1]) for (const y of [b.y0, b.y1]) { pt(x, y, b.z1); pt(x, y, Math.max(b.z0, zl)); }
+  for (const p of sc.P) for (const x of [p.x0, p.x1]) for (const y of [p.y0, p.y1]) { pt(x, y, p.cz + p.hz); pt(x, y, Math.max(p.cz - p.hz, zl)); }
+  if (x0 > x1) { x0 = y0 = -5; x1 = y1 = 5; }
+  const viewH = Math.max(y1 - y0, (x1 - x0) / aspect) * 1.16 / S.zoom;
+  const cx = (x0 + x1) / 2 - S.panX * viewH * aspect * 0.5, cy = (y0 + y1) / 2 - S.panY * viewH * 0.5;
+  return { D, R, U, viewH, target: [R[0] * cx + U[0] * cy, R[1] * cx + U[1] * cy, U[2] * cy] };
+}
+
+// ---------- shaders ----------
+const VS = `#version 300 es
+void main(){ vec2 p = vec2(float((gl_VertexID << 1) & 2), float(gl_VertexID & 2)); gl_Position = vec4(p*2. - 1., 0., 1.); }`;
+
+const COMMON = `#version 300 es
+precision highp float;
+precision highp int;
+uniform float uSeedF;
+uvec3 pcg3(uvec3 v){
+  v = v*1664525u + 1013904223u;
+  v.x += v.y*v.z; v.y += v.z*v.x; v.z += v.x*v.y;
+  v ^= v >> 16u;
+  v.x += v.y*v.z; v.y += v.z*v.x; v.z += v.x*v.y;
+  return v;
+}
+vec3 h3(vec3 p){ return vec3(pcg3(uvec3(ivec3(floor(p)) + 1048576))) * (1./4294967296.); }
+`;
+
+const FS_MAIN = COMMON + `
+#define MAXB ${MAXB}
+#define MAXP ${MAXP}
+#define MAXF ${MAXF}
+out vec4 oCol;
+uniform vec2 uRes;
+uniform float uSS, uViewH, uTime, uZf0, uZf1;
+uniform vec3 uCamR, uCamU, uCamD, uTarget, uBmin, uBmax, uL, uMA, uMB, uBg, uFlowCol;
+uniform vec4 uBa[MAXB], uBb[MAXB], uBm[MAXB];
+uniform int uBN;
+uniform vec4 uPa[MAXP], uPb[MAXP];
+uniform int uPN;
+uniform vec4 uFa[MAXF], uFb[MAXF], uFc[MAXF], uFd[MAXF];
+uniform int uFN;
+uniform vec3 uPal[8];
+uniform int uPalN;
+uniform vec3 uSpec[8];
+uniform float uDensity, uLineW, uFamA, uFamB, uFamC, uLineVar, uGaps, uGroups, uJitter, uFloorTone, uEdges;
+uniform float uFlowAmt, uRainbow, uFlowW, uSpread, uFlowLen, uRise, uFlowEdge, uDisp, uSmoke, uWobble, uHaze, uFlowInk, uFlowSpeed, uStreaks;
+uniform float uPrismOp, uCells, uCellAmt, uPrismSat, uIrid, uDrip, uPrismLines, uPrismEdge, uPrismGlow;
+uniform float uSlices, uShift, uSliceH, uFill, uShade;
+
+float vn1(float x, float s){
+  float i = floor(x), f = x - i; f = f*f*(3. - 2.*f);
+  return mix(h3(vec3(i, s, uSeedF)).x, h3(vec3(i + 1., s, uSeedF)).x, f);
+}
+float vn2(vec2 p, float s){
+  vec2 i = floor(p), f = p - i; f = f*f*(3. - 2.*f);
+  float z = uSeedF + s*977.;
+  float a = h3(vec3(i, z)).x, b = h3(vec3(i + vec2(1., 0.), z)).x;
+  float c = h3(vec3(i + vec2(0., 1.), z)).x, d = h3(vec3(i + 1., z)).x;
+  return mix(mix(a, b, f.x), mix(c, d, f.x), f.y);
+}
+float fbm2(vec2 p, float s){ return 0.55*vn2(p, s) + 0.3*vn2(p*2.03 + 17.3, s + 1.) + 0.15*vn2(p*4.11 - 9.7, s + 2.); }
+vec3 spectral(float h){ vec3 c = clamp(abs(fract(h + vec3(0., 2./3., 1./3.))*6. - 3.) - 1., 0., 1.); return c*c*(3. - 2.*c); }
+vec4 over(vec4 s, vec4 d){ return s + d*(1. - s.a); }
+float comp(vec3 v, int i){ return i == 0 ? v.x : i == 1 ? v.y : v.z; }
+
+// ---- geometry: columns joined with a soft minimum, so every inner corner gets a cove ----
+float sdBox(vec3 p, vec3 c, vec3 h, float r){
+  vec3 q = abs(p - c) - h + r;
+  return length(max(q, 0.)) + min(max(q.x, max(q.y, q.z)), 0.) - r;
+}
+float smin(float a, float b, float k){ float h = max(k - abs(a - b), 0.)/k; return min(a, b) - h*h*k*0.25; }
+float boxD(int i, vec3 p){
+  vec4 a = uBa[i], b = uBb[i];
+  return sdBox(p, vec3(a.xy, 0.5*(b.x + b.y)), vec3(a.zw, 0.5*(b.x - b.y)), b.w);
+}
+float map(vec3 p){
+  float d = 1e9;
+  for (int i = 0; i < MAXB; i++){
+    if (i >= uBN) break;
+    float k = uBb[i].z, di = boxD(i, p);
+    d = k > 1e-4 ? smin(d, di, k) : min(d, di);
+  }
+  return d;
+}
+vec3 normalAt(vec3 p, float e){
+  const vec2 k = vec2(1., -1.);
+  return normalize(k.xyy*map(p + k.xyy*e) + k.yyx*map(p + k.yyx*e) + k.yxy*map(p + k.yxy*e) + k.xxx*map(p + k.xxx*e));
+}
+vec2 boxHit(vec3 ro, vec3 rd, vec3 lo, vec3 hi){
+  vec3 inv = 1./rd, t0 = (lo - ro)*inv, t1 = (hi - ro)*inv;
+  vec3 a = min(t0, t1), b = max(t0, t1);
+  return vec2(max(max(a.x, a.y), a.z), min(min(b.x, b.y), b.z));
+}
+float dissolve(float z){ return smoothstep(uZf0, uZf1, z); }
+
+// ---- threads ----
+// coverage of one sample by lines at integer u that are w samples wide; dud is the change of u per sample.
+// Lines denser than about two samples fade into their average so they never alias. Widths are a share
+// of the spacing, so a picture looks the same at any resolution
+float lineCov(float u, float dud, float w){
+  float g = abs(u - floor(u + 0.5))/max(dud, 1e-6);
+  float c = max(0., min(g + 0.5, 0.5*w) - max(g - 0.5, -0.5*w));
+  return mix(c, min(1., w*dud), smoothstep(0.3, 0.75, dud));
+}
+// how a point on the tangent plane moves when the orthographic ray steps one sample right / up
+void screenDeriv(vec3 n, float pw, out vec3 dX, out vec3 dY){
+  float nd = dot(n, uCamD); nd = nd < 0. ? min(nd, -0.04) : max(nd, 0.04);
+  dX = (uCamR - uCamD*(dot(n, uCamR)/nd))*pw;
+  dY = (uCamU - uCamD*(dot(n, uCamU)/nd))*pw;
+}
+vec3 threadCol(float id, float f, float pal, float hz){
+  float g = vn1(id*0.09 + f*31.7, 3. + f);
+  float x = fract(pal + (g - 0.5)*uGroups*2. + (hz - 0.5)*uJitter);
+  return uPal[min(int(x*float(uPalN)), uPalN - 1)];
+}
+
+// ---- flows: light that pours over a wall's top and runs down and out along the threads ----
+// fA lights the threads that run along x, fB the ones along y, fH is the haze between the threads
+void flows(vec3 p, out vec3 fA, out vec3 fB, out vec3 fH){
+  fA = vec3(0.); fB = vec3(0.); fH = vec3(0.);
+  for (int i = 0; i < MAXF; i++){
+    if (i >= uFN) break;
+    vec4 a = uFa[i], b = uFb[i], c = uFc[i];
+    bool alongY = a.x > 0.5;
+    float pk = alongY ? p.y : p.x, pv = alongY ? p.x : p.y;
+    float lo = a.y - pk, hi = pk - a.z;
+    int mask = int(b.w + 0.5);
+    if ((lo > 0.02 && (mask & 1) == 0) || (hi > 0.02 && (mask & 2) == 0)) continue;
+    // distance travelled: down from the top edge, then out across the floor
+    float s = a.w - p.z + max(max(lo, hi), 0.);
+    if (s < -0.05) continue;
+    s = max(s, 0.);
+    float ph = fract(c.w)*97.;
+    // light gathers on the way down, peaks around the foot of the wall and fades out across the floor
+    float peak = max(uRise*uFd[i].x, 0.05);
+    float env = pow(min(s/peak, 1.), 0.6)*exp(-max(s - peak, 0.)/(uFlowLen*c.y));
+    if (env < 1e-3) continue;
+    float w0 = b.y*uFlowW, w = w0*(1. + uSpread*c.x*s);
+    float st = s - uTime*uFlowSpeed;
+    float v = pv - b.x - uWobble*w*2.*(vn1(st*0.45 + ph, 5.) - 0.5);
+    float sm = mix(1., 1.8*fbm2(vec2(v/w*1.7, st*0.35) + ph, 6.), uSmoke);
+    // each wavelength drifts sideways in proportion to the distance, like a beam behind a prism
+    float D = uDisp*c.z*s*0.25;
+    vec3 col = vec3(0.);
+    for (int j = 0; j < 8; j++){
+      float x = (v + (float(j)/7. - 0.5)*D)/w;
+      col += uSpec[j]*(1. - smoothstep(1. - uFlowEdge, 1. + uFlowEdge, abs(x)));
+    }
+    col *= 1. + 2.*D/(2.*w + D);
+    bool rb = c.w >= 1.;
+    vec3 L = col*env*sm*sqrt(w0/w)*b.z*uFlowAmt*(rb ? uRainbow : 1.);
+    if (alongY) fB += L; else fA += L;
+    // the dispersed flows are thin, so they lean on the haze to read as colour
+    fH += L*(rb ? 1.8 : 1.);
+  }
+  fA *= uFlowCol; fB *= uFlowCol; fH *= uFlowCol;
+}
+
+vec4 surface(vec3 p, vec3 n, float pw){
+  // the two nearest boxes: their materials blend across the cove between them
+  int i1 = 0, i2 = 0; float d1 = 1e9, d2 = 1e9;
+  for (int i = 0; i < MAXB; i++){
+    if (i >= uBN) break;
+    float d = boxD(i, p);
+    if (d < d1){ d2 = d1; i2 = i1; d1 = d; i1 = i; } else if (d < d2){ d2 = d; i2 = i; }
+  }
+  float w2 = 0.5*(1. - smoothstep(0., max(max(uBb[i1].z, uBb[i2].z), 0.03), d2 - d1));
+  vec4 m1 = uBm[i1], m2 = uBm[i2];
+  float tone = mix(m1.x, m2.x, w2), fillT = mix(m1.z, m2.z, w2);
+
+  float lam = dot(n, uL)*0.5 + 0.5;
+  vec4 c = vec4(uBg*mix(1., 0.45 + 1.1*lam, uShade)*fillT, 1.)*uFill;
+
+  vec3 fA, fB, fH; flows(p, fA, fB, fH);
+  vec3 dX, dY; screenDeriv(n, pw, dX, dY);
+  float floorK = mix(1., uFloorTone, pow(max(n.z, 0.), 2.));
+  vec3 glow = vec3(0.);
+  for (int f = 0; f < 3; f++){
+    vec3 m = f == 0 ? uMA : f == 1 ? uMB : vec3(0., 0., 1.);
+    // a family of slicing planes says nothing on a face parallel to them
+    float wf = (f == 0 ? uFamA : f == 1 ? uFamB : uFamC)*(1. - smoothstep(0.55, 0.92, abs(dot(n, m))));
+    if (wf < 1e-3) continue;
+    float u = dot(p, m)*uDensity, dud = uDensity*length(vec2(dot(m, dX), dot(m, dY)));
+    float cov = lineCov(u, dud, uLineW/max(dud, 1e-6))*wf;
+    if (cov < 1e-4) continue;
+    float id = floor(u + 0.5);
+    vec3 h = h3(vec3(id, float(f)*7. + 1., uSeedF));
+    float b = mix(1. - uLineVar, 1., h.x)*step(uGaps, h.y);
+    vec3 lc = mix(threadCol(id, float(f), m1.y, h.z), threadCol(id, float(f), m2.y, h.z), w2)*tone*floorK;
+    c = over(vec4(lc, 1.)*cov*b, c);
+    // each thread carries its own share of the flow, so the light breaks into streaks
+    float hs = h3(vec3(id, float(f)*7. + 2., uSeedF)).x;
+    glow += (f == 0 ? fA : f == 1 ? fB : vec3(0.))*cov*mix(1., 2.4*hs*hs, uStreaks);
+  }
+  // convex edges: just inside a sharp edge the solid is thinner than the probe depth
+  if (uEdges > 0.){
+    float de = uViewH*0.0016;
+    float e = smoothstep(0.3, 0.85, 1. + map(p - n*de)/de)*uEdges;
+    vec3 ec = mix(threadCol(0., 9., m1.y, 0.5), vec3(1.), 0.5)*tone;
+    c = over(vec4(ec, 1.)*e, c);
+  }
+  vec3 light = glow + fH*uHaze*0.3;
+  // light adds up; ink darkens the pixel as it would look over the background, complementary tints and all
+  vec4 inked = vec4((c.rgb + uBg*(1. - c.a))*exp(-light*1.4), 1.);
+  c = mix(c + vec4(light, 0.), inked, uFlowInk*clamp(dot(light, vec3(2.)), 0., 1.));
+  return c*dissolve(p.z);
+}
+
+// ---- prisms: glass boxes with glitch cells that run down below them ----
+vec4 prismFace(int i, vec3 q, int ax, float sg, bool back, float pw){
+  vec3 c = uPa[i].xyz, h = uPb[i].xyz;
+  vec3 nr = vec3(ax == 0 ? sg : 0., ax == 1 ? sg : 0., ax == 2 ? sg : 0.);
+  vec3 lp = (q - c + h)/(2.*h);
+  vec3 nc = max(floor(2.*h*uCells + 0.5), 1.);
+  // below the box the bottom row of cells is smeared down
+  vec3 ci = floor(clamp(lp, 0., 0.9999)*nc);
+  ci = vec3(ax == 0 ? 60.*sg : ci.x, ax == 1 ? 60.*sg : ci.y, ax == 2 ? 60.*sg : ci.z);
+  vec3 hh = h3(ci + vec3(float(i)*131. + 3., 17., uSeedF));
+  float hue = uPa[i].w + uIrid*0.3*(lp.x + lp.y + 0.6*lp.z) + 0.11*float(ax) + (sg > 0. ? 0. : 0.33);
+  vec3 col = mix(vec3(0.92), spectral(hue), 0.45*uPrismSat)*(0.72 + 0.4*hh.z);
+  float al = uPrismOp*(0.4 + 0.3*hh.z);
+  if (hh.x < uCellAmt){
+    vec3 k = spectral(hh.y + uPa[i].w)*(0.85 + 0.5*hh.z);
+    col = mix(vec3(dot(k, vec3(0.3, 0.55, 0.15))), k, min(uPrismSat, 1.5));
+    al = uPrismOp*(0.8 + 0.2*hh.z);
+  }
+  col *= 0.7 + 0.45*(dot(nr, uL)*0.5 + 0.5);
+  if (uPrismLines > 0.){
+    vec3 dX, dY; screenDeriv(nr, pw, dX, dY);
+    for (int f = 0; f < 2; f++){
+      vec3 m = f == 0 ? uMA : uMB;
+      float wf = (f == 0 ? uFamA : uFamB)*(1. - smoothstep(0.55, 0.92, abs(dot(nr, m))));
+      if (wf < 1e-3) continue;
+      float u = dot(q, m)*uDensity, dud = uDensity*length(vec2(dot(m, dX), dot(m, dY)));
+      float cov = lineCov(u, dud, uLineW/max(dud, 1e-6))*wf*uPrismLines;
+      col = mix(col, vec3(1.), cov*0.8);
+      al += cov*0.9*(1. - al);
+    }
+  }
+  // glass edges, about a pixel wide whatever the zoom
+  if (uPrismEdge > 0. && lp.z > -1e-3){
+    vec3 e3 = min(lp, 1. - lp)*2.*h;
+    float ed = (ax == 0 ? min(e3.y, e3.z) : ax == 1 ? min(e3.x, e3.z) : min(e3.x, e3.y))/(uViewH*0.001);
+    float ec = (1. - smoothstep(0.35, 1.25, ed))*uPrismEdge;
+    col = mix(col, vec3(1.), ec*0.8);
+    al += ec*(1. - al);
+  }
+  vec3 fA, fB, fH; flows(q, fA, fB, fH);
+  vec3 em = fH*uPrismGlow*0.25;
+  float below = c.z - h.z - q.z;
+  if (below > 0.){
+    float hl = h3(vec3(ax == 0 ? ci.y : ci.x, float(i)*31. + 7., uSeedF)).x;
+    float fd = 1. - smoothstep(0., max(uPb[i].w*uDrip*(0.15 + 0.85*hl), 1e-3), below);
+    al *= fd; em *= fd;
+  }
+  if (back){ al *= 0.55; col *= 0.75; }
+  return vec4(col*al + em*(0.3 + 0.7*al), al)*dissolve(q.z);
+}
+vec4 prisms(vec3 ro, vec3 rd, float tS, vec4 acc, float pw){
+  float tn[MAXP]; int ix[MAXP]; int n = 0;
+  for (int i = 0; i < MAXP; i++){
+    if (i >= uPN) break;
+    vec3 c = uPa[i].xyz, h = uPb[i].xyz, lo = c - h;
+    lo.z -= uPb[i].w*uDrip;
+    vec2 t = boxHit(ro, rd, lo, c + h);
+    if (t.x >= t.y || t.x >= tS) continue;
+    // keep them sorted far to near
+    int j = n;
+    while (j > 0 && tn[j - 1] < t.x){ tn[j] = tn[j - 1]; ix[j] = ix[j - 1]; j--; }
+    tn[j] = t.x; ix[j] = i; n++;
+  }
+  for (int k = 0; k < MAXP; k++){
+    if (k >= n) break;
+    int i = ix[k];
+    vec3 c = uPa[i].xyz, h = uPb[i].xyz, lo = c - h, hi = c + h;
+    lo.z -= uPb[i].w*uDrip;
+    vec3 inv = 1./rd, t0 = (lo - ro)*inv, t1 = (hi - ro)*inv;
+    vec3 a = min(t0, t1), b = max(t0, t1);
+    float tN = max(max(a.x, a.y), a.z), tF = min(min(b.x, b.y), b.z);
+    int axN = a.x >= a.y && a.x >= a.z ? 0 : a.y >= a.z ? 1 : 2;
+    int axF = b.x <= b.y && b.x <= b.z ? 0 : b.y <= b.z ? 1 : 2;
+    if (tF < tS) acc = over(prismFace(i, ro + rd*tF, axF, sign(comp(rd, axF)), true, pw), acc);
+    acc = over(prismFace(i, ro + rd*tN, axN, -sign(comp(rd, axN)), false, pw), acc);
+  }
+  return acc;
+}
+
+// ---- glitch: some rows of the picture are rendered with a sideways offset ----
+float sliceShift(float y){
+  float sh = 0.;
+  for (int l = 0; l < 2; l++){
+    float bh = uSliceH*(l == 0 ? 1. : 4.3);
+    vec3 h = h3(vec3(floor(y/bh), float(l)*13. + 5., uSeedF));
+    if (h.x < uSlices*(l == 0 ? 1. : 0.45)) sh += (h.y - 0.5)*h.z*uShift*0.25;
+  }
+  return sh;
+}
+
+vec4 sampleAt(vec2 px, float sh){
+  vec2 sp = (px + vec2(sh*uRes.y, 0.) - 0.5*uRes)/uRes.y*uViewH;
+  vec3 ro = uTarget + uCamR*sp.x + uCamU*sp.y - uCamD*150.;
+  float pw = uViewH/uRes.y/uSS;
+  vec2 tb = boxHit(ro, uCamD, uBmin, uBmax);
+  float tS = 1e9;
+  vec4 acc = vec4(0.);
+  if (tb.x < tb.y){
+    float t = max(tb.x, 0.), d = 1e9;
+    for (int i = 0; i < 240; i++){
+      d = map(ro + uCamD*t);
+      if (d < pw*0.35 || t > tb.y) break;
+      t += d;
+    }
+    if (d < pw*1.5 && t <= tb.y){
+      tS = t;
+      vec3 p = ro + uCamD*t;
+      acc = surface(p, normalAt(p, pw*0.5), pw);
+    }
+  }
+  if (uPN > 0) acc = prisms(ro, uCamD, tS, acc, pw);
+  return acc;
+}
+void main(){
+  float sh = uSlices > 0. ? sliceShift(gl_FragCoord.y/uRes.y) : 0.;
+  vec4 acc = vec4(0.);
+  int n = int(uSS);
+  for (int j = 0; j < 3; j++) for (int i = 0; i < 3; i++){
+    if (i >= n || j >= n) continue;
+    acc += sampleAt(gl_FragCoord.xy - 0.5 + (vec2(i, j) + 0.5)/uSS, sh);
+  }
+  oCol = acc/(uSS*uSS);
+}
+`;
+
+// bloom: a 4x4 box downsample (with a soft threshold on the first one) and a separable gaussian
+const FS_DOWN = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc; uniform vec2 uSrcRes, uDstRes; uniform float uThr, uFirst;
+out vec4 o;
+void main(){
+  vec2 uv = gl_FragCoord.xy/uDstRes, t = 1./uSrcRes;
+  vec4 c = 0.25*(texture(uSrc, uv + t*vec2(-1., -1.)) + texture(uSrc, uv + t*vec2(1., -1.))
+               + texture(uSrc, uv + t*vec2(-1., 1.)) + texture(uSrc, uv + t*vec2(1., 1.)));
+  // a soft threshold, and a cap so a few blown-out spots can't flood the picture with glow
+  if (uFirst > 0.5){ float l = max(c.r, max(c.g, c.b)); c.rgb *= smoothstep(uThr, uThr + 0.5, l)/(1. + 0.35*l); }
+  o = vec4(c.rgb, 1.);
+}`;
+const FS_BLUR = `#version 300 es
+precision highp float;
+uniform sampler2D uSrc; uniform vec2 uRes2, uDir; uniform float uSigma;
+out vec4 o;
+void main(){
+  vec2 uv = gl_FragCoord.xy/uRes2, st = uDir/uRes2;
+  float s = max(uSigma, 0.6);
+  int n = int(min(ceil(s*2.5), 48.));
+  vec3 acc = texture(uSrc, uv).rgb; float ws = 1.;
+  for (int i = 1; i <= 48; i++){
+    if (i > n) break;
+    float w = exp(-0.5*float(i*i)/(s*s));
+    acc += (texture(uSrc, uv + st*float(i)).rgb + texture(uSrc, uv - st*float(i)).rgb)*w;
+    ws += 2.*w;
+  }
+  o = vec4(acc/ws, 1.);
+}`;
+const FS_POST = COMMON + `
+out vec4 o;
+uniform sampler2D uTex, uB1, uB2;
+uniform vec2 uRes;
+uniform vec3 uBg;
+uniform float uBloom, uExposure, uContrast, uVignette, uGrain, uAberr, uBgGrad, uTransp, uPremul;
+vec3 toSrgb(vec3 c){ c = max(c, 0.); return mix(c*12.92, 1.055*pow(c, vec3(1./2.4)) - 0.055, step(0.0031308, c)); }
+// leaves everything below 0.8 alone, so the background keeps its exact colour
+vec3 shoulder(vec3 x){ return mix(x, 0.8 + 0.2*(1. - exp(-(x - 0.8)/0.2)), step(0.8, x)); }
+void main(){
+  vec2 uv = gl_FragCoord.xy/uRes;
+  vec4 c = texture(uTex, uv);
+  if (uAberr > 0.){
+    vec2 d = (uv - 0.5)*uAberr*0.012;
+    c.r = texture(uTex, uv + d).r; c.b = texture(uTex, uv - d).b;
+  }
+  vec3 col = c.rgb;
+  if (uBloom > 0.) col += (texture(uB1, uv).rgb*0.55 + texture(uB2, uv).rgb*0.75)*uBloom;
+  float a = 1.;
+  if (uTransp > 0.5) a = clamp(max(c.a, max(col.r, max(col.g, col.b))), 0., 1.);
+  else col += uBg*(1. + uBgGrad*(uv.y - 0.5)*1.2)*(1. - c.a);
+  col *= uExposure;
+  float r = length((uv - 0.5)*vec2(uRes.x/uRes.y, 1.));
+  col *= 1. - uVignette*smoothstep(0.25, 0.95, r);
+  if (uTransp > 0.5) col /= max(a, 1e-4);
+  vec3 g = toSrgb(shoulder(col));
+  g = (g - 0.5)*uContrast + 0.5;
+  vec3 h = h3(vec3(gl_FragCoord.xy, uSeedF + 3.));
+  g = clamp(g + (h.x + h.y - 1.)*uGrain, 0., 1.);
+  o = uTransp > 0.5 ? vec4(g*(uPremul > 0.5 ? a : 1.), a) : vec4(g, 1.);
+}`;
+
+// ---------- gl ----------
+const cv = document.getElementById('cv');
+const gl = cv.getContext('webgl2', { antialias: false, alpha: false, depth: false, stencil: false, powerPreference: 'high-performance' });
+let PM, PD, PB, PP;
+function compile(type, src) {
+  const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+  if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+  return s;
+}
+function program(fs) {
+  const p = gl.createProgram();
+  gl.attachShader(p, compile(gl.VERTEX_SHADER, VS)); gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+  gl.linkProgram(p);
+  if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(p));
+  const u = {};
+  for (let i = 0, n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS); i < n; i++) {
+    const name = gl.getActiveUniform(p, i).name;
+    u[name.replace(/\[0\]$/, '')] = gl.getUniformLocation(p, name);
+  }
+  return { p, u };
+}
+function initGL() {
+  if (!gl.getExtension('EXT_color_buffer_float')) throw new Error('нужен EXT_color_buffer_float');
+  PM = program(FS_MAIN); PD = program(FS_DOWN); PB = program(FS_BLUR); PP = program(FS_POST);
+  gl.bindVertexArray(gl.createVertexArray());
+}
+function makeTex(w, h, fmt = gl.RGBA16F, filt = gl.LINEAR) {
+  const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+  gl.texStorage2D(gl.TEXTURE_2D, 1, fmt, w, h);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filt);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filt);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+  gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+  return t;
+}
+function makeFb(tex) {
+  const f = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, f);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, tex, 0);
+  const ok = gl.checkFramebufferStatus(gl.FRAMEBUFFER) === gl.FRAMEBUFFER_COMPLETE;
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  if (!ok) throw new Error('framebuffer incomplete');
+  return f;
+}
+// the picture in float, plus two bloom levels at 1/4 and 1/16 size
+function makeTargets(w, h) {
+  const T = { w, h, w1: Math.max(1, Math.ceil(w / 4)), h1: Math.max(1, Math.ceil(h / 4)), w2: Math.max(1, Math.ceil(w / 16)), h2: Math.max(1, Math.ceil(h / 16)) };
+  try {
+    for (const [k, ww, hh] of [['m', w, h], ['a1', T.w1, T.h1], ['b1', T.w1, T.h1], ['a2', T.w2, T.h2], ['b2', T.w2, T.h2]]) {
+      T[k] = makeTex(ww, hh); T['f' + k] = makeFb(T[k]);
+    }
+  } catch (e) { freeTargets(T); throw e; }
+  return T;
+}
+function freeTargets(T) {
+  for (const k of ['m', 'a1', 'b1', 'a2', 'b2', 'out']) {
+    if (T[k]) gl.deleteTexture(T[k]);
+    if (T['f' + k]) gl.deleteFramebuffer(T['f' + k]);
+  }
+}
+const pool = [];
+function getTargets(w, h, avoid) {
+  let T = pool.find(t => t.w === w && t.h === h && t !== avoid);
+  if (!T) {
+    T = makeTargets(w, h); pool.push(T);
+    while (pool.length > 3) {
+      const i = pool.findIndex(t => t !== avoid && t !== T);
+      if (i < 0) break;
+      freeTargets(pool[i]); pool.splice(i, 1);
+    }
+  }
+  return T;
+}
+
+// ---------- drawing ----------
+const uName = k => 'u' + k[0].toUpperCase() + k.slice(1);
+const SPECRGB = new Float32Array(specColors().flat());
+const fBa = new Float32Array(MAXB * 4), fBb = new Float32Array(MAXB * 4), fBm = new Float32Array(MAXB * 4);
+const fPa = new Float32Array(MAXP * 4), fPb = new Float32Array(MAXP * 4);
+const fFa = new Float32Array(MAXF * 4), fFb = new Float32Array(MAXF * 4), fFc = new Float32Array(MAXF * 4), fFd = new Float32Array(MAXF * 4);
+let seedF = 0;
+
+function renderMain(T, q, y0, y1) {
+  const sc = getScene(), u = PM.u;
+  const zf1 = sc.zBase - S.dissolveOff, zf0 = zf1 - S.dissolve;
+  const cam = camera(T.w / T.h, sc, zf0, zf1);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, T.fm);
+  gl.viewport(0, 0, T.w, T.h);
+  gl.enable(gl.SCISSOR_TEST); gl.scissor(0, y0, T.w, y1 - y0);
+  gl.useProgram(PM.p);
+  for (const [k, , , , , , x = {}] of SPEC) {
+    const loc = u[uName(k)];
+    if (!loc) continue;
+    if (x.color) gl.uniform3fv(loc, lin3(S[k])); else gl.uniform1f(loc, S[k]);
+  }
+  gl.uniform2f(u.uRes, T.w, T.h);
+  gl.uniform1f(u.uSS, q);
+  gl.uniform1f(u.uSeedF, seedF);
+  gl.uniform1f(u.uTime, tAnim);
+  gl.uniform1f(u.uViewH, cam.viewH);
+  gl.uniform3fv(u.uCamR, cam.R); gl.uniform3fv(u.uCamU, cam.U); gl.uniform3fv(u.uCamD, cam.D); gl.uniform3fv(u.uTarget, cam.target);
+  gl.uniform1f(u.uZf0, zf0); gl.uniform1f(u.uZf1, zf1);
+  const la = S.lAz * D2R, le = S.lEl * D2R, th = S.angle * D2R;
+  gl.uniform3f(u.uL, Math.cos(la) * Math.cos(le), Math.sin(la) * Math.cos(le), Math.sin(le));
+  gl.uniform3f(u.uMA, -Math.sin(th), Math.cos(th), 0);
+  gl.uniform3f(u.uMB, Math.cos(th), Math.sin(th), 0);
+
+  let bx0 = 1e9, bx1 = -1e9, by0 = 1e9, by1 = -1e9, bz1 = -1e9;
+  const K = 0.9 * S.fillet, bev = S.bevel * 0.12;
+  sc.B.forEach((b, i) => {
+    const k = b.kf * K;
+    fBa.set([(b.x0 + b.x1) / 2, (b.y0 + b.y1) / 2, (b.x1 - b.x0) / 2, (b.y1 - b.y0) / 2], i * 4);
+    fBb.set([b.z1, b.z0, k, Math.min(bev, 0.45 * Math.min(b.x1 - b.x0, b.y1 - b.y0))], i * 4);
+    fBm.set([b.tone, b.pal, b.fill, 0], i * 4);
+    bx0 = Math.min(bx0, b.x0 - k); bx1 = Math.max(bx1, b.x1 + k); by0 = Math.min(by0, b.y0 - k); by1 = Math.max(by1, b.y1 + k); bz1 = Math.max(bz1, b.z1);
+  });
+  sc.P.forEach((p, i) => {
+    fPa.set([p.cx, p.cy, p.cz, p.hue], i * 4);
+    fPb.set([p.hx, p.hy, p.hz, p.drip], i * 4);
+  });
+  sc.F.forEach((f, i) => {
+    fFa.set([f.axis, f.c0, f.c1, f.zt], i * 4);
+    fFb.set([f.vc, f.hw, f.amp, f.mask], i * 4);
+    fFc.set([f.spread, f.len, f.disp, f.kind + 0.999 * f.ph], i * 4);
+    fFd.set([f.h, 0, 0, 0], i * 4);
+  });
+  gl.uniform4fv(u.uBa, fBa); gl.uniform4fv(u.uBb, fBb); gl.uniform4fv(u.uBm, fBm); gl.uniform1i(u.uBN, sc.B.length);
+  gl.uniform4fv(u.uPa, fPa); gl.uniform4fv(u.uPb, fPb); gl.uniform1i(u.uPN, sc.P.length);
+  gl.uniform4fv(u.uFa, fFa); gl.uniform4fv(u.uFb, fFb); gl.uniform4fv(u.uFc, fFc); gl.uniform4fv(u.uFd, fFd);
+  gl.uniform1i(u.uFN, sc.F.length);
+  gl.uniform3fv(u.uBmin, [bx0 - 0.1, by0 - 0.1, zf0 - 0.05]);
+  gl.uniform3fv(u.uBmax, [bx1 + 0.1, by1 + 0.1, bz1 + 0.1]);
+  const pal = new Float32Array(24);
+  for (let i = 0; i < 8; i++) pal.set(lin3(S.pal[Math.min(i, S.pal.length - 1)]), i * 3);
+  gl.uniform3fv(u.uPal, pal); gl.uniform1i(u.uPalN, Math.min(8, S.pal.length));
+  gl.uniform3fv(u.uSpec, SPECRGB);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  gl.disable(gl.SCISSOR_TEST);
+}
+function useAt(P, fb, w, h) { gl.bindFramebuffer(gl.FRAMEBUFFER, fb); gl.viewport(0, 0, w, h); gl.useProgram(P.p); }
+function bindTex(unit, tex, loc) { gl.activeTexture(gl.TEXTURE0 + unit); gl.bindTexture(gl.TEXTURE_2D, tex); gl.uniform1i(loc, unit); }
+function blur(src, fb, w, h, dir, sigma) {
+  useAt(PB, fb, w, h); bindTex(0, src, PB.u.uSrc);
+  gl.uniform2f(PB.u.uRes2, w, h); gl.uniform2f(PB.u.uDir, dir[0], dir[1]); gl.uniform1f(PB.u.uSigma, sigma);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+// glow radii are fractions of the picture height, so exports glow like the screen
+function bloomPasses(T) {
+  useAt(PD, T.fa1, T.w1, T.h1); bindTex(0, T.m, PD.u.uSrc);
+  gl.uniform2f(PD.u.uSrcRes, T.w, T.h); gl.uniform2f(PD.u.uDstRes, T.w1, T.h1);
+  gl.uniform1f(PD.u.uThr, S.bloomThr); gl.uniform1f(PD.u.uFirst, 1);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  const s1 = S.bloomR * 0.006 * T.h / 4, s2 = S.bloomR * 0.03 * T.h / 16;
+  blur(T.a1, T.fb1, T.w1, T.h1, [1, 0], s1); blur(T.b1, T.fa1, T.w1, T.h1, [0, 1], s1);
+  useAt(PD, T.fa2, T.w2, T.h2); bindTex(0, T.a1, PD.u.uSrc);
+  gl.uniform2f(PD.u.uSrcRes, T.w1, T.h1); gl.uniform2f(PD.u.uDstRes, T.w2, T.h2); gl.uniform1f(PD.u.uFirst, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+  blur(T.a2, T.fb2, T.w2, T.h2, [1, 0], s2); blur(T.b2, T.fa2, T.w2, T.h2, [0, 1], s2);
+}
+function composite(T, fb, w, h, transp, premul) {
+  useAt(PP, fb, w, h);
+  bindTex(0, T.m, PP.u.uTex); bindTex(1, T.a1, PP.u.uB1); bindTex(2, T.a2, PP.u.uB2);
+  gl.uniform2f(PP.u.uRes, w, h);
+  gl.uniform3fv(PP.u.uBg, lin3(S.bg));
+  for (const k of POST_KEYS) if (PP.u[uName(k)]) gl.uniform1f(PP.u[uName(k)], S[k]);
+  gl.uniform1f(PP.u.uTransp, transp); gl.uniform1f(PP.u.uPremul, premul); gl.uniform1f(PP.u.uSeedF, seedF);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+}
+
+// ---------- layout / render loop ----------
+// Every change starts a job. While something moves it is one quick frame at about one pixel per css
+// pixel; once it stops the full picture is rendered in bands over a few frames and shown when complete.
+const stage = document.getElementById('stage');
+let front = null, job = null, dirty = true, postDirty = false, exporting = false, interactUntil = 0;
+let budget = 1.5e6, tPrev = performance.now();
+function resize() {
+  const ar = FORMATS[format][1], m = 36;
+  const W = stage.clientWidth - m * 2, H = stage.clientHeight - m * 2;
+  let w = W, h = w / ar; if (h > H) { h = H; w = h * ar; }
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  cv.style.width = Math.round(w) + 'px'; cv.style.height = Math.round(h) + 'px';
+  cv.width = Math.max(1, Math.round(w * dpr)); cv.height = Math.max(1, Math.round(h * dpr));
+  // resizing clears the canvas: show the last picture stretched until the new one is ready
+  dirty = true; if (front) postDirty = true;
+}
+function stepJob() {
+  const { T, q } = job;
+  const rows = job.moving ? T.h : clamp(Math.floor(budget / (T.w * q * q)), 8, T.h);
+  const top = T.h - job.y, y0 = Math.max(0, top - rows);
+  renderMain(T, q, y0, top);
+  job.y += top - y0;
+  if (job.y >= T.h) { T.final = !job.moving; front = T; job = null; postDirty = true; }
+}
+function present() {
+  if (S.bloom > 0) bloomPasses(front);
+  composite(front, null, cv.width, cv.height, 0, 1);
+}
+function frame(now) {
+  const dt = now - tPrev; tPrev = now;
+  if (!exporting) {
+    if (animating) {
+      tAnim += dt / 1000;
+      if (S.spin) { S.az = wrapDeg(S.az + S.spin * dt * 0.02); syncCtrl(['az']); }
+      dirty = true;
+    }
+    const moving = animating || now < interactUntil;
+    if (!dirty && !moving && !job && front && !front.final) dirty = true;
+    if (dirty) {
+      dirty = false;
+      const sc = moving ? Math.min(1, 1.1 / Math.min(window.devicePixelRatio || 1, 2)) : 1;
+      const w = Math.max(1, Math.round(cv.width * sc)), h = Math.max(1, Math.round(cv.height * sc));
+      try { job = { T: getTargets(w, h, front), q: moving ? 1 : quality, y: 0, moving }; }
+      catch (e) { status('не хватило памяти: ' + e.message); job = null; }
+    }
+    if (job) {
+      if (dt > 45) budget = Math.max(2e5, budget * 0.75); else if (dt < 22) budget = Math.min(1.2e7, budget * 1.1);
+      stepJob();
+    }
+    if (postDirty && front) { postDirty = false; present(); }
+  }
+  requestAnimationFrame(frame);
+}
+let hashTimer;
+function changed(k) {
+  if (k && POST_KEYS.has(k)) postDirty = true; else dirty = true;
+  clearTimeout(hashTimer);
+  hashTimer = setTimeout(() => history.replaceState(null, '', '#' + btoa(encodeURIComponent(JSON.stringify({ seed, format, S })))), 300);
+}
+
+// ---------- random ----------
+// a pale thread colour and a light grey, then accents around the wheel, at least one of them dark
+function randPalette(r) {
+  const h0 = r.range(0, 360);
+  const out = [oklch2hex(r.range(0.92, 0.97), r.range(0, 0.02), h0), oklch2hex(r.range(0.78, 0.86), r.range(0, 0.02), h0 + 20)];
+  for (let i = 0, n = r.int(2, 4); i < n; i++) {
+    const dark = i === 0 || r.chance(0.35);
+    out.push(oklch2hex(dark ? r.range(0.25, 0.4) : r.range(0.55, 0.75), r.range(0.04, dark ? 0.1 : 0.16), h0 + r.range(60, 300)));
+  }
+  return out;
+}
+function randomState(sd) {
+  const r = makeRng(sd + ':look'), s = { ...DEFAULTS };
+  s.arch = 0;
+  s.walls = r.int(1, 4); s.wallH = r.range(0.75, 1.3); s.wallT = r.range(0.6, 1.8);
+  s.terr = r.int(1, 4); s.blocks = r.int(0, 5);
+  s.prisms = r.wpick([0, r.int(3, 8), r.int(8, 16)], [1, 3, 2]); s.prismSize = r.range(0.7, 1.4);
+  s.fillet = r.range(0.4, 1.5); s.bevel = r.chance(0.2) ? r.range(0.1, 0.7) : 0;
+  s.density = r.range(16, 40); s.lineW = r.range(0.24, 0.45);
+  s.famB = r.chance(0.8) ? r.range(0.6, 1) : r.range(0, 0.3); s.famC = r.chance(0.15) ? r.range(0.15, 0.5) : 0;
+  s.angle = r.chance(0.8) ? 0 : r.pick([15, 30, 45, -30, -15]);
+  s.lineVar = r.range(0.3, 0.7); s.gaps = r.range(0, 0.2); s.groups = r.range(0.1, 0.6); s.jitter = r.range(0.05, 0.4);
+  s.edges = r.chance(0.5) ? r.range(0.1, 0.6) : 0;
+  s.flows = r.int(2, 5); s.flowAmt = r.range(0.9, 1.8); s.rainbow = r.range(1.2, 3); s.flowW = r.range(0.6, 1.8);
+  s.spread = r.range(0.1, 0.8); s.flowLen = r.range(1.5, 6); s.rise = r.range(0.5, 1.2); s.streaks = r.range(0.3, 0.9);
+  s.flowEdge = r.range(0.15, 0.7);
+  s.disp = r.range(0.2, 1.2); s.smoke = r.range(0.2, 0.9); s.wobble = r.range(0, 0.8); s.haze = r.range(0.1, 0.35);
+  s.prismOp = r.range(0.5, 0.95); s.cells = r.range(1.5, 6); s.cellAmt = r.range(0.15, 0.7); s.prismSat = r.range(0.6, 1.3);
+  s.irid = r.range(0.2, 1.5); s.drip = r.chance(0.6) ? r.range(0.3, 2.5) : 0; s.prismLines = r.range(0.1, 0.7); s.prismGlow = r.range(0.15, 0.6);
+  s.slices = r.chance(0.5) ? r.range(0.04, 0.3) : 0; s.shift = r.range(0.05, 0.4); s.sliceH = r.range(0.004, 0.03); s.aberr = r.range(0, 0.35);
+  // background: mostly a mid grey like the reference, sometimes night or paper
+  const bgk = r.wpick(['grey', 'dark', 'light'], [6.5, 2.5, 1]);
+  s.bg = bgk === 'grey' ? oklch2hex(r.range(0.44, 0.56), r.range(0, 0.008), r.range(0, 360))
+       : bgk === 'dark' ? oklch2hex(r.range(0.12, 0.2), r.range(0, 0.025), r.range(200, 320))
+       : oklch2hex(r.range(0.87, 0.92), r.range(0, 0.015), r.range(50, 100));
+  const light = PALETTES['чернила'], others = ['референс', 'мел', 'ржавчина', 'неон', 'лёд', 'закат'].map(k => PALETTES[k]);
+  if (bgk === 'light') {
+    s.pal = (r.chance(0.7) ? light : PALETTES['ржавчина']).slice();
+    s.flowInk = r.range(0.8, 1); s.bloom = 0; s.floorTone = r.range(0.7, 1.1); s.fill = r.range(0.15, 0.35);
+  } else {
+    s.pal = r.chance(0.65) ? r.pick(others).slice() : randPalette(r);
+    s.flowInk = 0; s.floorTone = r.range(0.06, 0.3); s.fill = r.range(0.2, 0.5);
+    s.bloom = bgk === 'dark' ? r.range(0.3, 0.7) : r.range(0.4, 0.9);
+    if (bgk === 'dark') s.flowAmt *= 0.75;
+  }
+  s.shade = r.range(0.2, 0.8); s.lAz = Math.round(r.range(-150, 30)); s.lEl = Math.round(r.range(15, 50));
+  s.dissolve = r.range(1.5, 6); s.dissolveOff = r.range(-0.5, 1.5);
+  s.bloomR = r.range(0.6, 1.6); s.bloomThr = r.range(0.5, 1); s.grain = r.range(0.01, 0.05);
+  s.az = r.chance(0.7) ? -45 : Math.round(r.range(-80, -10)); s.el = Math.round(r.range(24, 40));
+  s.flowCol = r.chance(0.7) ? '#f4f6ff' : oklch2hex(0.95, r.range(0.02, 0.08), r.range(0, 360));
+  for (const [k, , mn, mx, st, , x = {}] of SPEC) if (!x.color && !x.sel) s[k] = clamp(Math.round(s[k] / st) * st, mn, mx);
+  return s;
+}
+const NO_MUT = new Set(['arch', 'walls', 'terr', 'blocks', 'prisms', 'flows', 'az', 'el', 'zoom', 'panX', 'panY', 'angle', 'spin']);
+function mutate() {
+  const r = makeRng(seed + ':' + Math.random());
+  for (const [k, , mn, mx, st, , x = {}] of SPEC) {
+    if (x.sel || x.color || NO_MUT.has(k) || !r.chance(0.35)) continue;
+    S[k] = clamp(Math.round((S[k] + (mx - mn) * r.range(-0.06, 0.06)) / st) * st, mn, mx);
+  }
+  refreshUI(); changed(); status('мутация');
+}
+function recolor() {
+  const r = makeRng(randSeed());
+  S.pal = r.chance(0.4) ? r.pick(Object.values(PALETTES)).slice() : randPalette(r);
+  buildPalUI(); changed(); status('новая палитра');
+}
+
+// ---------- UI ----------
+const ctrlEls = {};
+function fmt(v, st) { return st >= 1 ? String(Math.round(v)) : (+v).toFixed(st < 0.01 ? 3 : st < 0.1 ? 2 : 1); }
+function buildUI() {
+  const box = document.getElementById('controls');
+  let grp, grpName;
+  for (const [k, label, mn, mx, st, g, x = {}] of SPEC) {
+    if (g !== grpName) {
+      grpName = g; grp = document.createElement('div'); grp.className = 'grp';
+      const h = document.createElement('h2'); h.textContent = g;
+      const gg = grp; h.onclick = () => gg.classList.toggle('closed');
+      grp.appendChild(h); box.appendChild(grp);
+    }
+    const row = document.createElement('div'); row.className = 'row';
+    row.innerHTML = `<label title="${label}">${label}</label>`;
+    let inp, out = document.createElement('output');
+    if (x.sel) {
+      inp = document.createElement('select');
+      x.sel.forEach((o, i) => inp.add(new Option(o, i)));
+      inp.onchange = () => { S[k] = +inp.value; refreshUI(); changed(k); };
+      out = document.createElement('span');
+    } else if (x.color) {
+      inp = document.createElement('input'); inp.type = 'color';
+      inp.oninput = () => { S[k] = inp.value; changed(k); };
+      out = document.createElement('span');
+    } else {
+      inp = document.createElement('input'); inp.type = 'range'; inp.min = mn; inp.max = mx; inp.step = st;
+      inp.oninput = () => {
+        S[k] = +inp.value; out.value = fmt(S[k], st); refreshVis();
+        if (!POST_KEYS.has(k)) interactUntil = performance.now() + 250;
+        changed(k);
+      };
+      inp.ondblclick = () => { S[k] = DEFAULTS[k]; refreshUI(); changed(k); };
+    }
+    row.append(inp, out); grp.appendChild(row);
+    ctrlEls[k] = { row, inp, out, st, x };
+  }
+}
+function buildPalUI() {
+  const row = document.getElementById('palRow'); row.innerHTML = '';
+  S.pal.forEach((c, i) => {
+    const inp = document.createElement('input'); inp.type = 'color'; inp.value = c;
+    inp.oninput = () => { S.pal[i] = inp.value; changed(); };
+    row.appendChild(inp);
+  });
+}
+function syncCtrl(keys) {
+  for (const k of keys) { const { inp, out, st } = ctrlEls[k]; inp.value = S[k]; out.value = fmt(S[k], st); }
+}
+function refreshVis() {
+  for (const k in ctrlEls) { const { row, x } = ctrlEls[k]; row.classList.toggle('hide', !!(x.show && !x.show(S))); }
+}
+function refreshUI() {
+  for (const k in ctrlEls) {
+    const { inp, out, st, x } = ctrlEls[k];
+    inp.value = S[k];
+    if (!x.sel && !x.color) out.value = fmt(S[k], st);
+  }
+  refreshVis();
+  document.getElementById('seed').value = seed;
+  document.getElementById('format').value = format;
+  buildPalUI();
+}
+function status(t) { document.getElementById('status').textContent = t; }
+const setSeed = sd => { seed = sd; seedF = hashStr(seed) % 65521; };
+
+function newScene(sd) {
+  setSeed(sd || randSeed());
+  S = randomState(seed);
+  refreshUI(); changed(); status('seed ' + seed);
+}
+function applyPreset(name) {
+  S = presetState(name);
+  if (PRESETS[name].seed) setSeed(PRESETS[name].seed);
+  refreshUI(); changed(); status('пресет: ' + name);
+}
+
+// big exports render band by band, one per frame, so a slow GPU never stalls long enough to lose the context
+function save() {
+  if (exporting) return;
+  const ar = FORMATS[format][1];
+  let w, h; if (ar >= 1) { w = expSize; h = Math.round(expSize / ar); } else { h = expSize; w = Math.round(expSize * ar); }
+  const maxV = gl.getParameter(gl.MAX_VIEWPORT_DIMS), maxS = Math.min(maxV[0], maxV[1], gl.getParameter(gl.MAX_TEXTURE_SIZE));
+  if (Math.max(w, h) > maxS) { const k = maxS / Math.max(w, h); w = Math.floor(w * k); h = Math.floor(h * k); }
+  let T;
+  try { T = makeTargets(w, h); T.out = makeTex(w, h, gl.RGBA8, gl.NEAREST); T.fout = makeFb(T.out); }
+  catch (e) { if (T) freeTargets(T); status('не хватило памяти: ' + e.message); return; }
+  exporting = true;
+  const transp = expBg, q = 3;
+  let y = 0;
+  const step = () => {
+    const rows = clamp(Math.floor(Math.min(budget, 3e6) / (w * q * q)), 4, h - y);
+    renderMain(T, q, h - y - rows, h - y);
+    gl.flush();
+    y += rows;
+    status(`рендер ${w}×${h} — ${Math.round(y / h * 100)}%`);
+    if (y < h) { requestAnimationFrame(step); return; }
+    if (S.bloom > 0) bloomPasses(T);
+    composite(T, T.fout, w, h, transp, 0);
+    const px = new Uint8Array(w * h * 4);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, T.fout);
+    gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+    gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+    freeTargets(T);
+    exporting = false; dirty = true;
+    const c2 = document.createElement('canvas'); c2.width = w; c2.height = h;
+    const ctx = c2.getContext('2d'), img = ctx.createImageData(w, h), row = w * 4;
+    for (let yy = 0; yy < h; yy++) img.data.set(px.subarray((h - 1 - yy) * row, (h - yy) * row), yy * row);
+    ctx.putImageData(img, 0, 0);
+    c2.toBlob(b => {
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(b); a.download = `linefall-${seed}-${w}x${h}${transp ? '-alpha' : ''}.png`; a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      status('сохранено ' + a.download);
+    }, 'image/png');
+  };
+  status(`рендер ${w}×${h}…`);
+  requestAnimationFrame(step);
+}
+
+function initPointer() {
+  let drag = null;
+  cv.addEventListener('pointerdown', e => {
+    drag = { x: e.clientX, y: e.clientY, mode: e.altKey ? 'pan' : e.shiftKey ? 'light' : 'cam' };
+    cv.setPointerCapture(e.pointerId); cv.classList.add('drag');
+  });
+  cv.addEventListener('pointermove', e => {
+    if (!drag) return;
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (drag.mode === 'light') { S.lAz = wrapDeg(S.lAz + dx * 0.5); syncCtrl(['lAz']); }
+    else if (drag.mode === 'pan') {
+      S.panX = clamp(S.panX + dx * 2 / cv.clientWidth, -2, 2); S.panY = clamp(S.panY - dy * 2 / cv.clientHeight, -2, 2);
+      syncCtrl(['panX', 'panY']);
+    } else { S.az = wrapDeg(S.az - dx * 0.4); S.el = clamp(S.el + dy * 0.3, 5, 89); syncCtrl(['az', 'el']); }
+    interactUntil = performance.now() + 250; changed();
+  });
+  const end = () => { drag = null; cv.classList.remove('drag'); };
+  cv.addEventListener('pointerup', end); cv.addEventListener('pointercancel', end);
+  cv.addEventListener('wheel', e => {
+    e.preventDefault();
+    S.zoom = clamp(S.zoom * Math.exp(-e.deltaY * 0.001), 0.3, 4); syncCtrl(['zoom']);
+    interactUntil = performance.now() + 250; changed();
+  }, { passive: false });
+}
+
+function init() {
+  if (!gl) { status('WebGL2 недоступен'); return; }
+  try { initGL(); } catch (e) { status('shader: ' + e.message); console.error(e); return; }
+  buildUI();
+  const sel = (id, opts, val, on) => {
+    const el = document.getElementById(id);
+    for (const k in opts) el.add(new Option(Array.isArray(opts[k]) ? opts[k][0] : opts[k], k));
+    el.value = val; el.onchange = () => on(el.value);
+  };
+  sel('format', FORMATS, format, v => { format = v; resize(); changed(); });
+  sel('exp', EXPORTS, expSize, v => expSize = +v);
+  sel('expBg', EXP_BG, expBg, v => expBg = +v);
+  sel('quality', QUALITY, quality, v => { quality = +v; dirty = true; });
+  const pr = document.getElementById('presets');
+  Object.keys(PRESETS).forEach((n, i) => {
+    const b = document.createElement('button'); b.textContent = `${i + 1} ${n}`; b.onclick = () => applyPreset(n); pr.appendChild(b);
+  });
+  const pSel = document.getElementById('palSel');
+  pSel.add(new Option('—', ''));
+  for (const k in PALETTES) pSel.add(new Option(k, k));
+  pSel.onchange = () => { if (pSel.value) { S.pal = PALETTES[pSel.value].slice(); buildPalUI(); changed(); } pSel.value = ''; };
+  document.getElementById('pAdd').onclick = () => { if (S.pal.length < 8) { S.pal.push(S.pal[S.pal.length - 1]); buildPalUI(); changed(); } };
+  document.getElementById('pDel').onclick = () => { if (S.pal.length > 2) { S.pal.pop(); buildPalUI(); changed(); } };
+  document.getElementById('pRev').onclick = () => { S.pal.reverse(); buildPalUI(); changed(); };
+  document.getElementById('pShuf').onclick = () => {
+    for (let i = S.pal.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [S.pal[i], S.pal[j]] = [S.pal[j], S.pal[i]]; }
+    buildPalUI(); changed();
+  };
+  document.getElementById('pRnd').onclick = () => { S.pal = randPalette(makeRng(randSeed())); buildPalUI(); changed(); };
+
+  document.getElementById('bNew').onclick = () => newScene();
+  document.getElementById('bDice').onclick = () => newScene();
+  document.getElementById('bMut').onclick = mutate;
+  document.getElementById('bCol').onclick = recolor;
+  document.getElementById('bSave').onclick = save;
+  const bA = document.getElementById('bAnim');
+  const toggleAnim = () => { animating = !animating; bA.classList.toggle('on', animating); dirty = true; };
+  bA.onclick = toggleAnim;
+  document.getElementById('seed').onchange = e => newScene(e.target.value.trim() || randSeed());
+  initPointer();
+  addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' && e.target.type === 'text') return;
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    const k = e.key.toLowerCase(), names = Object.keys(PRESETS);
+    if (k === ' ' || k === 'r') { e.preventDefault(); newScene(); }
+    else if (k === 'm') mutate();
+    else if (k === 'c') recolor();
+    else if (k === 'a') toggleAnim();
+    else if (k === 's') save();
+    else if (k === 'h') { document.body.classList.toggle('nopanel'); resize(); }
+    else if (k >= '1' && k <= '9' && names[+k - 1]) applyPreset(names[+k - 1]);
+  });
+  addEventListener('resize', resize);
+  cv.addEventListener('webglcontextlost', e => { e.preventDefault(); status('WebGL контекст потерян — обновите страницу'); });
+
+  let loaded = false;
+  setSeed(seed);
+  // short links: #seed=abc or #preset=name, optionally followed by &key=value overrides
+  const kv = Object.fromEntries(location.hash.slice(1).split('&').map(x => x.split('=').map(decodeURIComponent)));
+  if (kv.seed || PRESETS[kv.preset]) {
+    if (kv.preset && PRESETS[kv.preset]) { S = presetState(kv.preset); setSeed(PRESETS[kv.preset].seed || seed); }
+    if (kv.seed) { setSeed(kv.seed); if (!kv.preset) S = randomState(seed); }
+    for (const k in kv) if (k in DEFAULTS && k !== 'pal') S[k] = /^#/.test(kv[k]) ? kv[k] : +kv[k];
+    loaded = true;
+  } else if (location.hash.length > 1) {
+    try {
+      const st = JSON.parse(decodeURIComponent(atob(location.hash.slice(1))));
+      setSeed(st.seed || seed); format = FORMATS[st.format] ? st.format : format;
+      S = { ...DEFAULTS, ...st.S }; loaded = true;
+    } catch (e) { /* ignore broken hash */ }
+  }
+  if (!loaded) status('пресет: референс');
+  refreshUI(); resize();
+  requestAnimationFrame(frame);
+}
+init();
+</script>
+</body>
+</html>
